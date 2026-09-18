@@ -10,6 +10,9 @@
 //! `R32Uint` target and reading back one texel.
 
 pub mod camera;
+pub mod filter;
+pub mod labels;
+pub mod minimap;
 pub mod renderer;
 pub mod scene;
 
@@ -20,8 +23,14 @@ pub mod native;
 pub mod web;
 
 pub use camera::Camera2D;
+pub use filter::{apply_filter, compute_matches, is_active as filter_is_active, FilterStyle};
+pub use labels::{select_labels, LabelOptions, LabelPlacement};
+pub use minimap::{MinimapView, Rect as MinimapRect};
 pub use renderer::Renderer;
-pub use scene::{build as build_scene, EdgeVertex, NodeInstance, SceneData};
+pub use scene::{
+    build as build_scene, build_with as build_scene_with, BundleOptions, EdgeVertex, NodeInstance,
+    SceneData, SceneOptions,
+};
 
 /// Errors from the renderer / native driver.
 #[derive(Debug, thiserror::Error)]

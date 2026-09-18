@@ -58,6 +58,30 @@ impl Camera2D {
         Vec2::new(self.center.x + nx * h.x, self.center.y + ny * h.y)
     }
 
+    /// Convert a world position to a screen-pixel position (origin top-left,
+    /// +Y down). Exact inverse of [`screen_to_world`], used to place DOM label
+    /// overlays and to draw the minimap viewport rectangle.
+    ///
+    /// [`screen_to_world`]: Camera2D::screen_to_world
+    pub fn world_to_screen(&self, world: Vec2) -> Vec2 {
+        let h = self.half_extent();
+        // Guard against a degenerate (zero-size) view so we never divide by 0.
+        let nx = if h.x.abs() > 1e-9 {
+            (world.x - self.center.x) / h.x
+        } else {
+            0.0
+        };
+        let ny = if h.y.abs() > 1e-9 {
+            (world.y - self.center.y) / h.y
+        } else {
+            0.0
+        };
+        Vec2::new(
+            (nx + 1.0) * 0.5 * self.viewport.x,
+            (1.0 - ny) * 0.5 * self.viewport.y,
+        )
+    }
+
     /// Pan by a screen-pixel delta (e.g. from a mouse drag).
     pub fn pan_pixels(&mut self, delta: Vec2) {
         // Dragging right should move the world right (content follows cursor).
@@ -97,6 +121,36 @@ mod tests {
         };
         let w = cam.screen_to_world(Vec2::new(400.0, 300.0));
         assert!((w - cam.center).length() < 1e-3);
+    }
+
+    #[test]
+    fn world_to_screen_inverts_screen_to_world() {
+        let cam = Camera2D {
+            center: Vec2::new(-12.0, 7.5),
+            zoom: 3.25,
+            viewport: Vec2::new(1024.0, 768.0),
+        };
+        for &p in &[
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1024.0, 768.0),
+            Vec2::new(300.0, 500.0),
+            Vec2::new(1023.0, 1.0),
+        ] {
+            let world = cam.screen_to_world(p);
+            let back = cam.world_to_screen(world);
+            assert!((back - p).length() < 1e-2, "round trip failed for {p:?}");
+        }
+    }
+
+    #[test]
+    fn world_center_maps_to_screen_center() {
+        let cam = Camera2D {
+            center: Vec2::new(4.0, -9.0),
+            zoom: 1.5,
+            viewport: Vec2::new(800.0, 600.0),
+        };
+        let s = cam.world_to_screen(cam.center);
+        assert!((s - Vec2::new(400.0, 300.0)).length() < 1e-3);
     }
 
     #[test]

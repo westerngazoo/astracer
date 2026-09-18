@@ -69,10 +69,38 @@ impl WebViewer {
         })
     }
 
-    /// Replace the scene (e.g. after analyzing a new repository).
+    /// Replace the scene *and* reframe it (e.g. after analyzing a new repo).
     pub fn set_scene(&mut self, scene: &SceneData) {
         self.renderer = Renderer::new(&self.device, self.config.format, scene);
         self.camera.fit(scene.min.into(), scene.max.into());
+    }
+
+    /// Swap in a new scene while keeping the current camera. Used when the
+    /// scene changes but the view should not jump — toggling edge bundling or
+    /// re-coloring for a search filter (Features 3 & 4).
+    pub fn replace_scene(&mut self, scene: &SceneData) {
+        self.renderer = Renderer::new(&self.device, self.config.format, scene);
+    }
+
+    /// A copy of the current camera, so the frontend can run `lcw-render`'s pure
+    /// projection helpers (`select_labels`, `MinimapView`) against it.
+    pub fn camera(&self) -> Camera2D {
+        self.camera
+    }
+
+    /// Current viewport size in device px `[w, h]`.
+    pub fn viewport(&self) -> [f32; 2] {
+        self.camera.viewport.into()
+    }
+
+    /// Recenter the camera on a world point (minimap click-to-navigate).
+    pub fn center_on(&mut self, x: f32, y: f32) {
+        self.camera.center = Vec2::new(x, y);
+    }
+
+    /// Project a world point to canvas px (positions DOM label overlays).
+    pub fn world_to_screen(&self, x: f32, y: f32) -> [f32; 2] {
+        self.camera.world_to_screen(Vec2::new(x, y)).into()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

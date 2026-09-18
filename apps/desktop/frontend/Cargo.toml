@@ -33,6 +33,7 @@ features = [
     "HtmlElement",
     "HtmlCanvasElement",
     "HtmlInputElement",
+    "CanvasRenderingContext2d",
     "DomRect",
     "Event",
     "EventTarget",

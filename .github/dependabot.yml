@@ -1,0 +1,46 @@
+version: 2
+
+updates:
+  # Rust workspace: the root virtual manifest + every member crate share the
+  # root Cargo.lock.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Desktop backend (Tauri v2). Excluded from the workspace, so it carries its
+  # own Cargo.lock and needs a dedicated entry.
+  - package-ecosystem: cargo
+    directory: "/apps/desktop/src-tauri"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      desktop-src-tauri:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Desktop frontend (Leptos/WASM). Also out of the workspace with its own lock.
+  - package-ecosystem: cargo
+    directory: "/apps/desktop/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      desktop-frontend:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Keep the workflow actions (checkout, rust-cache, gh-release, ...) current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

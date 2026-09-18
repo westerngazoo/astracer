@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Needed to create the GitHub Release and upload the built assets.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Ship the `lcw` CLI (crate `lcw-cli`, binary `lcw`) as a release binary for
+  # the five supported host/target combinations.
+  # ---------------------------------------------------------------------------
+  cli:
+    name: lcw (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Intel macOS is cross-compiled from the Apple-Silicon runner (Apple
+          # clang targets both arches from one host); release only builds, never
+          # runs the binary, so cross-compiling is safe.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      # aarch64 Linux is cross-compiled from an x86_64 runner: install the GNU
+      # cross toolchain, which provides both the linker and the C cross-compiler
+      # that the tree-sitter grammars (built via the `cc` crate) need.
+      - name: Install aarch64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build lcw (release)
+        shell: bash
+        env:
+          # Point Cargo + the `cc` crate at the aarch64 cross tools (ignored for
+          # every other target).
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: cargo build -p lcw-cli --bin lcw --release --locked --target ${{ matrix.target }}
+
+      - name: Package archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="lcw"
+          tag="${GITHUB_REF_NAME}"
+          target="${{ matrix.target }}"
+          stage="${bin}-${tag}-${target}"
+          mkdir -p "dist/${stage}"
+          cp README.md "dist/${stage}/" 2>/dev/null || true
+          if [[ "${target}" == *windows* ]]; then
+            cp "target/${target}/release/${bin}.exe" "dist/${stage}/"
+            ( cd dist && 7z a "${stage}.zip" "${stage}" >/dev/null )
+            asset="dist/${stage}.zip"
+          else
+            cp "target/${target}/release/${bin}" "dist/${stage}/"
+            ( cd dist && tar -czf "${stage}.tar.gz" "${stage}" )
+            asset="dist/${stage}.tar.gz"
+          fi
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # Best-effort Tauri desktop bundle. `apps/desktop` lives outside the main
+  # workspace and needs the wasm frontend toolchain, so it is isolated here and
+  # allowed to fail without blocking the CLI release.
+  # ---------------------------------------------------------------------------
+  desktop:
+    name: desktop bundle (best-effort)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 Linux (webkit2gtk 4.1) system prerequisites.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Cache the two out-of-workspace crates (each has its own Cargo.lock).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop
+          workspaces: |
+            apps/desktop/src-tauri
+            apps/desktop/frontend
+
+      - name: Install trunk + tauri-cli
+        run: |
+          cargo install trunk --locked
+          cargo install tauri-cli --version "^2" --locked
+
+      # Runs `trunk build` (the frontend's beforeBuildCommand) then bundles.
+      - name: Build desktop bundle
+        working-directory: apps/desktop/src-tauri
+        run: cargo tauri build
+
+      - name: Upload desktop bundles to release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+          files: |
+            apps/desktop/src-tauri/target/release/bundle/**/*.AppImage
+            apps/desktop/src-tauri/target/release/bundle/**/*.deb
+            apps/desktop/src-tauri/target/release/bundle/**/*.rpm

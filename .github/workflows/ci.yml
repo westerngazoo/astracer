@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs for the same ref so pushes don't pile up CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Be resilient to flaky crates.io fetches.
+  CARGO_NET_RETRY: "10"
+# NOTE: every cargo invocation below passes `--locked` so CI builds the
+# committed Cargo.lock and fails loudly (rather than silently rewriting it) if a
+# manifest and the lockfile disagree.
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Workspace lints set clippy to `warn`; CI promotes them to hard errors.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default features only: the fast path never pulls `semantic`/`gpu`.
+      # `apps/desktop/*` is excluded from the workspace, so `--workspace`
+      # deliberately does not build the Tauri/wasm app here.
+      - run: cargo test --workspace --locked
+
+  features:
+    name: features (gpu layout)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `lcw-layout`'s `gpu` feature (wgpu compute) has a CPU fallback, so it
+      # runs green on a headless runner with no GPU adapter present.
+      - run: cargo test -p lcw-layout --features gpu --locked
+
+  semantic:
+    name: features (semantic / rust-analyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Heavy job kept separate: `lcw-engine`'s `semantic` feature pulls the
+      # rust-analyzer `ra_ap_*` crates, which are slow to compile. Cache
+      # aggressively with a dedicated, reusable key and keep it on failure.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: semantic
+          cache-on-failure: true
+      # `cargo check` (not test/build): we only need it to compile, not link.
+      - run: cargo check -p lcw-engine --features semantic --locked

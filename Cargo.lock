@@ -1430,6 +1430,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "lcw-adapter-go"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "lcw-core",
+ "serde_json",
+ "tree-sitter",
+ "tree-sitter-go",
+]
+
+[[package]]
+name = "lcw-adapter-py"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "lcw-core",
+ "serde_json",
+ "tree-sitter",
+ "tree-sitter-python",
+]
+
+[[package]]
 name = "lcw-adapter-ra"
 version = "0.1.0"
 dependencies = [
@@ -1453,6 +1477,18 @@ dependencies = [
  "serde_json",
  "tree-sitter",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "lcw-adapter-ts"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "lcw-core",
+ "serde_json",
+ "tree-sitter",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -3291,9 +3327,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "salsa"
-version = "0.28.2"
+version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf0e374215cd2db2b5c75d7b3a99cb0cc052c0595335dfdefc03d4eb08f4aa81"
+checksum = "0c9b90ee5aa502bb7e52126d6090fe66e4aa7d8f8f896a34c44b68e384b268e6"
 dependencies = [
  "boxcar",
  "crossbeam-queue",
@@ -3318,15 +3354,15 @@ dependencies = [
 
 [[package]]
 name = "salsa-macro-rules"
-version = "0.28.2"
+version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85f4b7d4405540bbd6d4ffa52d4322d983f3781954d3073067ac1bdb028459b3"
+checksum = "601c7dba89e97eb0079c7fc5131aad0496a9d5248b243d223235aff768fb4e62"
 
 [[package]]
 name = "salsa-macros"
-version = "0.28.2"
+version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "445be2bfbb2f67cb663225ecd7bc5a25370c0250fca30f9d8cbad9a913650370"
+checksum = "5d24556ee27a107e5a6af6572f9c2d0dc1cb80b64bef704031506f35842bf6f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3937,16 +3973,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-go"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-language"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 
 [[package]]
+name = "tree-sitter-python"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-rust"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -1,0 +1,296 @@
+---
+source: crates/lcw-adapter-py/tests/golden.rs
+expression: graph.export()
+---
+{
+  "files": [
+    "pkg/calc.py"
+  ],
+  "nodes": [
+    {
+      "id": 0,
+      "name": "__init__",
+      "qualified_name": "pkg::calc::Calc::__init__",
+      "module_path": "pkg::calc::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 3,
+        "start_col": 4,
+        "end_line": 4,
+        "end_col": 20
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 2,
+        "decision_points": 0,
+        "parameters": 1,
+        "statements": 1,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 1,
+      "name": "add",
+      "qualified_name": "pkg::calc::Calc::add",
+      "module_path": "pkg::calc::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 6,
+        "start_col": 4,
+        "end_line": 8,
+        "end_col": 19
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 3,
+        "decision_points": 0,
+        "parameters": 2,
+        "statements": 1,
+        "max_nesting": 0,
+        "returns": 1,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 2,
+      "name": "classify",
+      "qualified_name": "pkg::calc::Calc::classify",
+      "module_path": "pkg::calc::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 10,
+        "start_col": 4,
+        "end_line": 16,
+        "end_col": 20
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 7,
+        "decision_points": 2,
+        "parameters": 1,
+        "statements": 0,
+        "max_nesting": 1,
+        "returns": 3,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 3,
+      "name": "total",
+      "qualified_name": "pkg::calc::total",
+      "module_path": "pkg::calc",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 19,
+        "start_col": 0,
+        "end_line": 23,
+        "end_col": 16
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 5,
+        "decision_points": 1,
+        "parameters": 1,
+        "statements": 2,
+        "max_nesting": 1,
+        "returns": 1,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 4,
+      "name": "main",
+      "qualified_name": "pkg::calc::main",
+      "module_path": "pkg::calc",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 26,
+        "start_col": 0,
+        "end_line": 28,
+        "end_col": 17
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 3,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 2,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 5,
+      "name": "Calc",
+      "qualified_name": "Calc",
+      "module_path": "",
+      "kind": "external",
+      "span": {
+        "file": 0,
+        "start_line": 0,
+        "start_col": 0,
+        "end_line": 0,
+        "end_col": 0
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 0,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 0,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 6,
+      "name": "print",
+      "qualified_name": "print",
+      "module_path": "",
+      "kind": "external",
+      "span": {
+        "file": 0,
+        "start_line": 0,
+        "start_col": 0,
+        "end_line": 0,
+        "end_col": 0
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 0,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 0,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": 3,
+      "to": 5,
+      "kind": "unresolved",
+      "call_site": {
+        "file": 0,
+        "start_line": 20,
+        "start_col": 8,
+        "end_line": 20,
+        "end_col": 14
+      },
+      "count": 1
+    },
+    {
+      "from": 3,
+      "to": 1,
+      "kind": "method_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 22,
+        "start_col": 8,
+        "end_line": 22,
+        "end_col": 16
+      },
+      "count": 1
+    },
+    {
+      "from": 4,
+      "to": 3,
+      "kind": "direct_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 27,
+        "start_col": 13,
+        "end_line": 27,
+        "end_col": 29
+      },
+      "count": 1
+    },
+    {
+      "from": 4,
+      "to": 6,
+      "kind": "unresolved",
+      "call_site": {
+        "file": 0,
+        "start_line": 28,
+        "start_col": 4,
+        "end_line": 28,
+        "end_col": 17
+      },
+      "count": 1
+    }
+  ]
+}

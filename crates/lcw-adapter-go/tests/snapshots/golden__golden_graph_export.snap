@@ -1,0 +1,230 @@
+---
+source: crates/lcw-adapter-go/tests/golden.rs
+expression: graph.export()
+---
+{
+  "files": [
+    "sample/calc.go"
+  ],
+  "nodes": [
+    {
+      "id": 0,
+      "name": "scale",
+      "qualified_name": "sample::scale",
+      "module_path": "sample",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 6,
+        "start_col": 0,
+        "end_line": 8,
+        "end_col": 1
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 3,
+        "decision_points": 0,
+        "parameters": 1,
+        "statements": 0,
+        "max_nesting": 0,
+        "returns": 1,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 1,
+      "name": "Add",
+      "qualified_name": "sample::Calc::Add",
+      "module_path": "sample::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 14,
+        "start_col": 0,
+        "end_line": 17,
+        "end_col": 1
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 4,
+        "decision_points": 0,
+        "parameters": 1,
+        "statements": 1,
+        "max_nesting": 0,
+        "returns": 1,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 2,
+      "name": "Classify",
+      "qualified_name": "sample::Calc::Classify",
+      "module_path": "sample::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 19,
+        "start_col": 0,
+        "end_line": 26,
+        "end_col": 1
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 8,
+        "decision_points": 2,
+        "parameters": 0,
+        "statements": 0,
+        "max_nesting": 2,
+        "returns": 3,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 3,
+      "name": "main",
+      "qualified_name": "sample::main",
+      "module_path": "sample",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 28,
+        "start_col": 0,
+        "end_line": 33,
+        "end_col": 1
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 6,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 4,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 4,
+      "name": "Println",
+      "qualified_name": "Println",
+      "module_path": "",
+      "kind": "external",
+      "span": {
+        "file": 0,
+        "start_line": 0,
+        "start_col": 0,
+        "end_line": 0,
+        "end_col": 0
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 0,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 0,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": 1,
+      "to": 0,
+      "kind": "direct_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 15,
+        "start_col": 10,
+        "end_line": 15,
+        "end_col": 18
+      },
+      "count": 1
+    },
+    {
+      "from": 3,
+      "to": 1,
+      "kind": "method_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 30,
+        "start_col": 1,
+        "end_line": 30,
+        "end_col": 9
+      },
+      "count": 2
+    },
+    {
+      "from": 3,
+      "to": 4,
+      "kind": "unresolved",
+      "call_site": {
+        "file": 0,
+        "start_line": 32,
+        "start_col": 1,
+        "end_line": 32,
+        "end_col": 26
+      },
+      "count": 1
+    },
+    {
+      "from": 3,
+      "to": 2,
+      "kind": "method_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 32,
+        "start_col": 13,
+        "end_line": 32,
+        "end_col": 25
+      },
+      "count": 1
+    }
+  ]
+}

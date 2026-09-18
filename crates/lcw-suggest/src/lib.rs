@@ -16,11 +16,13 @@
 //! keeps the top `max_suggestions`.
 
 pub mod advisors;
+pub mod ext;
 pub mod vertical;
 
 use lcw_config::Config;
 use lcw_core::{AnalysisReport, Suggestion};
 
+pub use ext::{extended_advisors, ExtAdvisorConfig};
 pub use vertical::{detect as detect_vertical, VerticalScores};
 
 /// An advisor: a rule producing target-tagged suggestions from a report.
@@ -50,7 +52,43 @@ pub fn advise(config: &Config, report: &mut AnalysisReport) {
     }
 
     // 3. Rescale priority by the strongest configured weight among its targets.
-    for suggestion in &mut suggestions {
+    rescale_priorities(&mut suggestions, config);
+
+    // 4. Highest priority first (ties broken by title for determinism), capped.
+    sort_and_cap(&mut suggestions, config);
+
+    report.suggestions = suggestions;
+}
+
+/// Run the **extended** (opt-in) advisors selected by `ext` and merge their
+/// suggestions into `report.suggestions`, then re-rank and re-cap the combined
+/// set.
+///
+/// This is the additive counterpart to [`advise`]: the built-in pass is left
+/// untouched (so baseline suggestions / golden snapshots stay valid), and a
+/// caller opts into the graph-shape advice by threading an enabled
+/// [`ExtAdvisorConfig`] here — typically from the engine's `with_advisor_stage`
+/// hook, after [`advise`] has set `report.vertical`. Only the newly-produced
+/// suggestions are weight-scaled (the existing ones were already scaled by
+/// [`advise`]), so priorities are never double-counted. With the default
+/// (disabled) config it is a no-op.
+pub fn advise_extended(config: &Config, ext: &ExtAdvisorConfig, report: &mut AnalysisReport) {
+    let mut extra = Vec::new();
+    for advisor in extended_advisors(ext) {
+        extra.extend(advisor.advise(report, config));
+    }
+    if extra.is_empty() {
+        return;
+    }
+    rescale_priorities(&mut extra, config);
+    report.suggestions.append(&mut extra);
+    sort_and_cap(&mut report.suggestions, config);
+}
+
+/// Rescale each suggestion's base priority by the strongest configured weight
+/// among the optimization targets it serves (empty targets keep weight `1.0`).
+fn rescale_priorities(suggestions: &mut [Suggestion], config: &Config) {
+    for suggestion in suggestions.iter_mut() {
         let weight = if suggestion.targets.is_empty() {
             1.0
         } else {
@@ -65,16 +103,17 @@ pub fn advise(config: &Config, report: &mut AnalysisReport) {
             .clamp(0.0, 100.0);
         suggestion.priority = scaled as u8;
     }
+}
 
-    // 4. Highest priority first (ties broken by title for determinism), capped.
+/// Sort suggestions highest-priority first (ties broken by title for
+/// determinism) and truncate to the configured cap.
+fn sort_and_cap(suggestions: &mut Vec<Suggestion>, config: &Config) {
     suggestions.sort_by(|a, b| {
         b.priority
             .cmp(&a.priority)
             .then_with(|| a.title.cmp(&b.title))
     });
     suggestions.truncate(config.suggestions.max_suggestions);
-
-    report.suggestions = suggestions;
 }
 
 #[cfg(test)]
@@ -172,5 +211,62 @@ mod tests {
             .iter()
             .find(|s| s.title.contains("unsafe"));
         assert!(matches!(unsafe_sugg, Some(s) if s.priority == 0));
+    }
+
+    #[test]
+    fn default_advisor_set_is_unchanged() {
+        // Locks the invariant that the extended (opt-in) advisors never enter
+        // the default pass, so baseline suggestion output stays stable.
+        assert_eq!(advisors::all_advisors().len(), 7);
+    }
+
+    #[test]
+    fn advise_extended_is_opt_in_and_preserves_base_priorities() {
+        let mut report = AnalysisReport::new(backend_graph());
+        // A finding only an extended lens would produce.
+        report
+            .diagnostics
+            .push(Diagnostic::new("hotspot", "hotspot", Severity::High, "x"));
+        advise(&Config::default(), &mut report);
+
+        // Snapshot the base suggestions' priorities.
+        let before: Vec<(String, u8)> = report
+            .suggestions
+            .iter()
+            .map(|s| (s.title.clone(), s.priority))
+            .collect();
+
+        // Disabled config: a strict no-op.
+        advise_extended(
+            &Config::default(),
+            &ExtAdvisorConfig::default(),
+            &mut report,
+        );
+        let after_disabled: Vec<(String, u8)> = report
+            .suggestions
+            .iter()
+            .map(|s| (s.title.clone(), s.priority))
+            .collect();
+        assert_eq!(before, after_disabled);
+
+        // Enabling the advisors adds hotspot advice without re-scaling the
+        // already-scaled base suggestions (no double counting).
+        advise_extended(&Config::default(), &ExtAdvisorConfig::all(), &mut report);
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.title.contains("hotspot")));
+        for (title, prio) in before {
+            let now = report
+                .suggestions
+                .iter()
+                .find(|s| s.title == title)
+                .expect("base suggestion should survive the merge");
+            assert_eq!(now.priority, prio, "base priority must be untouched");
+        }
+        // Combined set stays ranked highest-priority first.
+        for pair in report.suggestions.windows(2) {
+            assert!(pair[0].priority >= pair[1].priority);
+        }
     }
 }

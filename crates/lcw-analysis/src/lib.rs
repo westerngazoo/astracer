@@ -15,11 +15,17 @@
 //! runs the enabled lenses, and fills an [`AnalysisReport`]. Lenses are toggled
 //! by `[lenses]` in the config so the UI can surface them as overlays/filters.
 
+pub mod ext;
 pub mod lenses;
 pub mod metrics;
 
 use lcw_config::Config;
 use lcw_core::{AnalysisReport, CodeGraph, Diagnostic};
+
+pub use ext::{
+    extended_lenses, DeadCodeLens, ExtLensConfig, GodFunctionLens, HotspotLens, RecursionCycleLens,
+    UnstableDependencyLens,
+};
 
 /// An engineering lens: a self-contained rule producing diagnostics.
 pub trait Lens {
@@ -64,7 +70,30 @@ pub fn analyze(config: &Config, report: &mut AnalysisReport) {
         report.diagnostics.extend(diagnostics);
     }
 
-    report.diagnostics.sort_by(|a, b| {
+    sort_diagnostics(&mut report.diagnostics);
+}
+
+/// Run the **extended** (opt-in) lenses selected by `ext` over `report`,
+/// appending their diagnostics and re-sorting so the worst surface first.
+///
+/// This is the additive counterpart to [`analyze`]: the built-in pass leaves
+/// the default output untouched (so golden snapshots stay valid), and callers
+/// opt into the graph-shape lenses by threading an enabled [`ExtLensConfig`]
+/// here — e.g. from the engine's `with_lens_stage` hook. With the default
+/// (disabled) config it is a no-op.
+pub fn analyze_extended(config: &Config, ext: &ExtLensConfig, report: &mut AnalysisReport) {
+    for lens in extended_lenses(ext) {
+        let diagnostics = lens.evaluate(&report.graph, config);
+        report.diagnostics.extend(diagnostics);
+    }
+    sort_diagnostics(&mut report.diagnostics);
+}
+
+/// Deterministic ordering for diagnostics: highest severity first, then by node
+/// then by code. Shared by [`analyze`] and [`analyze_extended`] so both passes
+/// produce a stable, identically-ordered report.
+fn sort_diagnostics(diagnostics: &mut [Diagnostic]) {
+    diagnostics.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
             .then_with(|| a.node.cmp(&b.node))
@@ -157,6 +186,13 @@ mod tests {
             Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 1, 0, 1, 1)),
         );
         assert!(lenses::LayeringLens.evaluate(&g2, &config).is_empty());
+    }
+
+    #[test]
+    fn default_pipeline_lens_set_is_unchanged() {
+        // Locks the invariant that the extended (opt-in) lenses never sneak
+        // into the default pass, so baseline output / golden snapshots hold.
+        assert_eq!(enabled_lenses(&Config::default()).len(), 5);
     }
 
     #[test]

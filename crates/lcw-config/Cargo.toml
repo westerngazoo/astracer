@@ -1,0 +1,17 @@
+[package]
+name = "lcw-config"
+description = "Live Code Walk: the Manifesto as machine-readable config (TOML)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+toml = "1.0.7"

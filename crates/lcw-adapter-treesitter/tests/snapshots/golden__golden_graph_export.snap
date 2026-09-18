@@ -1,0 +1,263 @@
+---
+source: crates/lcw-adapter-treesitter/tests/golden.rs
+expression: graph.export()
+---
+{
+  "files": [
+    "src/lib.rs"
+  ],
+  "nodes": [
+    {
+      "id": 0,
+      "name": "new",
+      "qualified_name": "crate::math::Calc::new",
+      "module_path": "crate::math::Calc",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 6,
+        "start_col": 8,
+        "end_line": 6,
+        "end_col": 48
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 1,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 0,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 1,
+      "name": "add",
+      "qualified_name": "crate::math::Calc::add",
+      "module_path": "crate::math::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 8,
+        "start_col": 8,
+        "end_line": 11,
+        "end_col": 9
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 4,
+        "decision_points": 0,
+        "parameters": 1,
+        "statements": 1,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 2,
+      "name": "classify",
+      "qualified_name": "crate::math::Calc::classify",
+      "module_path": "crate::math::Calc",
+      "kind": "method",
+      "span": {
+        "file": 0,
+        "start_line": 13,
+        "start_col": 8,
+        "end_line": 21,
+        "end_col": 9
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": true,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 9,
+        "decision_points": 2,
+        "parameters": 0,
+        "statements": 1,
+        "max_nesting": 2,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 3,
+      "name": "sum",
+      "qualified_name": "crate::math::sum",
+      "module_path": "crate::math",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 24,
+        "start_col": 4,
+        "end_line": 30,
+        "end_col": 5
+      },
+      "flags": {
+        "is_pub": true,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 7,
+        "decision_points": 1,
+        "parameters": 1,
+        "statements": 3,
+        "max_nesting": 1,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 4,
+      "name": "main",
+      "qualified_name": "crate::main",
+      "module_path": "crate",
+      "kind": "function",
+      "span": {
+        "file": 0,
+        "start_line": 33,
+        "start_col": 0,
+        "end_line": 36,
+        "end_col": 1
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 4,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 2,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    },
+    {
+      "id": 5,
+      "name": "println",
+      "qualified_name": "println",
+      "module_path": "",
+      "kind": "external",
+      "span": {
+        "file": 0,
+        "start_line": 0,
+        "start_col": 0,
+        "end_line": 0,
+        "end_col": 0
+      },
+      "flags": {
+        "is_pub": false,
+        "is_async": false,
+        "is_unsafe": false,
+        "is_test": false,
+        "is_method": false,
+        "is_generic": false
+      },
+      "stats": {
+        "lines_of_code": 0,
+        "decision_points": 0,
+        "parameters": 0,
+        "statements": 0,
+        "max_nesting": 0,
+        "returns": 0,
+        "unsafe_blocks": 0,
+        "allocations": 0,
+        "awaits": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": 3,
+      "to": 0,
+      "kind": "associated_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 25,
+        "start_col": 20,
+        "end_line": 25,
+        "end_col": 31
+      },
+      "count": 1
+    },
+    {
+      "from": 3,
+      "to": 1,
+      "kind": "method_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 27,
+        "start_col": 12,
+        "end_line": 27,
+        "end_col": 21
+      },
+      "count": 1
+    },
+    {
+      "from": 4,
+      "to": 3,
+      "kind": "associated_call",
+      "call_site": {
+        "file": 0,
+        "start_line": 34,
+        "start_col": 16,
+        "end_line": 34,
+        "end_col": 37
+      },
+      "count": 1
+    },
+    {
+      "from": 4,
+      "to": 5,
+      "kind": "unresolved",
+      "call_site": {
+        "file": 0,
+        "start_line": 35,
+        "start_col": 4,
+        "end_line": 35,
+        "end_col": 25
+      },
+      "count": 1
+    }
+  ]
+}

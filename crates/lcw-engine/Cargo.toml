@@ -1,0 +1,31 @@
+[package]
+name = "lcw-engine"
+description = "Live Code Walk: orchestrator facade tying the analysis layers together."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the rust-analyzer semantic adapter (heavy `ra_ap_*`). Off by default,
+# so the fast tree-sitter path never pulls it in.
+semantic = ["dep:lcw-adapter-ra", "lcw-adapter-ra/semantic"]
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+lcw-config = { path = "../lcw-config" }
+lcw-telemetry = { path = "../lcw-telemetry" }
+lcw-adapter-treesitter = { path = "../lcw-adapter-treesitter" }
+lcw-adapter-ra = { path = "../lcw-adapter-ra", optional = true }
+lcw-analysis = { path = "../lcw-analysis" }
+lcw-suggest = { path = "../lcw-suggest" }
+thiserror = "2.0.20"
+ignore = "0.4.30"
+
+[dev-dependencies]
+lcw-config = { path = "../lcw-config" }

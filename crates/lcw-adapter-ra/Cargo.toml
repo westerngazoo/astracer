@@ -1,0 +1,46 @@
+[package]
+name = "lcw-adapter-ra"
+description = "Live Code Walk: Layer 1 semantic parser (rust-analyzer, feature-gated)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The heavy, API-unstable rust-analyzer backend is entirely opt-in. Without it
+# the crate compiles instantly and the adapter returns a clear error, so the
+# fast (tree-sitter) path never pays for `ra_ap_*` (Manifesto: keep the fast
+# path lean; semantic mode is out-of-band).
+default = []
+semantic = [
+    "dep:ra_ap_ide",
+    "dep:ra_ap_ide_db",
+    "dep:ra_ap_base_db",
+    "dep:ra_ap_load-cargo",
+    "dep:ra_ap_project_model",
+    "dep:ra_ap_vfs",
+    "dep:unicode-ident",
+]
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+
+# rust-analyzer as a library. Pinned to one consistent release train; all
+# `ra_ap_*` crates must share the same version.
+ra_ap_ide = { version = "0.0.352", optional = true }
+ra_ap_ide_db = { version = "0.0.352", optional = true }
+ra_ap_base_db = { version = "0.0.352", optional = true }
+ra_ap_load-cargo = { version = "0.0.352", optional = true }
+ra_ap_project_model = { version = "0.0.352", optional = true }
+ra_ap_vfs = { version = "0.0.352", optional = true }
+
+# rust-analyzer's `ra-ap-rustc_lexer` has a const-assert that `unicode-ident`
+# and `unicode-properties` agree on their Unicode version. `unicode-properties`
+# tops out at 0.1.4 (Unicode 17.0.0), so `unicode-ident` must stay on the 17.0.0
+# line (<= 1.0.24); 1.0.25+ moved to Unicode 18.0.0 and breaks the build. This
+# `=` pin keeps the shared lockfile aligned.
+unicode-ident = { version = "=1.0.24", optional = true }

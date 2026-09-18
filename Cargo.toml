@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lcw-core",
+    "crates/lcw-config",
+    "crates/lcw-telemetry",
+    "crates/lcw-adapter-treesitter",
+    "crates/lcw-adapter-ra",
+    "crates/lcw-analysis",
+    "crates/lcw-suggest",
+    "crates/lcw-engine",
+    "crates/lcw-layout",
+    "crates/lcw-render",
+    "bins/lcw-cli",
+]
+
+# The desktop app is built with its own toolchain flow (Tauri bundler for the
+# backend, a wasm target + Trunk for the Leptos frontend), so it is kept out of
+# the main workspace to keep `cargo build`/`cargo test` fast and GPU/wasm-free.
+exclude = [
+    "apps/desktop/src-tauri",
+    "apps/desktop/frontend",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Live Code Walk contributors"]
+repository = "https://example.com/livewalk"
+rust-version = "1.80"
+
+# Data-Driven / performance oriented defaults (Manifesto Principle II).
+# Keep dev builds fast (important once wgpu/Tauri land); trade debuginfo for speed.
+[profile.dev]
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# A dedicated profile for crunching giant repos from the CLI.
+[profile.release-fast]
+inherits = "release"
+lto = "fat"
+
+# Quality bar (Manifesto section 4). Warnings, not hard errors, so local
+# builds stay ergonomic; CI can promote these to `-D warnings`.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+

@@ -1,0 +1,61 @@
+# Live Code Walk & Analysis - project configuration.
+#
+# This file IS the Manifesto in machine-readable form. The CLI (`lcw`) and the
+# desktop UI load it to decide which lenses to run, what quality thresholds to
+# enforce (Manifesto section 4), and how to weigh optimization targets
+# (section 5). Every key below shows its default value; delete any you don't
+# need to override.
+
+[project]
+# Human-readable name (optional).
+name = "livewalk"
+# Industry vertical (Manifesto section 5). "auto" detects it from the code.
+# One of: auto | embedded | game-engine | backend | full-stack
+vertical = "auto"
+
+[adapter]
+# Layer 1 parsing strategy.
+#   fast     -> tree-sitter + heuristic resolution (default; scales to huge repos)
+#   semantic -> rust-analyzer semantic graph (precise; heavier; needs the
+#               `semantic` feature, otherwise the engine falls back to fast)
+mode = "fast"
+# Extra glob patterns to ignore, on top of built-ins (target/, .git/, ...).
+exclude = []
+follow_symlinks = false
+
+[lenses]
+# Which Layer 2 analyses to run.
+complexity = true   # cyclomatic complexity, size, nesting
+purity = true       # pure-function detection (Principle II)
+hazards = true      # unsafe / thread-safety / memory hazards
+layering = true     # architecture boundary checks
+paradigm = true     # OOP vs functional / data-oriented signals
+# Architecture styles to check layering against: clean | onion | mvc
+architecture = ["clean"]
+
+[metrics]
+# Quality thresholds (Manifesto section 4). Functions past these are flagged.
+cyclomatic_max = 10
+max_parameters = 5
+max_nesting = 4
+max_function_loc = 60
+# Informational only: target test coverage fraction (0.0..=1.0).
+coverage_min = 0.7
+# Multiplier for heap-allocation heuristics; higher = stricter footprint checks.
+heap_sensitivity = 1.0
+
+[suggestions]
+# Relative weight of each optimization target when ranking suggestions.
+scalability = 1.0
+maintainability = 1.0
+robustness = 1.0
+latency = 1.0
+performance = 1.0
+# Cap on how many suggestions to emit.
+max_suggestions = 50
+
+[telemetry]
+# Native observability (Principle III). Kept lightweight.
+level = "info"
+# Hard guarantee: never enable a network exporter.
+no_network = true

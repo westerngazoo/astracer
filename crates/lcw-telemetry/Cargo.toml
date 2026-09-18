@@ -1,0 +1,15 @@
+[package]
+name = "lcw-telemetry"
+description = "Live Code Walk: lightweight native observability (Manifesto Principle III)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }

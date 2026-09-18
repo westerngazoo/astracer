@@ -1,0 +1,31 @@
+[package]
+name = "lcw-cli"
+description = "Live Code Walk: standalone CLI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lcw"
+path = "src/main.rs"
+
+[features]
+# Opens an interactive native window (winit + wgpu). Off by default so the
+# analysis-only CLI stays light and GPU-free.
+viewer = ["dep:lcw-render", "dep:lcw-layout"]
+
+[dependencies]
+lcw-core = { path = "../../crates/lcw-core" }
+lcw-config = { path = "../../crates/lcw-config" }
+lcw-engine = { path = "../../crates/lcw-engine" }
+lcw-telemetry = { path = "../../crates/lcw-telemetry" }
+lcw-layout = { path = "../../crates/lcw-layout", optional = true }
+lcw-render = { path = "../../crates/lcw-render", optional = true }
+clap = { version = "4.5.61", features = ["derive"] }
+serde_json = "1.0.151"
+anyhow = "1.0.104"

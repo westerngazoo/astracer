@@ -1,0 +1,12 @@
+# Trunk build/serve configuration for the Leptos (WASM) frontend.
+# `tauri dev` runs `trunk serve` and waits for this address; `tauri build`
+# runs `trunk build`, emitting the bundle into `dist/` (the Tauri frontendDist).
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Must match `build.devUrl` in ../src-tauri/tauri.conf.json.
+port = 1420
+open = false

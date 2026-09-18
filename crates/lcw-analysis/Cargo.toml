@@ -1,0 +1,16 @@
+[package]
+name = "lcw-analysis"
+description = "Live Code Walk: Layer 2 engineering lenses and quality metrics."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+lcw-config = { path = "../lcw-config" }
+petgraph = "0.8.3"

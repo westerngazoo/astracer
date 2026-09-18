@@ -1,0 +1,136 @@
+//! # lcw-adapter-treesitter
+//!
+//! The default Layer 1 [`LanguageAdapter`]: a tree-sitter based Rust parser
+//! with heuristic call resolution. Fast and error-tolerant, so it scales to
+//! giant repositories (Manifesto: giant-repo performance target).
+
+mod extract;
+
+pub use extract::module_path_from;
+
+use lcw_core::{AdapterError, CodeGraph, LanguageAdapter, SourceFile};
+
+/// Rust front end backed by tree-sitter.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RustTreeSitterAdapter;
+
+impl RustTreeSitterAdapter {
+    pub fn new() -> Self {
+        RustTreeSitterAdapter
+    }
+}
+
+impl LanguageAdapter for RustTreeSitterAdapter {
+    fn name(&self) -> &'static str {
+        "treesitter-rust"
+    }
+
+    fn extensions(&self) -> &'static [&'static str] {
+        &["rs"]
+    }
+
+    fn parse(&self, files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
+        extract::parse_rust(files)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lcw_core::{EdgeKind, NodeKind};
+
+    fn parse(src: &str) -> CodeGraph {
+        let files = vec![SourceFile::new("src/lib.rs", src)];
+        RustTreeSitterAdapter::new().parse(&files).unwrap()
+    }
+
+    #[test]
+    fn extracts_functions_and_direct_calls() {
+        let g = parse(
+            r#"
+            fn helper(x: i32) -> i32 { x + 1 }
+            fn main() {
+                let a = helper(1);
+                let b = helper(a);
+            }
+            "#,
+        );
+        let main = g.node_by_qualified("crate::main").expect("main present");
+        let helper = g
+            .node_by_qualified("crate::helper")
+            .expect("helper present");
+        assert_eq!(g.node(helper).kind, NodeKind::Function);
+        // main -> helper, merged into one edge with count 2.
+        assert_eq!(g.out_degree(main), 1);
+        let (_, _, e) = g
+            .edges()
+            .find(|(f, t, _)| *f == main && *t == helper)
+            .unwrap();
+        assert_eq!(e.kind, EdgeKind::DirectCall);
+        assert_eq!(e.count, 2);
+    }
+
+    #[test]
+    fn methods_get_type_qualified_names() {
+        let g = parse(
+            r#"
+            struct Counter { n: u32 }
+            impl Counter {
+                fn incr(&mut self) { self.n += 1; }
+                fn run(&mut self) {
+                    self.incr();
+                    self.incr();
+                }
+            }
+            "#,
+        );
+        let run = g
+            .node_by_qualified("crate::Counter::run")
+            .expect("run present");
+        let incr = g
+            .node_by_qualified("crate::Counter::incr")
+            .expect("incr present");
+        assert!(g.node(incr).flags.is_method);
+        let (_, _, e) = g.edges().find(|(f, t, _)| *f == run && *t == incr).unwrap();
+        assert_eq!(e.kind, EdgeKind::MethodCall);
+    }
+
+    #[test]
+    fn cyclomatic_complexity_counts_branches() {
+        let g = parse(
+            r#"
+            fn classify(x: i32) -> i32 {
+                if x > 0 {
+                    if x > 10 { 2 } else { 1 }
+                } else if x < 0 && x > -5 {
+                    -1
+                } else {
+                    0
+                }
+            }
+            "#,
+        );
+        let f = g.node_by_qualified("crate::classify").unwrap();
+        // if + (else-if is another if) + inner if + `&&` = 4 decision points => CC 5.
+        assert_eq!(g.node(f).cyclomatic_complexity(), 5);
+    }
+
+    #[test]
+    fn unresolved_calls_become_external() {
+        let g = parse(
+            r#"
+            fn f() {
+                some_unknown_fn();
+                println!("hi");
+            }
+            "#,
+        );
+        let f = g.node_by_qualified("crate::f").unwrap();
+        // Both targets are external; the edge kind is Unresolved.
+        assert!(g
+            .edges()
+            .filter(|(from, _, _)| *from == f)
+            .all(|(_, to, e)| g.node(to).kind == NodeKind::External
+                && e.kind == EdgeKind::Unresolved));
+    }
+}

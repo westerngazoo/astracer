@@ -1,0 +1,19 @@
+[package]
+name = "lcw-core"
+description = "Live Code Walk: shared domain types (the API boundary between all layers)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+petgraph = "0.8.3"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+
+[dev-dependencies]
+serde_json = "1.0.145"

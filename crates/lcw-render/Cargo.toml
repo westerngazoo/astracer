@@ -1,0 +1,34 @@
+[package]
+name = "lcw-render"
+description = "Live Code Walk: surface-agnostic wgpu renderer for the call graph."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = { version = "0.33.7", features = ["bytemuck"] }
+lcw-core = { path = "../lcw-core" }
+lcw-telemetry = { path = "../lcw-telemetry" }
+pollster = { version = "1.0.1", optional = true }
+thiserror = "2.0.20"
+wgpu = "24.0.5"
+winit = { version = "0.30.13", optional = true }
+
+# wasm target: create a wgpu surface from an HTML <canvas> for the Tauri
+# webview (and a future VS Code webview).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "Document"] }
+
+[features]
+# Native winit+wgpu driver (desktop validation / "power mode"). The renderer
+# core is surface-agnostic and also compiles to wasm without this feature.
+default = ["native"]
+native = ["dep:winit", "dep:pollster"]

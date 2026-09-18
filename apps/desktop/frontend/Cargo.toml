@@ -1,0 +1,49 @@
+[package]
+name = "livewalk-frontend"
+description = "Live Code Walk & Analysis web frontend: a Leptos (WASM) shell embedding the lcw-render wgpu canvas."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Live Code Walk contributors"]
+rust-version = "1.82"
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+
+# The renderer, compiled to wasm (WebGPU / WebGL2). `default-features = false`
+# drops the native winit/pollster driver so only the surface-agnostic core and
+# the `web` module build for the wasm target.
+lcw-render = { path = "../../../crates/lcw-render", default-features = false }
+# Shared domain types: rebuild the CodeGraph from the engine's snapshot.
+lcw-core = { path = "../../../crates/lcw-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "DomRect",
+    "Event",
+    "EventTarget",
+    "MouseEvent",
+    "WheelEvent",
+    "console",
+]
+
+# Smaller, faster wasm in release (Trunk builds `--release`).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

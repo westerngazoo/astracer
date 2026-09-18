@@ -13,48 +13,87 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use lcw_core::{
-    AdapterError, CodeGraph, Edge, EdgeKind, FileId, Node, NodeFlags, NodeId, NodeKind, NodeStats,
-    SourceFile, SourceSpan,
+    AdapterError, CallKind, CodeGraph, Edge, EdgeKind, FileFragment, FileId, Node, NodeFlags,
+    NodeId, NodeKind, NodeStats, RawCall, SourceFile, SourceSpan,
 };
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Parser};
 
 /// Parse a batch of Rust files into a single call graph.
+///
+/// Implemented as *extract then resolve* — the very same two passes the
+/// incremental path uses — so the whole-batch result is byte-identical to
+/// feeding the files through [`extract_file`] + [`resolve_fragments`].
 pub fn parse_rust(files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
+    // One parser reused across the batch: reloading the grammar per file is
+    // measurably slower on big repos.
+    let mut parser = make_parser()?;
+    let mut fragments = Vec::with_capacity(files.len());
+    for sf in files {
+        fragments.push(extract_with_parser(&mut parser, sf)?);
+    }
+    Ok(resolve_fragments(&fragments))
+}
+
+/// A tree-sitter parser configured for Rust.
+fn make_parser() -> Result<Parser, AdapterError> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
         .map_err(|e| AdapterError::Other(format!("failed to load Rust grammar: {e}")))?;
+    Ok(parser)
+}
 
+/// Extract one file's [`FileFragment`] (definitions + unresolved call sites)
+/// with no cross-file linking. Pure w.r.t. `sf`, hence safely cacheable by the
+/// engine's incremental path.
+pub fn extract_file(sf: &SourceFile) -> Result<FileFragment, AdapterError> {
+    let mut parser = make_parser()?;
+    extract_with_parser(&mut parser, sf)
+}
+
+fn extract_with_parser(parser: &mut Parser, sf: &SourceFile) -> Result<FileFragment, AdapterError> {
+    let tree = parser
+        .parse(sf.text.as_bytes(), None)
+        .ok_or_else(|| AdapterError::Parse {
+            path: sf.path.clone(),
+            message: "tree-sitter produced no tree".into(),
+        })?;
+    let module_base = module_path_from(&sf.path);
+
+    // Spans are captured with a fragment-local file id (0); resolution remaps
+    // them onto the real interned file id.
+    let mut defs = Vec::new();
+    collect_defs_into(&mut defs, tree.root_node(), &sf.text, &module_base);
+
+    let mut calls = Vec::new();
+    collect_calls_into(&mut calls, tree.root_node(), &sf.text, &module_base);
+
+    Ok(FileFragment {
+        path: sf.path.clone(),
+        defs,
+        calls,
+    })
+}
+
+/// Link a set of per-file fragments into a single graph — the global
+/// resolution pass. Definitions are interned first (so a call can resolve to a
+/// def in any file), then every call site is linked to a def or an `External`
+/// placeholder. The result is independent of whether a fragment was freshly
+/// extracted or served from cache.
+pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
     let mut graph = CodeGraph::new();
-    let mut parsed: Vec<Parsed> = Vec::with_capacity(files.len());
-    for sf in files {
-        let tree = parser
-            .parse(sf.text.as_bytes(), None)
-            .ok_or_else(|| AdapterError::Parse {
-                path: sf.path.clone(),
-                message: "tree-sitter produced no tree".into(),
-            })?;
-        let file = graph.intern_file(sf.path.clone());
-        let module_base = module_path_from(&sf.path);
-        parsed.push(Parsed {
-            file,
-            text: sf.text.clone(),
-            tree,
-            module_base,
-        });
-    }
 
-    // Pass 1: definitions.
+    // Pass 1: definitions (remapping each fragment-local span to its real file).
     let mut by_short: HashMap<String, Vec<NodeId>> = HashMap::new();
-    for p in &parsed {
-        collect_defs(
-            &mut graph,
-            &mut by_short,
-            p.tree.root_node(),
-            &p.text,
-            p.file,
-            &p.module_base,
-        );
+    for frag in fragments {
+        let file = graph.intern_file(frag.path.clone());
+        for def in &frag.defs {
+            let mut node = def.clone();
+            node.span = with_file(node.span, file);
+            let name = node.name.clone();
+            let id = graph.add_node(node);
+            by_short.entry(name).or_default().push(id);
+        }
     }
     for ids in by_short.values_mut() {
         ids.sort_unstable_by_key(|id| id.0);
@@ -62,39 +101,45 @@ pub fn parse_rust(files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
     }
 
     // Pass 2: calls / edges.
-    for p in &parsed {
-        collect_calls(
-            &mut graph,
-            &by_short,
-            p.tree.root_node(),
-            &p.text,
-            p.file,
-            &p.module_base,
-        );
+    for frag in fragments {
+        let file = graph.intern_file(frag.path.clone());
+        for rc in &frag.calls {
+            let Some(caller) = graph.node_by_qualified(&rc.caller) else {
+                continue;
+            };
+            // The caller's module scope == its node's `module_path` (defs and
+            // calls reconstruct the same scope), so we needn't store it twice.
+            let caller_module = graph.node(caller).module_path.clone();
+            let callee = Callee {
+                kind: callkind_to_class(rc.kind),
+                path: rc.path.clone(),
+                short: rc.short.clone(),
+            };
+            let target = resolve_target(&mut graph, &by_short, &callee, &caller_module);
+            let edge_kind = if graph.node(target).kind == NodeKind::External {
+                EdgeKind::Unresolved
+            } else {
+                callee.kind.edge_kind()
+            };
+            let call_site = with_file(rc.call_site, file);
+            graph.add_edge(caller, target, Edge::new(edge_kind, call_site));
+        }
     }
 
-    Ok(graph)
+    graph
 }
 
-struct Parsed {
-    file: FileId,
-    text: String,
-    tree: Tree,
-    module_base: String,
+/// Rewrite a fragment-local span's `file` field to a real interned [`FileId`].
+fn with_file(mut span: SourceSpan, file: FileId) -> SourceSpan {
+    span.file = file.0;
+    span
 }
 
 // ---------------------------------------------------------------------------
 // Pass 1: definitions
 // ---------------------------------------------------------------------------
 
-fn collect_defs(
-    graph: &mut CodeGraph,
-    by_short: &mut HashMap<String, Vec<NodeId>>,
-    node: TsNode,
-    text: &str,
-    file: FileId,
-    scope: &str,
-) {
+fn collect_defs_into(defs: &mut Vec<Node>, node: TsNode, text: &str, scope: &str) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
@@ -102,7 +147,7 @@ fn collect_defs(
                 let name = field_text(child, "name", text);
                 let inner = join(scope, &name);
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs(graph, by_short, body, text, file, &inner);
+                    collect_defs_into(defs, body, text, &inner);
                 }
             }
             "impl_item" => {
@@ -113,14 +158,14 @@ fn collect_defs(
                     join(scope, &ty)
                 };
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs(graph, by_short, body, text, file, &inner);
+                    collect_defs_into(defs, body, text, &inner);
                 }
             }
             "trait_item" => {
                 let name = field_text(child, "name", text);
                 let inner = join(scope, &name);
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs(graph, by_short, body, text, file, &inner);
+                    collect_defs_into(defs, body, text, &inner);
                 }
             }
             "function_item" | "function_signature_item" => {
@@ -129,26 +174,25 @@ fn collect_defs(
                     continue;
                 }
                 let qualified = join(scope, &name);
-                let id = add_function_node(graph, child, text, file, scope, &name, &qualified);
-                by_short.entry(name).or_default().push(id);
+                defs.push(make_function_node(child, text, scope, &name, &qualified));
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs(graph, by_short, body, text, file, &qualified);
+                    collect_defs_into(defs, body, text, &qualified);
                 }
             }
-            _ => collect_defs(graph, by_short, child, text, file, scope),
+            _ => collect_defs_into(defs, child, text, scope),
         }
     }
 }
 
-fn add_function_node(
-    graph: &mut CodeGraph,
+/// Build a function/method [`Node`] with a fragment-local span (file id 0,
+/// remapped at resolution). Its `id` is a placeholder assigned on insertion.
+fn make_function_node(
     func: TsNode,
     text: &str,
-    file: FileId,
     module_path: &str,
     name: &str,
     qualified: &str,
-) -> NodeId {
+) -> Node {
     let flags = compute_flags(func, text, module_path, name);
     let stats = compute_stats(func, text);
     let kind = if flags.is_method {
@@ -156,16 +200,16 @@ fn add_function_node(
     } else {
         NodeKind::Function
     };
-    graph.add_node(Node {
+    Node {
         id: NodeId(0),
         name: name.to_string(),
         qualified_name: qualified.to_string(),
         module_path: module_path.to_string(),
         kind,
-        span: span_of(func, file),
+        span: span_of(func, FileId(0)),
         flags,
         stats,
-    })
+    }
 }
 
 fn compute_flags(func: TsNode, text: &str, module_path: &str, name: &str) -> NodeFlags {
@@ -270,21 +314,14 @@ fn scan_stats(node: TsNode, text: &str, depth: u32, acc: &mut StatAcc) {
 // Pass 2: calls / edges
 // ---------------------------------------------------------------------------
 
-fn collect_calls(
-    graph: &mut CodeGraph,
-    by_short: &HashMap<String, Vec<NodeId>>,
-    node: TsNode,
-    text: &str,
-    file: FileId,
-    scope: &str,
-) {
+fn collect_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, scope: &str) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "mod_item" => {
                 let inner = join(scope, &field_text(child, "name", text));
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls(graph, by_short, body, text, file, &inner);
+                    collect_calls_into(calls, body, text, &inner);
                 }
             }
             "impl_item" => {
@@ -295,13 +332,13 @@ fn collect_calls(
                     join(scope, &ty)
                 };
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls(graph, by_short, body, text, file, &inner);
+                    collect_calls_into(calls, body, text, &inner);
                 }
             }
             "trait_item" => {
                 let inner = join(scope, &field_text(child, "name", text));
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls(graph, by_short, body, text, file, &inner);
+                    collect_calls_into(calls, body, text, &inner);
                 }
             }
             "function_item" | "function_signature_item" => {
@@ -310,47 +347,39 @@ fn collect_calls(
                     continue;
                 }
                 let qualified = join(scope, &name);
-                if let Some(caller) = graph.node_by_qualified(&qualified) {
-                    if let Some(body) = child.child_by_field_name("body") {
-                        scan_calls(graph, by_short, body, text, file, caller, scope);
-                    }
-                }
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls(graph, by_short, body, text, file, &qualified);
+                    // The caller's own body calls first, then nested fns (each
+                    // its own caller) — mirrors the original edge order.
+                    scan_calls_into(calls, body, text, &qualified);
+                    collect_calls_into(calls, body, text, &qualified);
                 }
             }
-            _ => collect_calls(graph, by_short, child, text, file, scope),
+            _ => collect_calls_into(calls, child, text, scope),
         }
     }
 }
 
-fn scan_calls(
-    graph: &mut CodeGraph,
-    by_short: &HashMap<String, Vec<NodeId>>,
-    node: TsNode,
-    text: &str,
-    file: FileId,
-    caller: NodeId,
-    caller_module: &str,
-) {
+fn scan_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, caller: &str) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let kind = child.kind();
+        // Nested functions are their own callers; their bodies are handled by
+        // `collect_calls_into`, not folded into this caller.
         if matches!(kind, "function_item" | "function_signature_item") {
             continue;
         }
         if matches!(kind, "call_expression" | "macro_invocation") {
             if let Some(call) = callee_of_call(child, text) {
-                let target = resolve_target(graph, by_short, &call, caller_module);
-                let edge_kind = if graph.node(target).kind == NodeKind::External {
-                    EdgeKind::Unresolved
-                } else {
-                    call.kind.edge_kind()
-                };
-                graph.add_edge(caller, target, Edge::new(edge_kind, span_of(child, file)));
+                calls.push(RawCall {
+                    caller: caller.to_string(),
+                    kind: class_to_callkind(call.kind),
+                    path: call.path,
+                    short: call.short,
+                    call_site: span_of(child, FileId(0)),
+                });
             }
         }
-        scan_calls(graph, by_short, child, text, file, caller, caller_module);
+        scan_calls_into(calls, child, text, caller);
     }
 }
 
@@ -419,6 +448,26 @@ impl CallClass {
             CallClass::Associated => EdgeKind::AssociatedCall,
             CallClass::Macro => EdgeKind::MacroCall,
         }
+    }
+}
+
+/// Bridge the adapter's syntactic call class to the serializable
+/// [`CallKind`] stored in a fragment, and back for resolution.
+fn class_to_callkind(c: CallClass) -> CallKind {
+    match c {
+        CallClass::Direct => CallKind::Direct,
+        CallClass::Method => CallKind::Method,
+        CallClass::Associated => CallKind::Associated,
+        CallClass::Macro => CallKind::Macro,
+    }
+}
+
+fn callkind_to_class(k: CallKind) -> CallClass {
+    match k {
+        CallKind::Direct => CallClass::Direct,
+        CallKind::Method => CallClass::Method,
+        CallKind::Associated => CallClass::Associated,
+        CallKind::Macro => CallClass::Macro,
     }
 }
 

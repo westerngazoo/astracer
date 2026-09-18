@@ -171,6 +171,7 @@ vertical = "auto"   # auto | embedded | game-engine | backend | full-stack
 
 [adapter]
 mode = "fast"       # fast (tree-sitter) | semantic (rust-analyzer)
+language = "rust"   # fast-mode language: rust | typescript | python | go
 exclude = []
 follow_symlinks = false
 
@@ -181,6 +182,7 @@ hazards = true
 layering = true
 paradigm = true
 architecture = ["clean"]
+extended = false    # opt-in graph-shape lenses: cycles, dead code, god fns, hotspots, unstable deps
 
 [metrics]
 cyclomatic_max = 10
@@ -197,8 +199,13 @@ robustness = 1.0
 latency = 1.0
 performance = 1.0
 max_suggestions = 50
+extended = false    # opt-in advisors for the extended lenses above
 
 [telemetry]
 level = "info"
 no_network = true
+
+[cache]
+enabled = true     # incremental: re-parse only changed files between runs
+dir = ""           # empty = per-repo dir under the user cache home
 "#;

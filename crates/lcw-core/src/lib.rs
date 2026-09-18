@@ -7,6 +7,7 @@
 
 pub mod adapter;
 pub mod diagnostic;
+pub mod fragment;
 pub mod graph;
 pub mod ids;
 pub mod metric;
@@ -17,6 +18,7 @@ pub mod vertical;
 
 pub use adapter::{AdapterError, LanguageAdapter};
 pub use diagnostic::{Diagnostic, Severity};
+pub use fragment::{CallKind, FileFragment, RawCall};
 pub use graph::{
     CodeGraph, Edge, EdgeExport, EdgeKind, GraphExport, GraphSnapshot, Node, NodeFlags, NodeKind,
     NodeStats, SourceSpan,

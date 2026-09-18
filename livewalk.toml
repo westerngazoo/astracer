@@ -19,6 +19,10 @@ vertical = "auto"
 #   semantic -> rust-analyzer semantic graph (precise; heavier; needs the
 #               `semantic` feature, otherwise the engine falls back to fast)
 mode = "fast"
+# Source language parsed in `fast` mode: rust | typescript | python | go.
+# One adapter per run — pick the language your repo is written in. (Ignored
+# when mode = "semantic", which is Rust-only.)
+language = "rust"
 # Extra glob patterns to ignore, on top of built-ins (target/, .git/, ...).
 exclude = []
 follow_symlinks = false
@@ -32,6 +36,9 @@ layering = true     # architecture boundary checks
 paradigm = true     # OOP vs functional / data-oriented signals
 # Architecture styles to check layering against: clean | onion | mvc
 architecture = ["clean"]
+# Opt-in graph-shape lenses (recursion cycles, dead code, god functions,
+# hotspots, unstable dependencies). Off by default; enabling turns them all on.
+extended = false
 
 [metrics]
 # Quality thresholds (Manifesto section 4). Functions past these are flagged.
@@ -53,9 +60,22 @@ latency = 1.0
 performance = 1.0
 # Cap on how many suggestions to emit.
 max_suggestions = 50
+# Opt-in advisors that turn the extended lenses' findings into suggestions.
+# Usually enabled together with `lenses.extended`.
+extended = false
 
 [telemetry]
 # Native observability (Principle III). Kept lightweight.
 level = "info"
 # Hard guarantee: never enable a network exporter.
 no_network = true
+
+[cache]
+# Incremental analysis (plan: giant-repo performance). When enabled, each
+# file's parsed fragment is cached by content hash, so re-analysis only
+# re-parses the files that actually changed.
+enabled = true
+# Cache location. Empty = a per-repo directory under the user's cache home,
+# so the cache never pollutes the analyzed tree. Relative paths resolve against
+# the repo root; absolute paths are used as-is.
+dir = ""

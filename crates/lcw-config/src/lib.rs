@@ -40,6 +40,7 @@ pub struct Config {
     pub metrics: MetricsConfig,
     pub suggestions: SuggestionsConfig,
     pub telemetry: TelemetryConfig,
+    pub cache: CacheConfig,
 }
 
 /// `[project]` — identity and the industry vertical (Manifesto section 5).
@@ -96,11 +97,32 @@ pub enum AdapterMode {
     Semantic,
 }
 
+/// Which language front end to run in `fast` mode. Orthogonal to
+/// [`AdapterMode`]: `semantic` is Rust-only and ignores this. Each variant maps
+/// to one tree-sitter adapter, so a run analyzes a single language (pick the one
+/// matching the repo). Default is [`Language::Rust`], preserving prior behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    /// `.rs` — the default Rust front end (`lcw-adapter-treesitter`).
+    #[default]
+    Rust,
+    /// `.ts`/`.tsx`/`.mts`/`.cts` (`lcw-adapter-ts`).
+    Typescript,
+    /// `.py`/`.pyi` (`lcw-adapter-py`).
+    Python,
+    /// `.go` (`lcw-adapter-go`).
+    Go,
+}
+
 /// `[adapter]` — parsing controls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdapterConfig {
     pub mode: AdapterMode,
+    /// Source language to parse in `fast` mode (`rust` default). Ignored when
+    /// `mode = semantic` (that path is Rust-only).
+    pub language: Language,
     /// Extra glob patterns to exclude (in addition to the built-in ignores
     /// like `target/`).
     pub exclude: Vec<String>,
@@ -111,6 +133,7 @@ impl Default for AdapterConfig {
     fn default() -> Self {
         AdapterConfig {
             mode: AdapterMode::Fast,
+            language: Language::Rust,
             exclude: Vec::new(),
             follow_symlinks: false,
         }
@@ -129,6 +152,11 @@ pub struct LensesConfig {
     /// Architecture styles to check layering against: any of `clean`, `onion`,
     /// `mvc`.
     pub architecture: Vec<String>,
+    /// Opt into the extended *graph-shape* lenses (recursion cycles, dead code,
+    /// god functions, hotspots, unstable dependencies). Off by default so the
+    /// baseline diagnostic output is unchanged; the engine enables all of them
+    /// when this is `true`.
+    pub extended: bool,
 }
 
 impl Default for LensesConfig {
@@ -140,6 +168,7 @@ impl Default for LensesConfig {
             layering: true,
             paradigm: true,
             architecture: vec!["clean".to_string()],
+            extended: false,
         }
     }
 }
@@ -183,6 +212,12 @@ pub struct SuggestionsConfig {
     pub latency: f64,
     pub performance: f64,
     pub max_suggestions: usize,
+    /// Opt into the extended advisors that turn the extended lenses' findings
+    /// (cycles, dead code, god functions, hotspots, unstable deps) into
+    /// suggestions. Off by default; typically enabled together with
+    /// `lenses.extended` (an advisor only fires when its lens produced
+    /// diagnostics).
+    pub extended: bool,
 }
 
 impl Default for SuggestionsConfig {
@@ -194,6 +229,7 @@ impl Default for SuggestionsConfig {
             latency: 1.0,
             performance: 1.0,
             max_suggestions: 50,
+            extended: false,
         }
     }
 }
@@ -208,6 +244,32 @@ impl SuggestionsConfig {
             Robustness => self.robustness,
             Latency => self.latency,
             Performance => self.performance,
+        }
+    }
+}
+
+/// `[cache]` — incremental analysis cache (plan: incremental/streaming for
+/// giant repos). When enabled, the engine caches each file's parsed fragment by
+/// content hash and re-parses only the files that changed between runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Enable the on-disk fragment cache. Requires an adapter that supports
+    /// incremental extraction (the default tree-sitter one does); with any
+    /// other adapter the engine transparently falls back to a full parse.
+    pub enabled: bool,
+    /// Explicit cache directory. When empty (the default), the engine uses a
+    /// per-repository directory under the user's cache home, so the cache never
+    /// pollutes the analyzed tree. A relative path is resolved against the repo
+    /// root; an absolute path is used as-is.
+    pub dir: String,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        CacheConfig {
+            enabled: true,
+            dir: String::new(),
         }
     }
 }

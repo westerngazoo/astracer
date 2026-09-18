@@ -8,7 +8,7 @@ mod extract;
 
 pub use extract::module_path_from;
 
-use lcw_core::{AdapterError, CodeGraph, LanguageAdapter, SourceFile};
+use lcw_core::{AdapterError, CodeGraph, FileFragment, LanguageAdapter, SourceFile};
 
 /// Rust front end backed by tree-sitter.
 #[derive(Debug, Default, Clone, Copy)]
@@ -31,6 +31,18 @@ impl LanguageAdapter for RustTreeSitterAdapter {
 
     fn parse(&self, files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
         extract::parse_rust(files)
+    }
+
+    fn supports_incremental(&self) -> bool {
+        true
+    }
+
+    fn extract_fragment(&self, file: &SourceFile) -> Result<FileFragment, AdapterError> {
+        extract::extract_file(file)
+    }
+
+    fn resolve_fragments(&self, fragments: &[FileFragment]) -> Result<CodeGraph, AdapterError> {
+        Ok(extract::resolve_fragments(fragments))
     }
 }
 
@@ -113,6 +125,33 @@ mod tests {
         let f = g.node_by_qualified("crate::classify").unwrap();
         // if + (else-if is another if) + inner if + `&&` = 4 decision points => CC 5.
         assert_eq!(g.node(f).cyclomatic_complexity(), 5);
+    }
+
+    #[test]
+    fn incremental_extract_resolve_matches_parse_and_links_cross_file() {
+        let a = SourceFile::new("src/a.rs", "fn a() { b(); b(); }");
+        let b = SourceFile::new("src/b.rs", "fn b() {}");
+        let adapter = RustTreeSitterAdapter::new();
+
+        // Whole-batch parse vs. per-file extract + global resolve: identical.
+        let g1 = adapter.parse(&[a.clone(), b.clone()]).unwrap();
+        let fa = adapter.extract_fragment(&a).unwrap();
+        let fb = adapter.extract_fragment(&b).unwrap();
+        let g2 = adapter.resolve_fragments(&[fa, fb]).unwrap();
+        assert_eq!(g1.node_count(), g2.node_count());
+        assert_eq!(g1.edge_count(), g2.edge_count());
+
+        // The call in a.rs resolves to the real def in b.rs (cross-file), and
+        // the two identical call sites merge into one edge with count 2.
+        let a_id = g2.node_by_qualified("crate::a::a").unwrap();
+        let b_id = g2.node_by_qualified("crate::b::b").unwrap();
+        assert_eq!(g2.node(b_id).kind, NodeKind::Function);
+        let (_, _, e) = g2
+            .edges()
+            .find(|(f, t, _)| *f == a_id && *t == b_id)
+            .expect("cross-file edge a -> b");
+        assert_eq!(e.kind, EdgeKind::DirectCall);
+        assert_eq!(e.count, 2);
     }
 
     #[test]

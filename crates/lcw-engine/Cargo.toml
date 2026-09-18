@@ -21,11 +21,16 @@ lcw-core = { path = "../lcw-core" }
 lcw-config = { path = "../lcw-config" }
 lcw-telemetry = { path = "../lcw-telemetry" }
 lcw-adapter-treesitter = { path = "../lcw-adapter-treesitter" }
+lcw-adapter-ts = { path = "../lcw-adapter-ts" }
+lcw-adapter-py = { path = "../lcw-adapter-py" }
+lcw-adapter-go = { path = "../lcw-adapter-go" }
 lcw-adapter-ra = { path = "../lcw-adapter-ra", optional = true }
 lcw-analysis = { path = "../lcw-analysis" }
 lcw-suggest = { path = "../lcw-suggest" }
 thiserror = "2.0.20"
 ignore = "0.4.30"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [dev-dependencies]
 lcw-config = { path = "../lcw-config" }

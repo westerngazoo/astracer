@@ -1540,13 +1540,18 @@ name = "lcw-engine"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "lcw-adapter-go",
+ "lcw-adapter-py",
  "lcw-adapter-ra",
  "lcw-adapter-treesitter",
+ "lcw-adapter-ts",
  "lcw-analysis",
  "lcw-config",
  "lcw-core",
  "lcw-suggest",
  "lcw-telemetry",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -3327,9 +3332,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "salsa"
-version = "0.28.3"
+version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c9b90ee5aa502bb7e52126d6090fe66e4aa7d8f8f896a34c44b68e384b268e6"
+checksum = "cf0e374215cd2db2b5c75d7b3a99cb0cc052c0595335dfdefc03d4eb08f4aa81"
 dependencies = [
  "boxcar",
  "crossbeam-queue",
@@ -3354,15 +3359,15 @@ dependencies = [
 
 [[package]]
 name = "salsa-macro-rules"
-version = "0.28.3"
+version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "601c7dba89e97eb0079c7fc5131aad0496a9d5248b243d223235aff768fb4e62"
+checksum = "85f4b7d4405540bbd6d4ffa52d4322d983f3781954d3073067ac1bdb028459b3"
 
 [[package]]
 name = "salsa-macros"
-version = "0.28.3"
+version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d24556ee27a107e5a6af6572f9c2d0dc1cb80b64bef704031506f35842bf6f9"
+checksum = "445be2bfbb2f67cb663225ecd7bc5a25370c0250fca30f9d8cbad9a913650370"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -33,11 +33,23 @@ pub struct EdgeVertex {
 /// segment, so downstream passes (search dimming, hover) can reason about which
 /// nodes an edge connects even after it has been tessellated into a curved
 /// bundle. Invariant: `edge_nodes.len() * 2 == edges.len()`.
+///
+/// `group_fills`, `group_outlines`, and `labels` back the *module view* overlay:
+/// translucent grouping rectangles (a triangle-list drawn behind the graph),
+/// their crisp borders (a line-list), and bitmap text glyphs (a triangle-list
+/// drawn on top). All three are empty for the classic function-level scene, so
+/// existing callers are byte-for-byte unaffected (Principle I: opt-in).
 #[derive(Debug, Clone, Default)]
 pub struct SceneData {
     pub nodes: Vec<NodeInstance>,
     pub edges: Vec<EdgeVertex>,
     pub edge_nodes: Vec<[u32; 2]>,
+    /// Filled grouping rectangles, as a triangle-list (6 verts per rect).
+    pub group_fills: Vec<EdgeVertex>,
+    /// Grouping-rectangle borders, as a line-list (8 verts per rect).
+    pub group_outlines: Vec<EdgeVertex>,
+    /// Text glyph pixels, as a triangle-list (6 verts per lit pixel).
+    pub labels: Vec<EdgeVertex>,
     pub min: [f32; 2],
     pub max: [f32; 2],
 }
@@ -178,6 +190,7 @@ pub fn build_with(graph: &CodeGraph, positions: &[[f32; 2]], opts: &SceneOptions
         edge_nodes,
         min,
         max,
+        ..Default::default()
     }
 }
 

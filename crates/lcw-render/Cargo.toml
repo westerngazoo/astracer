@@ -12,9 +12,11 @@ workspace = true
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
+font8x8 = "0.3.1"
 glam = { version = "0.33.7", features = ["bytemuck"] }
 lcw-core = { path = "../lcw-core" }
 lcw-telemetry = { path = "../lcw-telemetry" }
+png = { version = "0.17.16", optional = true }
 pollster = { version = "1.0.1", optional = true }
 thiserror = "2.0.20"
 wgpu = "24.0.5"
@@ -31,4 +33,4 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "Documen
 # Native winit+wgpu driver (desktop validation / "power mode"). The renderer
 # core is surface-agnostic and also compiles to wasm without this feature.
 default = ["native"]
-native = ["dep:winit", "dep:pollster"]
+native = ["dep:winit", "dep:pollster", "dep:png"]

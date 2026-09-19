@@ -83,6 +83,9 @@ pub fn apply_filter(base: &SceneData, matched: &[bool], style: FilterStyle) -> S
         nodes,
         edges,
         edge_nodes: base.edge_nodes.clone(),
+        group_fills: base.group_fills.clone(),
+        group_outlines: base.group_outlines.clone(),
+        labels: base.labels.clone(),
         min: base.min,
         max: base.max,
     }
@@ -133,6 +136,7 @@ mod tests {
             edge_nodes: vec![[0, 1]],
             min: [0.0, 0.0],
             max: [10.0, 0.0],
+            ..Default::default()
         }
     }
 

@@ -11,10 +11,14 @@
 
 pub mod camera;
 pub mod filter;
+pub mod flow_view;
+pub mod hud;
 pub mod labels;
 pub mod minimap;
+pub mod module_view;
 pub mod renderer;
 pub mod scene;
+pub mod text;
 
 #[cfg(feature = "native")]
 pub mod native;
@@ -24,8 +28,10 @@ pub mod web;
 
 pub use camera::Camera2D;
 pub use filter::{apply_filter, compute_matches, is_active as filter_is_active, FilterStyle};
+pub use flow_view::{build as build_flow_view, FlowGraph, FlowNode, FlowOptions};
 pub use labels::{select_labels, LabelOptions, LabelPlacement};
 pub use minimap::{MinimapView, Rect as MinimapRect};
+pub use module_view::{build as build_module_view, ModuleViewOptions};
 pub use renderer::Renderer;
 pub use scene::{
     build as build_scene, build_with as build_scene_with, BundleOptions, EdgeVertex, NodeInstance,
@@ -39,6 +45,8 @@ pub enum RenderError {
     NoAdapter,
     #[error("windowing error: {0}")]
     Window(String),
+    #[error("screenshot error: {0}")]
+    Screenshot(String),
 }
 
 #[cfg(all(test, feature = "native"))]

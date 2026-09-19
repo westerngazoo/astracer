@@ -26,6 +26,7 @@ use ra_ap_ide::{
     NavigationTarget, RaFixtureConfig, StructureNode, StructureNodeKind, SymbolKind, TextRange,
 };
 use ra_ap_ide_db::line_index::LineIndex;
+use ra_ap_ide_db::RootDatabase;
 use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
 use ra_ap_project_model::{CargoConfig, RustLibSource};
 use ra_ap_vfs::Vfs;
@@ -81,6 +82,44 @@ fn ra_path(vfs: &Vfs, fid: RaFileId) -> Option<PathBuf> {
         .map(|abs| PathBuf::from(abs.as_str()))
 }
 
+/// Join a crate name, container (type/trait/module), and symbol name into a
+/// Rust-style path, skipping any empty segment: `lcw_engine::Engine::analyze`.
+/// This is what makes semantic nodes precisely *targetable* by `flow`/`explain`
+/// (fast mode already qualifies names; without this, semantic nodes were bare
+/// `analyze`/`new`, indistinguishable across crates).
+fn qualify(crate_name: Option<&str>, container: Option<&str>, name: &str) -> String {
+    let mut path = String::new();
+    for seg in [crate_name, container, Some(name)].into_iter().flatten() {
+        if seg.is_empty() {
+            continue;
+        }
+        if !path.is_empty() {
+            path.push_str("::");
+        }
+        path.push_str(seg);
+    }
+    path
+}
+
+/// The crate a file belongs to, as `(display_name, is_workspace_local)`. The
+/// name uses the path form (underscores), matching how fast mode qualifies.
+fn crate_info(
+    analysis: &ra_ap_ide::Analysis,
+    db: &RootDatabase,
+    local: &HashSet<Crate>,
+    fid: RaFileId,
+) -> (Option<String>, bool) {
+    let crates = analysis.crates_for(fid).unwrap_or_default();
+    let is_local = crates.iter().any(|c| local.contains(c));
+    let name = crates.first().and_then(|k| {
+        k.extra_data(db)
+            .display_name
+            .as_ref()
+            .map(|d| d.crate_name().to_string())
+    });
+    (name, is_local)
+}
+
 /// Accumulates the [`CodeGraph`] while mapping rust-analyzer identities onto our
 /// own ids.
 struct Registry {
@@ -112,12 +151,14 @@ impl Registry {
 
     /// A `qualified_name` guaranteed unique across the graph, so `CodeGraph`'s
     /// name-based interning never merges two distinct definitions that happen
-    /// to share a `Type::method` path.
-    fn unique_qname(&mut self, container: Option<&str>, name: &str) -> String {
-        let base = match container {
-            Some(c) if !c.is_empty() => format!("{c}::{name}"),
-            _ => name.to_string(),
-        };
+    /// to share a `crate::Type::method` path.
+    fn unique_qname(
+        &mut self,
+        crate_name: Option<&str>,
+        container: Option<&str>,
+        name: &str,
+    ) -> String {
+        let base = qualify(crate_name, container, name);
         let n = self.used_qnames.entry(base.clone()).or_insert(0);
         let out = if *n == 0 {
             base.clone()
@@ -134,6 +175,7 @@ impl Registry {
         lcw_file: LcwFileId,
         ra_file: RaFileId,
         node: &StructureNode,
+        crate_name: Option<&str>,
         container: Option<&str>,
         li: &LineIndex,
     ) -> NodeId {
@@ -142,7 +184,7 @@ impl Registry {
             return id;
         }
         let name = clean_name(&node.label);
-        let qualified_name = self.unique_qname(container, &name);
+        let qualified_name = self.unique_qname(crate_name, container, &name);
         let span = span_of(lcw_file, li, node.node_range);
         let kind = match node.kind {
             StructureNodeKind::SymbolKind(SymbolKind::Method) => NodeKind::Method,
@@ -152,7 +194,7 @@ impl Registry {
             id: NodeId(u32::MAX),
             name,
             qualified_name,
-            module_path: container.unwrap_or("").to_string(),
+            module_path: qualify(crate_name, container, ""),
             kind,
             span,
             flags: NodeFlags {
@@ -168,10 +210,15 @@ impl Registry {
         id
     }
 
-    /// Get-or-create the node for a resolved *callee* target.
+    /// Get-or-create the node for a resolved *callee* target. `crate_name` and
+    /// `is_local` come from the target's own file: non-local targets (std, deps)
+    /// become [`NodeKind::External`] so flows don't wander into library code and
+    /// `explain` can flag them.
     fn target_node(
         &mut self,
         target: &NavigationTarget,
+        crate_name: Option<&str>,
+        is_local: bool,
         vfs: &Vfs,
         analysis: &ra_ap_ide::Analysis,
     ) -> NodeId {
@@ -186,10 +233,14 @@ impl Registry {
             .container_name
             .as_ref()
             .map(|s| s.as_str().to_string());
-        let qualified_name = self.unique_qname(container.as_deref(), &name);
-        let kind = match target.kind {
-            Some(SymbolKind::Method) => NodeKind::Method,
-            _ => NodeKind::Function,
+        let qualified_name = self.unique_qname(crate_name, container.as_deref(), &name);
+        let kind = if !is_local {
+            NodeKind::External
+        } else {
+            match target.kind {
+                Some(SymbolKind::Method) => NodeKind::Method,
+                _ => NodeKind::Function,
+            }
         };
         // Deref-coerces the (rust-analyzer) `Arc<LineIndex>` to `&LineIndex`;
         // we never name the Arc so its exact flavour doesn't matter.
@@ -202,7 +253,7 @@ impl Registry {
             id: NodeId(u32::MAX),
             name,
             qualified_name,
-            module_path: container.unwrap_or_default(),
+            module_path: qualify(crate_name, container.as_deref(), ""),
             kind,
             span,
             flags: NodeFlags {
@@ -324,15 +375,18 @@ pub fn parse(files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
         if !in_local {
             continue;
         }
-        process_file(&mut reg, &analysis, &vfs, fid, &fsc, &chc);
+        process_file(&mut reg, &analysis, db_ref, &local, &vfs, fid, &fsc, &chc);
     }
 
     Ok(reg.graph)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_file(
     reg: &mut Registry,
     analysis: &ra_ap_ide::Analysis,
+    db: &RootDatabase,
+    local: &HashSet<Crate>,
     vfs: &Vfs,
     fid: RaFileId,
     fsc: &FileStructureConfig,
@@ -345,6 +399,9 @@ fn process_file(
         return;
     };
     let lcw_file = reg.intern_file(fid, vfs);
+    // Every caller here is in a workspace-local file (parse() filters), so we
+    // only need this file's crate name.
+    let (caller_crate, _) = crate_info(analysis, db, local, fid);
 
     for node in &structure {
         let is_callable = matches!(
@@ -360,7 +417,14 @@ fn process_file(
             .and_then(|p| structure.get(p))
             .map(|parent| container_of(&parent.label));
 
-        let from = reg.caller_node(lcw_file, fid, node, container.as_deref(), &li);
+        let from = reg.caller_node(
+            lcw_file,
+            fid,
+            node,
+            caller_crate.as_deref(),
+            container.as_deref(),
+            &li,
+        );
 
         let pos = FilePosition {
             file_id: fid,
@@ -371,7 +435,14 @@ fn process_file(
         };
 
         for call in calls {
-            let to = reg.target_node(&call.target, vfs, analysis);
+            let (target_crate, target_local) = crate_info(analysis, db, local, call.target.file_id);
+            let to = reg.target_node(
+                &call.target,
+                target_crate.as_deref(),
+                target_local,
+                vfs,
+                analysis,
+            );
 
             let kind = match call.target.kind {
                 Some(SymbolKind::Method) => EdgeKind::MethodCall,

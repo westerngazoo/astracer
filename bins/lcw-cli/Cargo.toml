@@ -18,6 +18,10 @@ path = "src/main.rs"
 # Opens an interactive native window (winit + wgpu). Off by default so the
 # analysis-only CLI stays light and GPU-free.
 viewer = ["dep:lcw-render", "dep:lcw-layout"]
+# Precise, cross-crate call resolution via rust-analyzer. Heavier to build;
+# enables `--semantic` on `analyze`/`flow`/`explain` (otherwise it falls back
+# to fast mode).
+semantic = ["lcw-engine/semantic"]
 
 [dependencies]
 lcw-core = { path = "../../crates/lcw-core" }

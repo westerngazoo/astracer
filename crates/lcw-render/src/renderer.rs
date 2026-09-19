@@ -34,12 +34,26 @@ pub struct Renderer {
     camera_bg: wgpu::BindGroup,
     node_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    /// Same vertex layout/shader as edges, but triangle-list: used for the
+    /// translucent module-group rectangles and the text glyph pixels.
+    fill_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
     quad_vbo: wgpu::Buffer,
     node_vbo: wgpu::Buffer,
     node_count: u32,
     edge_vbo: wgpu::Buffer,
     edge_vertices: u32,
+    group_fill_vbo: wgpu::Buffer,
+    group_fill_vertices: u32,
+    group_outline_vbo: wgpu::Buffer,
+    group_outline_vertices: u32,
+    label_vbo: wgpu::Buffer,
+    label_vertices: u32,
+    /// Screen-space (pixel) ortho for the HUD overlay, plus its geometry.
+    hud_camera_buf: wgpu::Buffer,
+    hud_camera_bg: wgpu::BindGroup,
+    hud_vbo: Option<wgpu::Buffer>,
+    hud_vertices: u32,
     pick_target: Option<PickTarget>,
 }
 
@@ -88,6 +102,24 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buf.as_entire_binding(),
+            }],
+        });
+
+        // A second camera used only for the HUD overlay: a pixel-space ortho so
+        // the panel stays put regardless of pan/zoom. Filled in via
+        // `update_hud_projection`.
+        let hud_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lcw hud camera"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let hud_camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lcw hud camera bg"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: hud_camera_buf.as_entire_binding(),
             }],
         });
 
@@ -152,7 +184,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_edge"),
-                buffers: &[edge_layout],
+                buffers: std::slice::from_ref(&edge_layout),
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -169,6 +201,34 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Reuses the edge shader (position + color) but draws triangles instead
+        // of lines: module-group rectangle fills and text glyphs.
+        let fill_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lcw fills"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_edge"),
+                buffers: &[edge_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_edge"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -216,18 +276,44 @@ impl Renderer {
             contents: bytemuck::cast_slice(&scene.edges),
             usage: wgpu::BufferUsages::VERTEX,
         });
+        let group_fill_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lcw group fills"),
+            contents: bytemuck::cast_slice(&scene.group_fills),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let group_outline_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lcw group outlines"),
+            contents: bytemuck::cast_slice(&scene.group_outlines),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let label_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lcw labels"),
+            contents: bytemuck::cast_slice(&scene.labels),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
         Renderer {
             camera_buf,
             camera_bg,
             node_pipeline,
             edge_pipeline,
+            fill_pipeline,
             pick_pipeline,
             quad_vbo,
             node_vbo,
             node_count: scene.nodes.len() as u32,
             edge_vbo,
             edge_vertices: scene.edges.len() as u32,
+            group_fill_vbo,
+            group_fill_vertices: scene.group_fills.len() as u32,
+            group_outline_vbo,
+            group_outline_vertices: scene.group_outlines.len() as u32,
+            label_vbo,
+            label_vertices: scene.labels.len() as u32,
+            hud_camera_buf,
+            hud_camera_bg,
+            hud_vbo: None,
+            hud_vertices: 0,
             pick_target: None,
         }
     }
@@ -238,6 +324,62 @@ impl Renderer {
             view_proj: camera.view_proj().to_cols_array_2d(),
         };
         queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Set the HUD's pixel-space projection. HUD geometry is authored in a
+    /// bottom-left origin, +X right / +Y up pixel space (so [`crate::text`],
+    /// which descends per glyph row, reads top-to-bottom), mapped straight to
+    /// clip space.
+    pub fn update_hud_projection(&self, queue: &wgpu::Queue, width: u32, height: u32) {
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        let m = [
+            [2.0 / w, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / h, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [-1.0, -1.0, 0.0, 1.0],
+        ];
+        let uniform = CameraUniform { view_proj: m };
+        queue.write_buffer(&self.hud_camera_buf, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Replace the HUD overlay geometry (screen-space triangles). Pass an empty
+    /// slice to hide the HUD.
+    pub fn set_hud(&mut self, device: &wgpu::Device, verts: &[EdgeVertex]) {
+        if verts.is_empty() {
+            self.hud_vbo = None;
+            self.hud_vertices = 0;
+            return;
+        }
+        self.hud_vbo = Some(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("lcw hud"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+        );
+        self.hud_vertices = verts.len() as u32;
+    }
+
+    /// Replace the node instances (same count) — used to recolor / dim nodes
+    /// when highlighting a selection or a traced flow path.
+    pub fn set_nodes(&mut self, device: &wgpu::Device, nodes: &[NodeInstance]) {
+        self.node_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lcw node instances"),
+            contents: bytemuck::cast_slice(nodes),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        self.node_count = nodes.len() as u32;
+    }
+
+    /// Replace the edge line-list vertices — used to recolor / dim edges when
+    /// highlighting a selection's incident edges or a traced flow path.
+    pub fn set_edges(&mut self, device: &wgpu::Device, verts: &[EdgeVertex]) {
+        self.edge_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lcw edges"),
+            contents: bytemuck::cast_slice(verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        self.edge_vertices = verts.len() as u32;
     }
 
     /// Draw the graph (edges under nodes) into `target`.
@@ -264,10 +406,24 @@ impl Renderer {
 
         pass.set_bind_group(0, &self.camera_bg, &[]);
 
+        // Module-group rectangles sit *behind* the graph.
+        if self.group_fill_vertices > 0 {
+            pass.set_pipeline(&self.fill_pipeline);
+            pass.set_vertex_buffer(0, self.group_fill_vbo.slice(..));
+            pass.draw(0..self.group_fill_vertices, 0..1);
+        }
+
         if self.edge_vertices > 0 {
             pass.set_pipeline(&self.edge_pipeline);
             pass.set_vertex_buffer(0, self.edge_vbo.slice(..));
             pass.draw(0..self.edge_vertices, 0..1);
+        }
+
+        // Crisp group borders on top of the edges.
+        if self.group_outline_vertices > 0 {
+            pass.set_pipeline(&self.edge_pipeline);
+            pass.set_vertex_buffer(0, self.group_outline_vbo.slice(..));
+            pass.draw(0..self.group_outline_vertices, 0..1);
         }
 
         if self.node_count > 0 {
@@ -275,6 +431,23 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.quad_vbo.slice(..));
             pass.set_vertex_buffer(1, self.node_vbo.slice(..));
             pass.draw(0..6, 0..self.node_count);
+        }
+
+        // Text labels last, so they read on top of everything.
+        if self.label_vertices > 0 {
+            pass.set_pipeline(&self.fill_pipeline);
+            pass.set_vertex_buffer(0, self.label_vbo.slice(..));
+            pass.draw(0..self.label_vertices, 0..1);
+        }
+
+        // HUD overlay on the very top, in screen space (its own camera).
+        if let Some(hud) = &self.hud_vbo {
+            if self.hud_vertices > 0 {
+                pass.set_pipeline(&self.fill_pipeline);
+                pass.set_bind_group(0, &self.hud_camera_bg, &[]);
+                pass.set_vertex_buffer(0, hud.slice(..));
+                pass.draw(0..self.hud_vertices, 0..1);
+            }
         }
     }
 

@@ -209,6 +209,7 @@ impl Engine {
         };
         lcw_telemetry::count("engine.nodes", graph.node_count() as u64);
         lcw_telemetry::count("engine.edges", graph.edge_count() as u64);
+        lcw_telemetry::count("engine.graph_bytes", graph.estimated_bytes() as u64);
 
         let report = self.finish_report(graph, progress);
         Ok((report, stats))
@@ -233,6 +234,7 @@ impl Engine {
         let graph = lcw_telemetry::timed("engine.parse", || self.adapter.parse(sources))?;
         lcw_telemetry::count("engine.nodes", graph.node_count() as u64);
         lcw_telemetry::count("engine.edges", graph.edge_count() as u64);
+        lcw_telemetry::count("engine.graph_bytes", graph.estimated_bytes() as u64);
         Ok(self.finish_report(graph, progress))
     }
 

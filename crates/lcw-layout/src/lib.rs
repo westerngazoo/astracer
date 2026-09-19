@@ -14,6 +14,8 @@
 use lcw_core::CodeGraph;
 use rayon::prelude::*;
 
+mod barnes_hut;
+
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
@@ -22,6 +24,12 @@ pub use gpu::{layout_gpu, layout_gpu_or_cpu, GpuLayoutError};
 
 /// A 2D point.
 pub type Vec2 = [f32; 2];
+
+/// Node count at/above which the exact `O(n^2)` repulsion is swapped for the
+/// Barnes-Hut `O(n log n)` approximation ([`barnes_hut`]). Smaller graphs keep
+/// the exact all-pairs forces: it's cheap there, avoids any approximation error,
+/// and preserves the historical (reproducible) layout for existing callers/tests.
+const BARNES_HUT_THRESHOLD: usize = 1024;
 
 /// Tunable layout parameters.
 #[derive(Debug, Clone, Copy)]
@@ -95,35 +103,19 @@ pub fn layout(graph: &CodeGraph, params: &LayoutParams) -> Layout {
     let mut temp = params.temperature;
     let cooling = params.temperature / (params.iterations.max(1) as f32);
 
+    // Reused across iterations to avoid reallocating the displacement buffer
+    // every step (one allocation instead of `iterations`).
+    let mut disp: Vec<Vec2> = vec![[0.0, 0.0]; n];
+    let use_barnes_hut = n >= BARNES_HUT_THRESHOLD;
+
     for _ in 0..params.iterations {
-        // Repulsion: parallel over nodes, O(n^2) reads of shared positions.
-        let mut disp: Vec<Vec2> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let pi = pos[i];
-                let mut dx = 0.0f32;
-                let mut dy = 0.0f32;
-                for (j, pj) in pos.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
-                    let mut ex = pi[0] - pj[0];
-                    let mut ey = pi[1] - pj[1];
-                    let mut d2 = ex * ex + ey * ey;
-                    if d2 < 1e-4 {
-                        // Deterministic nudge for coincident nodes.
-                        ex = ((i * 31 + j) % 7) as f32 - 3.0;
-                        ey = ((i * 17 + j) % 5) as f32 - 2.0;
-                        d2 = ex * ex + ey * ey + 1e-3;
-                    }
-                    let dist = d2.sqrt();
-                    let force = params.repulsion * (k * k) / dist;
-                    dx += ex / dist * force;
-                    dy += ey / dist * force;
-                }
-                [dx, dy]
-            })
-            .collect();
+        // Repulsion. Exact all-pairs (parallel, O(n^2)) for small graphs;
+        // Barnes-Hut (O(n log n)) once the node count crosses the threshold.
+        if use_barnes_hut {
+            barnes_hut::repulsion(&pos, &mut disp, k, params.repulsion);
+        } else {
+            repulsion_exact(&pos, &mut disp, k, params.repulsion);
+        }
 
         // Attraction along edges (sequential scatter).
         for &(a, b) in &edges {
@@ -161,6 +153,37 @@ pub fn layout(graph: &CodeGraph, params: &LayoutParams) -> Layout {
         min,
         max,
     }
+}
+
+/// Exact all-pairs repulsion: for each node, sum the `k^2 / d` push from every
+/// other node. Parallel over nodes and O(n^2); written into the reused `disp`
+/// buffer. Coincident nodes get a deterministic index-based nudge so the layout
+/// stays reproducible.
+fn repulsion_exact(pos: &[Vec2], disp: &mut [Vec2], k: f32, repulsion: f32) {
+    disp.par_iter_mut().enumerate().for_each(|(i, out)| {
+        let pi = pos[i];
+        let mut dx = 0.0f32;
+        let mut dy = 0.0f32;
+        for (j, pj) in pos.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let mut ex = pi[0] - pj[0];
+            let mut ey = pi[1] - pj[1];
+            let mut d2 = ex * ex + ey * ey;
+            if d2 < 1e-4 {
+                // Deterministic nudge for coincident nodes.
+                ex = ((i * 31 + j) % 7) as f32 - 3.0;
+                ey = ((i * 17 + j) % 5) as f32 - 2.0;
+                d2 = ex * ex + ey * ey + 1e-3;
+            }
+            let dist = d2.sqrt();
+            let force = repulsion * (k * k) / dist;
+            dx += ex / dist * force;
+            dy += ey / dist * force;
+        }
+        *out = [dx, dy];
+    });
 }
 
 /// Deterministic initial placement on a phyllotaxis (sunflower) spiral so
@@ -246,5 +269,25 @@ mod tests {
         let g = CodeGraph::new();
         let l = layout(&g, &LayoutParams::default());
         assert!(l.positions.is_empty());
+    }
+
+    #[test]
+    fn large_graph_uses_barnes_hut_and_stays_sane() {
+        // A node count past the threshold exercises the Barnes-Hut path; it must
+        // still yield one finite position per node and be reproducible.
+        let n = BARNES_HUT_THRESHOLD + 200;
+        let g = line_graph(n);
+        let p = LayoutParams {
+            iterations: 20,
+            ..Default::default()
+        };
+        let a = layout(&g, &p);
+        assert_eq!(a.positions.len(), n);
+        assert!(a
+            .positions
+            .iter()
+            .all(|q| q[0].is_finite() && q[1].is_finite()));
+        let b = layout(&g, &p);
+        assert_eq!(a.positions, b.positions);
     }
 }

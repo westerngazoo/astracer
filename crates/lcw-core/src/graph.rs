@@ -207,6 +207,65 @@ impl CodeGraph {
         Self::default()
     }
 
+    /// Create a graph pre-sized for roughly `nodes` nodes and `edges` edges.
+    /// Reserving up front avoids the repeated reallocations (and memory churn)
+    /// of growing the node/edge storage and lookup tables one entry at a time,
+    /// which matters when rebuilding large graphs (e.g. [`from_snapshot`]).
+    ///
+    /// [`from_snapshot`]: CodeGraph::from_snapshot
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
+        CodeGraph {
+            graph: DiGraph::with_capacity(nodes, edges),
+            files: Vec::new(),
+            file_index: HashMap::new(),
+            qualified_index: HashMap::with_capacity(nodes),
+            edge_index: HashMap::with_capacity(edges),
+        }
+    }
+
+    /// Approximate resident size of the graph in bytes: the node/edge structs
+    /// plus the heap behind node name strings, the interned file table, and the
+    /// lookup indices (whose keys duplicate the qualified names). Intended for
+    /// perf tracking / telemetry on large repos, not exact accounting.
+    pub fn estimated_bytes(&self) -> usize {
+        let node_structs = self.graph.node_count() * std::mem::size_of::<Node>();
+        let node_strings: usize = self
+            .graph
+            .node_weights()
+            .map(|n| n.name.capacity() + n.qualified_name.capacity() + n.module_path.capacity())
+            .sum();
+        // petgraph stores each edge with its two endpoints; approximate that.
+        let edge_structs = self.graph.edge_count()
+            * (std::mem::size_of::<Edge>() + 2 * std::mem::size_of::<u32>());
+        let files = self.files.capacity() * std::mem::size_of::<PathBuf>()
+            + self
+                .files
+                .iter()
+                .map(|p| p.as_os_str().len())
+                .sum::<usize>();
+        // The qualified-name index keeps a second copy of each name as its key.
+        let qualified_index: usize = self
+            .qualified_index
+            .keys()
+            .map(|k| k.capacity() + std::mem::size_of::<NodeId>())
+            .sum();
+        let edge_index = self.edge_index.len()
+            * (std::mem::size_of::<(u32, u32, u8)>()
+                + std::mem::size_of::<petgraph::graph::EdgeIndex>());
+        let file_index: usize = self
+            .file_index
+            .keys()
+            .map(|p| p.as_os_str().len() + std::mem::size_of::<FileId>())
+            .sum();
+        node_structs
+            + node_strings
+            + edge_structs
+            + files
+            + qualified_index
+            + edge_index
+            + file_index
+    }
+
     // -- files ------------------------------------------------------------
 
     /// Intern a file path, returning a stable [`FileId`].
@@ -408,7 +467,9 @@ impl CodeGraph {
     /// so `nodes[i]` keeps index `i`; the qualified-name and edge lookup tables
     /// are rebuilt to match.
     pub fn from_snapshot(snapshot: GraphSnapshot) -> Self {
-        let mut g = CodeGraph::new();
+        let mut g = CodeGraph::with_capacity(snapshot.nodes.len(), snapshot.edges.len());
+        g.files.reserve(snapshot.files.len());
+        g.file_index.reserve(snapshot.files.len());
         for (i, path) in snapshot.files.into_iter().enumerate() {
             let id = FileId(i as u32);
             g.files.push(path.clone());
@@ -468,4 +529,71 @@ pub struct EdgeExport {
     pub kind: EdgeKind,
     pub call_site: SourceSpan,
     pub count: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn def_node(qn: &str) -> Node {
+        Node {
+            id: NodeId(0),
+            name: qn.rsplit("::").next().unwrap_or(qn).to_string(),
+            qualified_name: qn.to_string(),
+            module_path: qn
+                .rsplit_once("::")
+                .map(|(m, _)| m.to_string())
+                .unwrap_or_default(),
+            kind: NodeKind::Function,
+            span: SourceSpan::default(),
+            flags: NodeFlags::default(),
+            stats: NodeStats::default(),
+        }
+    }
+
+    #[test]
+    fn with_capacity_behaves_like_new() {
+        let mut g = CodeGraph::with_capacity(8, 8);
+        let f = g.intern_file("src/lib.rs");
+        let a = g.add_node(def_node("m::a"));
+        let b = g.add_node(def_node("m::b"));
+        g.add_edge(
+            a,
+            b,
+            Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 1, 0, 1, 1)),
+        );
+        assert_eq!(g.node_count(), 2);
+        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.node_by_qualified("m::a"), Some(a));
+    }
+
+    #[test]
+    fn estimated_bytes_grows_with_content() {
+        let empty = CodeGraph::new().estimated_bytes();
+        let mut g = CodeGraph::new();
+        for i in 0..50 {
+            g.add_node(def_node(&format!("mymod::func_number_{i}")));
+        }
+        assert!(
+            g.estimated_bytes() > empty,
+            "a populated graph should estimate larger than an empty one"
+        );
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_counts_and_lookup() {
+        let mut g = CodeGraph::new();
+        let f = g.intern_file("src/lib.rs");
+        let a = g.add_node(def_node("m::a"));
+        let b = g.add_node(def_node("m::b"));
+        g.add_edge(
+            a,
+            b,
+            Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 1, 0, 1, 1)),
+        );
+        let g2 = CodeGraph::from_snapshot(g.snapshot());
+        assert_eq!(g2.node_count(), 2);
+        assert_eq!(g2.edge_count(), 1);
+        assert_eq!(g2.node_by_qualified("m::b"), Some(b));
+    }
 }

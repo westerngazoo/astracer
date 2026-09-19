@@ -1,8 +1,9 @@
 //! Criterion benchmark for the force-directed layout.
 //!
-//! The repulsion step is O(n^2) per iteration, so this measures how layout
-//! cost scales with node count at a fixed iteration budget. Run with
-//! `cargo bench -p lcw-layout`.
+//! Repulsion is exact (O(n^2)) below the internal Barnes-Hut threshold and
+//! approximate (O(n log n)) above it, so the sweep straddles the crossover: the
+//! small sizes measure the exact path, the large ones the Barnes-Hut path (which
+//! is what keeps "repos gigantes" tractable). Run with `cargo bench -p lcw-layout`.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use lcw_core::{CodeGraph, Edge, EdgeKind, Node, SourceSpan};
@@ -38,7 +39,8 @@ fn bench_layout(c: &mut Criterion) {
     let mut group = c.benchmark_group("layout_fr");
     group.sample_size(20);
 
-    for &n in &[200usize, 800, 2000] {
+    // 200/800 are exact; 2000 and up cross into Barnes-Hut.
+    for &n in &[200usize, 800, 2000, 8000, 20000] {
         let graph = synth_graph(n);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &graph, |b, graph| {

@@ -45,6 +45,11 @@ analyze path=".":
 view path=".":
     cargo run -p lcw-cli --features viewer -- view {{path}}
 
+# Type-check the Leptos/wasm desktop frontend (mirrors the `wasm` CI job).
+# Needs: rustup target add wasm32-unknown-unknown
+wasm-check:
+    cd apps/desktop/frontend && cargo check --target wasm32-unknown-unknown --locked
+
 # Desktop app (Tauri v2 + Leptos/WASM) dev server. Needs trunk + tauri-cli:
 #   rustup target add wasm32-unknown-unknown
 #   cargo install trunk tauri-cli --locked

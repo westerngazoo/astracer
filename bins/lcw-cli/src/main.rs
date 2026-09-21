@@ -1,18 +1,22 @@
 //! `lcw` - the Live Code Walk command-line interface.
 //!
 //! A standalone front end over `lcw-engine`, driven by `livewalk.toml`
-//! (Manifesto: CLI guided by config files).
+//! (Manifesto: CLI guided by config files). The navigation commands
+//! (`explain`, `flow`, `outline`, `entries`, `calls`) are thin text renderers
+//! over `lcw-query`, the same traversal code the viewers use.
 
 mod export;
 mod flow;
+mod nav;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use lcw_config::Config;
-use lcw_core::{Node, NodeId, NodeKind};
+use lcw_core::AnalysisReport;
 use lcw_engine::Engine;
+use lcw_query::{CallTreeOptions, Direction, EntryKind};
 
 /// Live Code Walk & Analysis.
 #[derive(Debug, Parser)]
@@ -34,6 +38,12 @@ enum Command {
     Explain(ExplainArgs),
     /// Trace the shortest call path(s) from an entry point to a target symbol.
     Flow(FlowArgs),
+    /// Print the code hierarchy (crate ▸ module ▸ type ▸ function) as a tree.
+    Outline(OutlineArgs),
+    /// List entry points: `main`, uncalled public API, private roots, tests.
+    Entries(EntriesArgs),
+    /// Print the call tree below (or above) a symbol: what it triggers.
+    Calls(CallsArgs),
     /// Write a default `livewalk.toml` to the current directory.
     Init(InitArgs),
     /// Open the interactive graph viewer (native window).
@@ -129,11 +139,9 @@ struct ShotArgs {
     flow_from: Option<String>,
 }
 
+/// Where to analyze and how — shared by every navigation command.
 #[derive(Debug, Args)]
-struct ExplainArgs {
-    /// Symbol to explain: a substring of a qualified name (e.g. `Engine::analyze`).
-    symbol: String,
-
+struct RepoArgs {
     /// Repository path.
     #[arg(long, default_value = ".")]
     path: PathBuf,
@@ -141,6 +149,21 @@ struct ExplainArgs {
     /// Explicit config file. Otherwise `livewalk.toml` is searched for.
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Use rust-analyzer semantic resolution (accurate cross-crate calls).
+    /// Requires a `--features semantic` build; otherwise falls back to fast
+    /// mode (which cannot see cross-crate edges).
+    #[arg(long)]
+    semantic: bool,
+}
+
+#[derive(Debug, Args)]
+struct ExplainArgs {
+    /// Symbol to explain: a substring of a qualified name (e.g. `Engine::analyze`).
+    symbol: String,
+
+    #[command(flatten)]
+    repo: RepoArgs,
 
     /// Max callers/callees to list on each side.
     #[arg(long, default_value_t = 20)]
@@ -150,11 +173,6 @@ struct ExplainArgs {
     /// instead of the text view.
     #[arg(long)]
     json: bool,
-
-    /// Use rust-analyzer semantic resolution (accurate cross-crate calls).
-    /// Requires a `--features semantic` build; otherwise falls back to fast mode.
-    #[arg(long)]
-    semantic: bool,
 }
 
 #[derive(Debug, Args)]
@@ -166,13 +184,8 @@ struct FlowArgs {
     #[arg(long, default_value = "main")]
     from: String,
 
-    /// Repository path.
-    #[arg(long, default_value = ".")]
-    path: PathBuf,
-
-    /// Explicit config file. Otherwise `livewalk.toml` is searched for.
-    #[arg(short, long)]
-    config: Option<PathBuf>,
+    #[command(flatten)]
+    repo: RepoArgs,
 
     /// Max alternate shortest paths to report.
     #[arg(long, default_value_t = 6)]
@@ -191,12 +204,6 @@ struct FlowArgs {
     #[arg(long)]
     snippets: bool,
 
-    /// Use rust-analyzer semantic resolution so cross-crate/cross-layer calls
-    /// resolve. Requires a `--features semantic` build; otherwise falls back to
-    /// fast mode (which cannot see cross-crate edges).
-    #[arg(long)]
-    semantic: bool,
-
     /// Also render the flow to this PNG (requires a `--features viewer` build).
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -211,6 +218,103 @@ struct FlowArgs {
 }
 
 #[derive(Debug, Args)]
+struct OutlineArgs {
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Collapse scopes at this depth (0 = crates, 1 = top-level modules...)
+    /// into a one-line summary with counts.
+    #[arg(long)]
+    depth: Option<u32>,
+
+    /// Only keep functions whose qualified name contains this text (and the
+    /// scopes that lead to them).
+    #[arg(long)]
+    filter: Option<String>,
+
+    /// Print scopes only (the architecture at a glance), no functions.
+    #[arg(long)]
+    scopes_only: bool,
+
+    /// Emit the tree as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Entry-point kinds selectable on the command line.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EntryKindArg {
+    Main,
+    Public,
+    Root,
+    Test,
+}
+
+impl From<EntryKindArg> for EntryKind {
+    fn from(k: EntryKindArg) -> Self {
+        match k {
+            EntryKindArg::Main => EntryKind::Main,
+            EntryKindArg::Public => EntryKind::PublicRoot,
+            EntryKindArg::Root => EntryKind::Root,
+            EntryKindArg::Test => EntryKind::Test,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct EntriesArgs {
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Only list entry points of this kind.
+    #[arg(long, value_enum)]
+    kind: Option<EntryKindArg>,
+
+    /// Compute, for every entry, how many functions it can reach (`main`s
+    /// always get this; it is opt-in for the rest because a library can have
+    /// thousands of public roots).
+    #[arg(long)]
+    reach: bool,
+
+    /// Max entries to print per kind.
+    #[arg(long, default_value_t = 40)]
+    limit: usize,
+
+    /// Emit the list as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CallsArgs {
+    /// Root symbol (substring of a qualified name); `main` is a good start.
+    symbol: String,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Walk *callers* (who can trigger this) instead of callees.
+    #[arg(long)]
+    callers: bool,
+
+    /// How many levels to expand below the root.
+    #[arg(long, default_value_t = 3)]
+    depth: u32,
+
+    /// Max children shown per node.
+    #[arg(long, default_value_t = 12)]
+    width: usize,
+
+    /// Include external / unresolved targets as leaves.
+    #[arg(long)]
+    external: bool,
+
+    /// Emit the tree as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct InitArgs {
     /// Directory to write `livewalk.toml` into (defaults to `.`).
     path: Option<PathBuf>,
@@ -221,30 +325,57 @@ struct InitArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let log = cli.log.as_deref();
     match cli.command {
-        Command::Analyze(args) => run_analyze(args, cli.log.as_deref()),
-        Command::Explain(args) => run_explain(args, cli.log.as_deref()),
-        Command::Flow(args) => run_flow(args, cli.log.as_deref()),
+        Command::Analyze(args) => run_analyze(args, log),
+        Command::Explain(args) => run_explain(args, log),
+        Command::Flow(args) => run_flow(args, log),
+        Command::Outline(args) => run_outline(args, log),
+        Command::Entries(args) => run_entries(args, log),
+        Command::Calls(args) => run_calls(args, log),
         Command::Init(args) => run_init(args),
         #[cfg(feature = "viewer")]
-        Command::View(args) => run_view(args, cli.log.as_deref()),
+        Command::View(args) => run_view(args, log),
         #[cfg(feature = "viewer")]
-        Command::Shot(args) => run_shot(args, cli.log.as_deref()),
+        Command::Shot(args) => run_shot(args, log),
     }
+}
+
+/// Resolve the config for `path` (optionally forcing the semantic adapter),
+/// initialize telemetry and run the engine. Every navigation command starts
+/// here so they all agree on config discovery and fallbacks.
+fn analyze_path(
+    path: &Path,
+    config: Option<&Path>,
+    semantic: bool,
+    log_override: Option<&str>,
+) -> Result<AnalysisReport> {
+    let search_dir = config_search_dir(path);
+    let mut config = Config::resolve(config, &search_dir).context("resolving configuration")?;
+    if semantic {
+        config.adapter.mode = lcw_config::AdapterMode::Semantic;
+    }
+    // Telemetry: CLI stays quiet by default so stdout output isn't polluted.
+    lcw_telemetry::init(log_override.unwrap_or("warn"));
+
+    Engine::new(config)
+        .analyze(path)
+        .with_context(|| format!("analyzing {}", path.display()))
+}
+
+fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisReport> {
+    analyze_path(
+        &repo.path,
+        repo.config.as_deref(),
+        repo.semantic,
+        log_override,
+    )
 }
 
 #[cfg(feature = "viewer")]
 fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let search_dir = config_search_dir(&path);
-    let config =
-        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    lcw_telemetry::init(log_override.unwrap_or("warn"));
-
-    let engine = Engine::new(config);
-    let report = engine
-        .analyze(&path)
-        .with_context(|| format!("analyzing {}", path.display()))?;
+    let report = analyze_path(&path, args.config.as_deref(), false, log_override)?;
 
     match args.view_kind {
         ViewKind::Module => {
@@ -261,7 +392,7 @@ fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
             let mut scene = lcw_render::scene::build(g, &layout.positions);
             let mut hud = Vec::new();
             if let Some(sym) = args.select.as_deref() {
-                let hits = flow::resolve(g, sym);
+                let hits = lcw_query::resolve(g, sym);
                 let Some(&target) = hits.first() else {
                     anyhow::bail!("no internal symbol matches {sym:?}");
                 };
@@ -270,8 +401,8 @@ fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
                 // Optionally trace a path from an entry point to the target.
                 let path: Vec<usize> = match args.flow_from.as_deref() {
                     Some(from) => {
-                        let from_hits = flow::resolve(g, from);
-                        flow::shortest_paths(g, &from_hits, &hits, 1, 64)
+                        let from_hits = lcw_query::resolve(g, from);
+                        lcw_query::shortest_paths(g, &from_hits, &hits, 1, 64)
                             .map(|fp| fp.paths[0].iter().map(|id| id.0 as usize).collect())
                             .unwrap_or_default()
                     }
@@ -279,8 +410,7 @@ fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
                 };
 
                 let anchor = path.first().copied();
-                let (nodes, edges) =
-                    lcw_render::native::highlight(&scene, Some(target_idx), anchor, &path);
+                let (nodes, edges) = lcw_render::highlight(&scene, Some(target_idx), anchor, &path);
                 scene.nodes = nodes;
                 scene.edges = edges;
 
@@ -323,15 +453,12 @@ fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
 #[cfg(feature = "viewer")]
 fn run_view(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let search_dir = config_search_dir(&path);
-    let config =
-        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    lcw_telemetry::init(log_override.unwrap_or("info"));
-
-    let engine = Engine::new(config);
-    let report = engine
-        .analyze(&path)
-        .with_context(|| format!("analyzing {}", path.display()))?;
+    let report = analyze_path(
+        &path,
+        args.config.as_deref(),
+        false,
+        Some(log_override.unwrap_or("info")),
+    )?;
 
     match args.view_kind {
         ViewKind::Module => {
@@ -352,19 +479,7 @@ fn run_view(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
 
 fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let search_dir = config_search_dir(&path);
-
-    let config =
-        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-
-    // Telemetry: CLI stays quiet by default so stdout output isn't polluted.
-    let level = log_override.unwrap_or("warn");
-    lcw_telemetry::init(level);
-
-    let engine = Engine::new(config);
-    let report = engine
-        .analyze(&path)
-        .with_context(|| format!("analyzing {}", path.display()))?;
+    let report = analyze_path(&path, args.config.as_deref(), false, log_override)?;
 
     let rendered = match args.format {
         Format::Summary => export::format_summary(&report, args.top),
@@ -385,61 +500,11 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn kind_str(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Function => "function",
-        NodeKind::Method => "method",
-        NodeKind::Closure => "closure",
-        NodeKind::External => "external",
-    }
-}
-
-fn flags_vec(n: &Node) -> Vec<&'static str> {
-    let mut v = Vec::new();
-    if n.flags.is_pub {
-        v.push("pub");
-    }
-    if n.flags.is_async {
-        v.push("async");
-    }
-    if n.flags.is_unsafe {
-        v.push("unsafe");
-    }
-    if n.flags.is_test {
-        v.push("test");
-    }
-    if n.flags.is_generic {
-        v.push("generic");
-    }
-    v
-}
-
-fn flags_str(n: &Node) -> String {
-    flags_vec(n).join(" ")
-}
-
-fn node_file(g: &lcw_core::CodeGraph, n: &Node) -> String {
-    g.file_path(n.span.file())
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-}
-
 fn run_explain(args: ExplainArgs, log_override: Option<&str>) -> Result<()> {
-    let search_dir = config_search_dir(&args.path);
-    let mut config =
-        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    if args.semantic {
-        config.adapter.mode = lcw_config::AdapterMode::Semantic;
-    }
-    lcw_telemetry::init(log_override.unwrap_or("warn"));
-
-    let engine = Engine::new(config);
-    let report = engine
-        .analyze(&args.path)
-        .with_context(|| format!("analyzing {}", args.path.display()))?;
+    let report = analyze_repo(&args.repo, log_override)?;
     let g = &report.graph;
 
-    let hits = flow::resolve(g, &args.symbol);
+    let hits = lcw_query::resolve(g, &args.symbol);
     let Some(&id) = hits.first() else {
         anyhow::bail!("no internal symbol matches {:?}", args.symbol);
     };
@@ -450,105 +515,25 @@ fn run_explain(args: ExplainArgs, log_override: Option<&str>) -> Result<()> {
             args.symbol
         );
     }
-
-    let n = g.node(id);
-
-    let mut callers: Vec<NodeId> = g.neighbors_in(id).collect();
-    callers.sort_by(|&a, &b| g.node(a).qualified_name.cmp(&g.node(b).qualified_name));
-    let mut callees: Vec<NodeId> = g.neighbors_out(id).collect();
-    callees.sort_by(|&a, &b| g.node(a).qualified_name.cmp(&g.node(b).qualified_name));
+    let card = lcw_query::node_card(g, id).context("building node card")?;
 
     if args.json {
-        let card = serde_json::json!({
-            "qualified_name": n.qualified_name,
-            "name": n.name,
-            "kind": kind_str(n.kind),
-            "file": node_file(g, n),
-            "line": n.span.start_line,
-            "flags": flags_vec(n),
-            "metrics": {
-                "cyclomatic": n.cyclomatic_complexity(),
-                "parameters": n.stats.parameters,
-                "lines_of_code": n.stats.lines_of_code,
-                "max_nesting": n.stats.max_nesting,
-                "decision_points": n.stats.decision_points,
-            },
-            "inputs": callers.iter().map(|&c| {
-                let cn = g.node(c);
-                serde_json::json!({ "qualified_name": cn.qualified_name, "name": cn.name })
-            }).collect::<Vec<_>>(),
-            "outputs": callees.iter().map(|&c| {
-                let cn = g.node(c);
-                serde_json::json!({
-                    "qualified_name": cn.qualified_name,
-                    "name": cn.name,
-                    "external": cn.kind == NodeKind::External,
-                })
-            }).collect::<Vec<_>>(),
-        });
         println!(
             "{}",
             serde_json::to_string_pretty(&card).context("serializing explain card")?
         );
-        return Ok(());
-    }
-
-    println!("{}", n.qualified_name);
-    println!("  kind:    {}", kind_str(n.kind));
-    println!("  where:   {}", flow::location(g, n));
-    println!(
-        "  metrics: cc {}  params {}  loc {}  nesting {}",
-        n.cyclomatic_complexity(),
-        n.stats.parameters,
-        n.stats.lines_of_code,
-        n.stats.max_nesting
-    );
-    let flags = flags_str(n);
-    if !flags.is_empty() {
-        println!("  flags:   {flags}");
-    }
-
-    println!("\n  inputs — {} caller(s):", callers.len());
-    for &c in callers.iter().take(args.limit) {
-        println!("    <- {}", g.node(c).qualified_name);
-    }
-    if callers.len() > args.limit {
-        println!("    ... {} more", callers.len() - args.limit);
-    }
-
-    println!("\n  outputs — {} callee(s):", callees.len());
-    for &c in callees.iter().take(args.limit) {
-        let cn = g.node(c);
-        let tag = if cn.kind == NodeKind::External {
-            "  (external)"
-        } else {
-            ""
-        };
-        println!("    -> {}{}", cn.qualified_name, tag);
-    }
-    if callees.len() > args.limit {
-        println!("    ... {} more", callees.len() - args.limit);
+    } else {
+        print!("{}", nav::format_card(&card, args.limit));
     }
     Ok(())
 }
 
 fn run_flow(args: FlowArgs, log_override: Option<&str>) -> Result<()> {
-    let search_dir = config_search_dir(&args.path);
-    let mut config =
-        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    if args.semantic {
-        config.adapter.mode = lcw_config::AdapterMode::Semantic;
-    }
-    lcw_telemetry::init(log_override.unwrap_or("warn"));
-
-    let engine = Engine::new(config);
-    let report = engine
-        .analyze(&args.path)
-        .with_context(|| format!("analyzing {}", args.path.display()))?;
+    let report = analyze_repo(&args.repo, log_override)?;
     let g = &report.graph;
 
-    let from = flow::resolve(g, &args.from);
-    let to = flow::resolve(g, &args.to);
+    let from = lcw_query::resolve(g, &args.from);
+    let to = lcw_query::resolve(g, &args.to);
     if from.is_empty() {
         anyhow::bail!("no entry symbol matches {:?}", args.from);
     }
@@ -556,7 +541,7 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>) -> Result<()> {
         anyhow::bail!("no target symbol matches {:?}", args.to);
     }
 
-    let Some(fp) = flow::shortest_paths(g, &from, &to, args.max_paths.max(1), args.max_depth)
+    let Some(fp) = lcw_query::shortest_paths(g, &from, &to, args.max_paths.max(1), args.max_depth)
     else {
         anyhow::bail!(
             "no call path from {:?} to {:?} (try a different entry, or raise --max-depth)",
@@ -592,6 +577,97 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>) -> Result<()> {
                 "--output needs the viewer build: cargo build -p lcw-cli --features viewer"
             );
         }
+    }
+    Ok(())
+}
+
+fn run_outline(args: OutlineArgs, log_override: Option<&str>) -> Result<()> {
+    let report = analyze_repo(&args.repo, log_override)?;
+    let g = &report.graph;
+    let mut outline = lcw_query::outline(g);
+    if let Some(filter) = args.filter.as_deref() {
+        outline = outline.prune(filter);
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outline).context("serializing outline")?
+        );
+    } else {
+        let style = nav::OutlineStyle {
+            max_depth: args.depth,
+            scopes_only: args.scopes_only,
+        };
+        print!("{}", nav::format_outline(&outline, g, &style));
+    }
+    Ok(())
+}
+
+fn run_entries(args: EntriesArgs, log_override: Option<&str>) -> Result<()> {
+    let report = analyze_repo(&args.repo, log_override)?;
+    let g = &report.graph;
+
+    let mut entries = lcw_query::entry_points(g);
+    if let Some(kind) = args.kind {
+        let kind: EntryKind = kind.into();
+        entries.retain(|e| e.kind == kind);
+    }
+    // Cap per kind so a library with thousands of public roots stays readable.
+    let mut per_kind = std::collections::HashMap::new();
+    entries.retain(|e| {
+        let n = per_kind.entry(e.kind).or_insert(0usize);
+        *n += 1;
+        *n <= args.limit
+    });
+
+    let reach: Vec<Option<usize>> = entries
+        .iter()
+        .map(|e| {
+            (args.reach || e.kind == EntryKind::Main)
+                .then(|| lcw_query::reach_count(g, e.id, Direction::Callees))
+        })
+        .collect();
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&nav::entries_json(g, &entries, &reach))
+                .context("serializing entries")?
+        );
+    } else {
+        print!("{}", nav::format_entries(g, &entries, &reach));
+    }
+    Ok(())
+}
+
+fn run_calls(args: CallsArgs, log_override: Option<&str>) -> Result<()> {
+    let report = analyze_repo(&args.repo, log_override)?;
+    let g = &report.graph;
+
+    let Some(root) = lcw_query::best_match(g, &args.symbol) else {
+        anyhow::bail!("no internal symbol matches {:?}", args.symbol);
+    };
+    let direction = if args.callers {
+        Direction::Callers
+    } else {
+        Direction::Callees
+    };
+    let opts = CallTreeOptions {
+        direction,
+        max_depth: args.depth,
+        max_children: args.width.max(1),
+        include_external: args.external,
+    };
+    let tree = lcw_query::call_tree(g, root, &opts);
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&nav::call_tree_json(g, &tree))
+                .context("serializing call tree")?
+        );
+    } else {
+        print!("{}", nav::format_call_tree(g, &tree, direction));
     }
     Ok(())
 }

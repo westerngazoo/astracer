@@ -10,9 +10,17 @@ long editing sessions.
 ### Principle I - Strict modularity
 - Every component is a self-contained black box behind a **closed interface**.
 - Concrete seams in this repo: `LanguageAdapter` (Layer 1), `Lens` (Layer 2),
-  `Advisor` (Layer 3), `EngineTransport` (frontend <-> engine).
+  `Advisor` (Layer 3), `EngineTransport` (frontend <-> engine), and the
+  **navigation contract** in `lcw-query` (`NodeCard`, `Outline`, `EntryPoint`,
+  `FlowPaths`, `CallTreeNode`).
+- **Front ends render; they never traverse.** Any question about the graph
+  (who calls what, where does a flow go, what is an entry point, how is the
+  code organized) is answered by `lcw-query`, which is pure and compiles for
+  the CLI, the native viewer and the wasm webview alike. Do not re-implement a
+  search in a binary or a renderer.
 - Crate dependencies flow **one way only** (see the diagram in `README.md`).
-  Never add an upward or cyclic dependency. `lcw-core` depends on nothing heavy.
+  Never add an upward or cyclic dependency. `lcw-core` depends on nothing heavy;
+  `lcw-query` depends on `lcw-core` + `serde` only.
 - Prefer isolating failures (small blast radius) over sharing mutable state.
 
 ### Principle II - Data-driven approach
@@ -32,9 +40,18 @@ When adding or changing code, keep an eye on:
 - **Cyclomatic complexity** - prefer early returns / small functions; defaults
   flag functions above `metrics.cyclomatic_max` (10).
 - **Test coverage** - cover critical paths and edge cases. Every crate has unit
-  tests; the parser has golden (`insta`) tests.
+  tests; the parser has golden (`insta`) tests; `lcw-query` has a hand-built
+  fixture graph for every query.
 - **Memory footprint** - avoid needless heap allocation; prefer the stack.
 - **Clock-cycle latency** - matters most for the renderer and giant-repo runs.
+
+## Precision rules for Layer 1 (fast mode)
+- A call is linked to a definition only when the evidence supports it. A
+  qualified call (`Type::f`, `module::f`) must match its qualifier; otherwise
+  it stays an `External` node. Inventing an edge is worse than missing one:
+  a wrong edge makes `flow`/`calls` lie, a missing one is visible as "external".
+- Ambiguous short names resolve nearest-first: same module, then same crate,
+  then first declared.
 
 ## Coding conventions
 - Rust 2021, `cargo fmt` clean, `cargo clippy` warning-free.
@@ -45,9 +62,13 @@ When adding or changing code, keep an eye on:
   an off-by-default Cargo feature with a graceful fallback (e.g. `semantic` →
   rust-analyzer in `lcw-adapter-ra`, `gpu` → wgpu compute in `lcw-layout`). The
   default `cargo build`/`cargo test` must never pull them in.
+- The wasm frontend is not in the workspace: after touching `lcw-core`,
+  `lcw-query` or `lcw-render`, run
+  `cargo check --target wasm32-unknown-unknown` in `apps/desktop/frontend`.
 
 ## Layout
 - `crates/` - the library crates (core, config, telemetry, adapters, analysis,
-  suggest, layout, render, engine).
+  suggest, query, layout, render, engine).
 - `bins/lcw-cli` - the standalone CLI.
 - `apps/desktop` - the Tauri v2 shell + Rust/WASM UI.
+- `docs/` - CI notes and the architecture review (`ARCHITECTURE_REVIEW.md`).

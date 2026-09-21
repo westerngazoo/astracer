@@ -1,11 +1,11 @@
 # Live Code Walk & Analysis (`livewalk`)
 
-A 100% Rust tool for **static analysis and interactive call-graph
-visualization** of code repositories (Rust first). It is built as a **modular
-monolith** (a Cargo workspace) that embodies its own engineering Manifesto -
-see [`AGENTS.md`](AGENTS.md).
+A 100% Rust tool for **static analysis, interactive call-graph visualization
+and code navigation** of repositories (Rust first; TypeScript, Python and Go
+front ends). It is built as a **modular monolith** (a Cargo workspace) that
+embodies its own engineering Manifesto - see [`AGENTS.md`](AGENTS.md).
 
-The tool has three layers:
+The tool has three analysis layers plus a navigation layer:
 
 1. **Parser & graph extraction** - build a call graph from source (tree-sitter
    by default; an optional rust-analyzer semantic backend for high precision).
@@ -14,6 +14,9 @@ The tool has three layers:
 3. **Intelligent suggestions** - recommendations adapted to the detected
    industry vertical (embedded, game engine, backend, full-stack), aimed at
    targets of scalability, maintainability, robustness, latency and performance.
+4. **Navigation** (`lcw-query`) - the questions you ask while walking an
+   unfamiliar codebase: where does it start, how is it organized, what calls
+   this and what does it call, how does control get from here to there.
 
 ## Architecture
 
@@ -21,30 +24,36 @@ The tool has three layers:
                  +-----------+
                  |  lcw-core |  domain types (API boundary)
                  +-----------+
-                   ^   ^   ^
-        +----------+   |   +-------------------+
-        |              |                       |
-+---------------+  +--------------+     +--------------+
-| adapters      |  | analysis     |     | suggest      |
-| (tree-sitter, |  | (Layer 2     |     | (Layer 3     |
-|  rust-analyzer)|  |  lenses)     |     |  advisors)   |
-+---------------+  +--------------+     +--------------+
-        \              |                       /
-         \             v                      /
-          \        +-----------+             /
-           +------>| lcw-engine |<-----------+
-                   +-----------+
-                    ^         ^
-              +-----+         +------+
-              |                      |
+                   ^   ^   ^   ^
+        +----------+   |   |   +-------------------+
+        |              |   |                       |
++---------------+  +--------------+  +-----------+  +--------------+
+| adapters      |  | analysis     |  | lcw-query |  | suggest      |
+| (tree-sitter, |  | (Layer 2     |  | (naviga-  |  | (Layer 3     |
+|  rust-analyzer)|  |  lenses)     |  |  tion)    |  |  advisors)   |
++---------------+  +--------------+  +-----------+  +--------------+
+        \              |                 |   |  \          /
+         \             v                 |   |   \        /
+          \        +-----------+         |   |    +------+
+           +------>| lcw-engine |<-------|---|-----------+
+                   +-----------+         |   |
+                    ^         ^          |   |
+              +-----+         +------+   |   |
+              |                      |   |   |
         +-----------+         +--------------------+
-        |  lcw-cli  |         | apps/desktop (Tauri|
+        |  lcw-cli  |<--------| apps/desktop (Tauri|<--+
         +-----------+         |  + Leptos + wgpu)  |
-                              +--------------------+
+              ^               +--------------------+
+              |                       ^
+        +------------+                |
+        | lcw-render |----------------+   (viewer feature / wasm)
+        +------------+
 ```
 
-Dependencies flow one way only (Principle I). `lcw-layout` and `lcw-render`
-support the renderer; `lcw-telemetry` provides observability everywhere.
+Dependencies flow one way only (Principle I). `lcw-query` is pure (no I/O, no
+GPU) so the CLI, the native viewer and the wasm webview all run the *same*
+navigation code; `lcw-layout` and `lcw-render` support the renderer;
+`lcw-telemetry` provides observability everywhere.
 
 ## Workspace layout
 
@@ -53,15 +62,17 @@ support the renderer; `lcw-telemetry` provides observability everywhere.
 | `lcw-core` | - | Shared domain types (graph, metrics, diagnostics, suggestions). |
 | `lcw-config` | - | The Manifesto as machine-readable TOML config. |
 | `lcw-telemetry` | - | Lightweight `tracing` + counters (Principle III). |
-| `lcw-adapter-treesitter` | 1 | Default parser: tree-sitter + heuristic resolution. |
+| `lcw-adapter-treesitter` | 1 | Default Rust parser: tree-sitter + heuristic resolution. |
+| `lcw-adapter-ts` / `-py` / `-go` | 1 | tree-sitter front ends for TypeScript, Python, Go. |
 | `lcw-adapter-ra` | 1 | Optional **semantic** parser (rust-analyzer), behind the `semantic` feature. |
 | `lcw-analysis` | 2 | Engineering lenses & quality metrics. |
 | `lcw-suggest` | 3 | Vertical detection & target-driven suggestions. |
+| `lcw-query` | 4 | Navigation: entry points, outline tree, node cards, flows, call trees, reachability. |
 | `lcw-layout` | - | Force-directed graph layout (CPU by default; GPU-compute behind the `gpu` feature). |
-| `lcw-render` | - | `wgpu` renderer (native + WASM). |
+| `lcw-render` | - | `wgpu` renderer (native + WASM), module/flow views, highlighting. |
 | `lcw-engine` | - | Orchestrator facade tying the layers together. |
 | `lcw-cli` | - | Standalone CLI (`lcw`). |
-| `apps/desktop` | - | Tauri v2 shell + Rust/WASM UI. |
+| `apps/desktop` | - | Tauri v2 shell + Rust/WASM UI with the Explorer sidebar. |
 
 ## Building
 
@@ -78,6 +89,51 @@ cargo test
 # Native interactive viewer (winit + wgpu power mode):
 cargo run -p lcw-cli --features viewer -- view /path/to/repo
 ```
+
+## Walking a codebase from the CLI
+
+Every navigation command takes `--path <repo>` (default `.`), `--json` for a
+machine-readable slice, and `--semantic` for the rust-analyzer backend.
+
+```bash
+# Where does it start? main, uncalled public API, private roots, tests.
+lcw entries --reach            # --reach: how many functions each root drives
+
+# How is it organized? crate ▸ module ▸ type ▸ function, with cc / fan-in / fan-out.
+lcw outline --depth 1          # collapse below top-level modules
+lcw outline --filter parse     # only functions whose path contains "parse"
+
+# What does main trigger, in source order? (↺ marks an already-expanded node)
+lcw calls main --depth 3
+lcw calls "Engine::analyze" --callers     # who can trigger this?
+
+# One function: metrics, callers (inputs) and callees (outputs) with edge kind,
+# multiplicity and call site.
+lcw explain "Engine::analyze"
+
+# How does control get from here to there?
+lcw flow "parse_incremental" --from main
+lcw flow "parse_incremental" --from main --snippets   # JSON with each hop's source
+```
+
+Fast mode (tree-sitter) links calls by name with qualifier checking; method
+calls whose receiver type is unknown may resolve to a same-named method in
+another crate or stay external. `--semantic` resolves them precisely (needs a
+`--features semantic` build). See
+[`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) for the
+precision rules and the roadmap.
+
+## Desktop app
+
+The Tauri app (`apps/desktop`) shows the graph with an **Explorer** sidebar:
+a "Start here" list of entry points, the collapsible outline tree with a
+filter, and a detail pane for the selected node with clickable callers and
+callees, a "trace from here" flow (highlighted on the canvas), the bounded
+call tree below the node, and back navigation. See
+[`apps/desktop/README.md`](apps/desktop/README.md).
+
+In the native viewer (`lcw view`): click to inspect, `f` to set a flow source
+then click a target, `m` to jump to `main`, `o` to open the code in an editor.
 
 ### Optional features
 
@@ -98,8 +154,7 @@ Both features are additive and off by default, so the fast path never pays for
 features (`cargo tauri dev -- --features gpu`).
 
 The **desktop app** (Tauri v2 + Leptos/WASM) lives in `apps/desktop` and is kept
-out of the main workspace (it has its own wasm/bundler build). See
-[`apps/desktop/README.md`](apps/desktop/README.md):
+out of the main workspace (it has its own wasm/bundler build):
 
 ```bash
 cd apps/desktop/src-tauri
@@ -120,3 +175,5 @@ Built phase by phase (see the plan):
 6. Layer 3 suggestions & vertical detection — **done**
 7. Hardening: semantic (rust-analyzer) backend (`semantic`), GPU-compute layout
    (`gpu`), streaming progress API, and Criterion benchmarks — **done**
+8. Code navigation: `lcw-query`, `outline`/`entries`/`calls`/`explain`, the
+   desktop Explorer + detail pane, qualifier-checked call resolution — **done**

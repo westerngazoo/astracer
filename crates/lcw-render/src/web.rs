@@ -98,6 +98,16 @@ impl WebViewer {
         self.camera.center = Vec2::new(x, y);
     }
 
+    /// Center on a world point *and* make it legible: zoom in to at least
+    /// `min_zoom` px per world unit (never out). Used when the Explorer jumps
+    /// the view to a node picked from the outline or a caller/callee list.
+    pub fn focus_on(&mut self, x: f32, y: f32, min_zoom: f32) {
+        self.camera.center = Vec2::new(x, y);
+        if self.camera.zoom < min_zoom {
+            self.camera.zoom = min_zoom;
+        }
+    }
+
     /// Project a world point to canvas px (positions DOM label overlays).
     pub fn world_to_screen(&self, x: f32, y: f32) -> [f32; 2] {
         self.camera.world_to_screen(Vec2::new(x, y)).into()

@@ -9,6 +9,7 @@ members = [
     "crates/lcw-analysis",
     "crates/lcw-suggest",
     "crates/lcw-engine",
+    "crates/lcw-query",
     "crates/lcw-layout",
     "crates/lcw-render",
     "bins/lcw-cli",

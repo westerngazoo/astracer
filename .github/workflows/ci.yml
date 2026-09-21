@@ -84,3 +84,22 @@ jobs:
           cache-on-failure: true
       # `cargo check` (not test/build): we only need it to compile, not link.
       - run: cargo check -p lcw-engine --features semantic --locked
+
+  wasm:
+    name: wasm (desktop frontend type-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/frontend
+      # The Leptos/wasm UI is outside the workspace (own lockfile, own build
+      # flow), so nothing else here compiles it. A `cargo check` for the wasm
+      # target needs no trunk, webview or GPU and catches API drift in
+      # `lcw-core` / `lcw-query` / `lcw-render` that would otherwise only
+      # surface when someone runs `cargo tauri dev`.
+      - run: cargo check --target wasm32-unknown-unknown --locked
+        working-directory: apps/desktop/frontend

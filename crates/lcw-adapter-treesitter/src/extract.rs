@@ -396,28 +396,21 @@ fn resolve_target(
         }
     }
     if let Some(cands) = by_short.get(&call.short) {
-        match cands.as_slice() {
-            [] => {}
-            [only] => return *only,
-            many => {
-                if let Some(id) = many
-                    .iter()
-                    .copied()
-                    .find(|&id| graph.node(id).module_path == caller_module)
-                {
-                    return id;
-                }
-                if call.path.contains("::") {
-                    if let Some(id) = many
-                        .iter()
-                        .copied()
-                        .find(|&id| graph.node(id).qualified_name.ends_with(&call.path))
-                    {
-                        return id;
-                    }
-                }
-                return many[0];
-            }
+        let qualifiers = path_qualifiers(&call.path);
+        // A type- or module-qualified call (`Calc::new`, `math::sum`) may only
+        // bind to a definition whose path actually contains that qualifier.
+        // Otherwise the qualifier names something outside the analyzed code
+        // (`Vec::new`, `Cli::parse`) and binding it to an unrelated same-named
+        // def would invent an edge — which is exactly what makes flow traces
+        // lie. Relative heads (`Self::`, `self::`, `super::`, `crate::`) carry
+        // no such information and resolve like a plain call.
+        let eligible: Vec<NodeId> = cands
+            .iter()
+            .copied()
+            .filter(|&id| has_qualifiers(&graph.node(id).qualified_name, &qualifiers))
+            .collect();
+        if let Some(id) = pick_nearest(graph, &eligible, caller_module) {
+            return id;
         }
     }
     let key = if call.path.is_empty() {
@@ -426,6 +419,52 @@ fn resolve_target(
         call.path.clone()
     };
     graph.intern_node(&key, || Node::external(key.clone()))
+}
+
+/// The qualifying segments of a call path (`Calc::new` -> `["Calc"]`,
+/// `a::b::f` -> `["a", "b"]`), dropping relative heads that name no scope.
+fn path_qualifiers(path: &str) -> Vec<&str> {
+    let mut segs: Vec<&str> = path.split("::").collect();
+    segs.pop(); // the short name itself
+    segs.into_iter()
+        .filter(|s| !s.is_empty() && !matches!(*s, "Self" | "self" | "super" | "crate"))
+        .collect()
+}
+
+/// Does every qualifier appear as a segment of `qualified_name`? Segment-wise
+/// (not substring) so `A` never matches `AB`, and order-insensitive so re-export
+/// paths (`lcw_query::resolve` for `lcw_query::resolve::resolve`) still bind.
+fn has_qualifiers(qualified_name: &str, qualifiers: &[&str]) -> bool {
+    qualifiers
+        .iter()
+        .all(|q| qualified_name.split("::").any(|seg| seg == *q))
+}
+
+/// Among several candidate definitions, prefer the one closest to the caller:
+/// same module, then same crate (first path segment), then the first declared.
+fn pick_nearest(graph: &CodeGraph, cands: &[NodeId], caller_module: &str) -> Option<NodeId> {
+    match cands {
+        [] => None,
+        [only] => Some(*only),
+        many => {
+            if let Some(id) = many
+                .iter()
+                .copied()
+                .find(|&id| graph.node(id).module_path == caller_module)
+            {
+                return Some(id);
+            }
+            let caller_crate = caller_module.split("::").next().unwrap_or("");
+            if let Some(id) = many
+                .iter()
+                .copied()
+                .find(|&id| graph.node(id).module_path.split("::").next() == Some(caller_crate))
+            {
+                return Some(id);
+            }
+            Some(many[0])
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

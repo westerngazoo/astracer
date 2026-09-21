@@ -3,11 +3,11 @@
 //! validation path / "power mode"; the same [`Renderer`] later runs in the
 //! Tauri webview via wasm.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use glam::Vec2;
-use lcw_core::{CodeGraph, NodeKind};
+use lcw_core::{CodeGraph, NodeId, NodeKind};
+use lcw_query::{node_card, CallRef, NodeCard};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -16,31 +16,31 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::camera::Camera2D;
+use crate::highlight::highlight;
 use crate::hud;
 use crate::scene::{self, SceneData};
 use crate::{RenderError, Renderer};
 
-/// Per-node detail + adjacency for the interactive panel and flow tracing,
-/// indexed by pick id (which, for the function-level call view, equals
-/// `NodeId.0`). Built once from the [`CodeGraph`] by [`build_node_infos`].
+/// Per-node detail for the interactive panel, indexed by pick id (which, for
+/// the function-level call view, equals `NodeId.0`). A thin display
+/// projection of [`lcw_query::NodeCard`], built once by [`build_node_infos`];
+/// traversal (flow tracing, entry points) goes through `lcw-query` directly.
 #[derive(Debug, Clone, Default)]
 pub struct NodeInfo {
     /// Fully qualified name (also the pick label).
     pub title: String,
-    /// One-line summary: `file:line  kind  cc N  params N`.
+    /// One-line summary: `file:line  kind  cc N  params N  [entry]`.
     pub subtitle: String,
     /// Source file for jump-to-code (empty for external nodes).
     pub file: String,
     pub line: u32,
-    /// Caller qualified names (fan-in).
+    /// Caller lines (fan-in), each with its edge kind / multiplicity.
     pub inputs: Vec<String>,
-    /// Callee display names (fan-out; externals tagged).
+    /// Callee lines (fan-out; externals tagged).
     pub outputs: Vec<String>,
-    /// Successor pick ids, for tracing a flow to another node.
-    pub succ: Vec<u32>,
 }
 
-fn kind_str(kind: NodeKind) -> &'static str {
+fn kind_short(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Function => "fn",
         NodeKind::Method => "method",
@@ -49,61 +49,58 @@ fn kind_str(kind: NodeKind) -> &'static str {
     }
 }
 
-fn base_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
 fn short_name(qualified: &str) -> &str {
     qualified.rsplit("::").next().unwrap_or(qualified)
+}
+
+/// One panel line for a caller/callee: `name  (ext)  [kind x2]`.
+fn call_line(c: &CallRef) -> String {
+    let mut s = c.qualified_name.clone();
+    if c.external {
+        s.push_str("  (ext)");
+    }
+    s.push_str("  [");
+    s.push_str(lcw_query::edge_kind_str(c.kind));
+    if c.count > 1 {
+        s.push_str(&format!(" x{}", c.count));
+    }
+    s.push(']');
+    s
+}
+
+fn info_from_card(card: &NodeCard) -> NodeInfo {
+    let mut subtitle = format!(
+        "{}  {}  cc {}  params {}",
+        if card.file.is_empty() {
+            "<external>".to_string()
+        } else {
+            card.location_short()
+        },
+        kind_short(card.kind),
+        card.metrics.cyclomatic,
+        card.metrics.parameters
+    );
+    if let Some(entry) = card.entry {
+        subtitle.push_str(&format!("  [{entry}]"));
+    }
+    NodeInfo {
+        title: card.qualified_name.clone(),
+        subtitle,
+        file: card.file.clone(),
+        line: card.line,
+        inputs: card.inputs.iter().map(call_line).collect(),
+        outputs: card.outputs.iter().map(call_line).collect(),
+    }
 }
 
 /// Build per-node [`NodeInfo`] in pick-id order (== `NodeId.0` for the
 /// function-level call view built by [`scene::build`]).
 pub fn build_node_infos(graph: &CodeGraph) -> Vec<NodeInfo> {
-    let mut infos = Vec::with_capacity(graph.node_count());
-    for id in graph.node_ids() {
-        let node = graph.node(id);
-        let file = graph
-            .file_path(node.span.file())
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let subtitle = format!(
-            "{}:{}  {}  cc {}  params {}",
-            base_name(&file),
-            node.span.start_line,
-            kind_str(node.kind),
-            node.cyclomatic_complexity(),
-            node.stats.parameters
-        );
-        let mut inputs: Vec<String> = graph
-            .neighbors_in(id)
-            .map(|c| graph.node(c).qualified_name.clone())
-            .collect();
-        inputs.sort();
-        let mut outputs: Vec<String> = graph
-            .neighbors_out(id)
-            .map(|c| {
-                let cn = graph.node(c);
-                if cn.kind == NodeKind::External {
-                    format!("{}  (ext)", cn.qualified_name)
-                } else {
-                    cn.qualified_name.clone()
-                }
-            })
-            .collect();
-        outputs.sort();
-        let succ: Vec<u32> = graph.neighbors_out(id).map(|c| c.0).collect();
-        infos.push(NodeInfo {
-            title: node.qualified_name.clone(),
-            subtitle,
-            file,
-            line: node.span.start_line,
-            inputs,
-            outputs,
-            succ,
-        });
-    }
-    infos
+    graph
+        .node_ids()
+        .filter_map(|id| node_card(graph, id))
+        .map(|card| info_from_card(&card))
+        .collect()
 }
 
 /// Build the detail panel for node `idx`, optionally annotating an active flow
@@ -142,7 +139,7 @@ pub fn panel_for(infos: &[NodeInfo], idx: usize, path: &[usize]) -> hud::Panel {
         subtitle: info.subtitle.clone(),
         sections,
         footer: vec![
-            "f: flow from here   o: open code".into(),
+            "f: flow from here   o: open code   m: jump to main".into(),
             "click: inspect   esc: clear".into(),
         ],
     }
@@ -157,73 +154,13 @@ fn capped(items: &[String], max: usize) -> Vec<String> {
     out
 }
 
-/// Produce recolored node instances and edge vertices that focus a selection
-/// and/or a traced `path` (pick ids): bright selection, orange flow anchor,
-/// blue path nodes, amber path edges (or the selection's incident edges), and
-/// everything else dimmed. Pure — reused by the live viewer and by headless
-/// annotated screenshots.
-pub fn highlight(
-    scene: &SceneData,
-    selected: Option<usize>,
-    anchor: Option<usize>,
-    path: &[usize],
-) -> (
-    Vec<crate::scene::NodeInstance>,
-    Vec<crate::scene::EdgeVertex>,
-) {
-    let sel = selected.map(|i| i as u32);
-    let anchor = anchor.map(|i| i as u32);
-    let on_path: std::collections::HashSet<u32> = path.iter().map(|&i| i as u32).collect();
-
-    let mut nodes = scene.nodes.clone();
-    for (i, inst) in nodes.iter_mut().enumerate() {
-        let i = i as u32;
-        if Some(i) == sel {
-            inst.color = [1.0, 0.95, 0.5, 1.0];
-            inst.radius *= 1.4;
-        } else if Some(i) == anchor {
-            inst.color = [1.0, 0.58, 0.30, 1.0];
-            inst.radius *= 1.25;
-        } else if on_path.contains(&i) {
-            inst.color = [0.40, 0.85, 1.0, 1.0];
-            inst.radius *= 1.2;
-        } else {
-            inst.color[3] *= 0.16;
-        }
-    }
-
-    let path_pairs: std::collections::HashSet<(u32, u32)> = path
-        .windows(2)
-        .map(|w| (w[0] as u32, w[1] as u32))
-        .collect();
-    let mut edges = scene.edges.clone();
-    for (i, seg) in scene.edge_nodes.iter().enumerate() {
-        let [a, b] = *seg;
-        let vi = i * 2;
-        let color = if path_pairs.contains(&(a, b)) {
-            [0.98, 0.80, 0.30, 0.95]
-        } else if path_pairs.is_empty() && (sel == Some(a) || sel == Some(b)) {
-            let mut c = edges[vi].color;
-            c[3] = 0.9;
-            c
-        } else {
-            let mut c = edges[vi].color;
-            c[3] *= if path_pairs.is_empty() { 0.10 } else { 0.05 };
-            c
-        };
-        edges[vi].color = color;
-        edges[vi + 1].color = color;
-    }
-    (nodes, edges)
-}
-
 /// Open a window and render `graph` using the given per-node `positions`
 /// (indexed by `NodeId.0`). Blocks until the window is closed.
 pub fn run(graph: &CodeGraph, positions: &[[f32; 2]]) -> Result<(), RenderError> {
     let scene = scene::build(graph, positions);
     let infos = build_node_infos(graph);
     let labels: Vec<String> = infos.iter().map(|i| i.title.clone()).collect();
-    run_app("Live Code Walk", scene, labels, infos)
+    run_app("Live Code Walk", scene, labels, infos, Some(graph.clone()))
 }
 
 /// Open a window on a prebuilt [`SceneData`] with per-node pick `labels`
@@ -231,7 +168,7 @@ pub fn run(graph: &CodeGraph, positions: &[[f32; 2]]) -> Result<(), RenderError>
 /// aggregated scene rather than one function node per graph node. Blocks until
 /// the window is closed.
 pub fn run_scene(scene: SceneData, labels: Vec<String>) -> Result<(), RenderError> {
-    run_app("Live Code Walk", scene, labels, Vec::new())
+    run_app("Live Code Walk", scene, labels, Vec::new(), None)
 }
 
 fn run_app(
@@ -239,11 +176,12 @@ fn run_app(
     scene: SceneData,
     labels: Vec<String>,
     infos: Vec<NodeInfo>,
+    graph: Option<CodeGraph>,
 ) -> Result<(), RenderError> {
     let event_loop = EventLoop::new().map_err(|e| RenderError::Window(e.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(title, scene, labels, infos);
+    let mut app = App::new(title, scene, labels, infos, graph);
     event_loop
         .run_app(&mut app)
         .map_err(|e| RenderError::Window(e.to_string()))
@@ -406,6 +344,9 @@ struct App {
     scene: SceneData,
     labels: Vec<String>,
     infos: Vec<NodeInfo>,
+    /// The call graph behind the scene (function-level view only); pick ids
+    /// equal `NodeId.0`, so `lcw-query` traversals apply directly.
+    graph: Option<CodeGraph>,
     camera: Camera2D,
     gfx: Option<Gfx>,
     cursor: Vec2,
@@ -421,12 +362,19 @@ struct App {
 }
 
 impl App {
-    fn new(title: &str, scene: SceneData, labels: Vec<String>, infos: Vec<NodeInfo>) -> Self {
+    fn new(
+        title: &str,
+        scene: SceneData,
+        labels: Vec<String>,
+        infos: Vec<NodeInfo>,
+        graph: Option<CodeGraph>,
+    ) -> Self {
         App {
             title: title.to_string(),
             scene,
             labels,
             infos,
+            graph,
             camera: Camera2D::default(),
             gfx: None,
             cursor: Vec2::ZERO,
@@ -600,42 +548,41 @@ impl App {
         open_in_editor(&info.file, info.line);
     }
 
-    /// BFS shortest path over successor adjacency, in pick-id space.
+    /// Shortest call path between two pick ids (== node ids), via `lcw-query`.
     fn trace(&self, from: usize, to: usize) -> Vec<usize> {
-        let n = self.infos.len();
-        if from >= n || to >= n {
+        let Some(graph) = &self.graph else {
             return Vec::new();
-        }
-        if from == to {
-            return vec![from];
-        }
-        let mut prev = vec![usize::MAX; n];
-        let mut seen = vec![false; n];
-        let mut queue = VecDeque::new();
-        queue.push_back(from);
-        seen[from] = true;
-        while let Some(u) = queue.pop_front() {
-            for &v in &self.infos[u].succ {
-                let v = v as usize;
-                if v >= n || seen[v] {
-                    continue;
-                }
-                seen[v] = true;
-                prev[v] = u;
-                if v == to {
-                    let mut path = vec![to];
-                    let mut c = to;
-                    while c != from {
-                        c = prev[c];
-                        path.push(c);
-                    }
-                    path.reverse();
-                    return path;
-                }
-                queue.push_back(v);
+        };
+        lcw_query::shortest_path(graph, NodeId(from as u32), NodeId(to as u32), 64)
+            .map(|p| p.into_iter().map(|id| id.0 as usize).collect())
+            .unwrap_or_default()
+    }
+
+    /// Select the program's `main` (first entry point) and center the camera
+    /// on it — the usual place to start a walk.
+    fn jump_to_main(&mut self) {
+        let Some(graph) = &self.graph else {
+            lcw_telemetry::info!(target: "lcw::render", "no call graph in this view; cannot jump to main");
+            return;
+        };
+        let Some(main) = lcw_query::mains(graph).first().copied() else {
+            lcw_telemetry::info!(target: "lcw::render", "no `main` found in the graph");
+            return;
+        };
+        let idx = main.0 as usize;
+        self.focus(idx);
+        self.select(idx);
+    }
+
+    /// Center the camera on a node, zooming in if the view is too far out to
+    /// tell nodes apart.
+    fn focus(&mut self, idx: usize) {
+        if let Some(inst) = self.scene.nodes.get(idx) {
+            self.camera.center = Vec2::from(inst.center);
+            if self.camera.zoom < 3.0 {
+                self.camera.zoom = 3.0;
             }
         }
-        Vec::new()
     }
 
     fn rebuild_hud(&mut self) {
@@ -780,6 +727,7 @@ impl ApplicationHandler for App {
                 ..
             } => match logical_key {
                 Key::Character(c) if c.eq_ignore_ascii_case("f") => self.mark_flow_anchor(),
+                Key::Character(c) if c.eq_ignore_ascii_case("m") => self.jump_to_main(),
                 Key::Character(c) if c.eq_ignore_ascii_case("o") => self.open_selected(),
                 Key::Named(NamedKey::Enter) => self.open_selected(),
                 Key::Named(NamedKey::Escape) => self.clear_selection(),

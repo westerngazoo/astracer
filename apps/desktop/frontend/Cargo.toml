@@ -16,6 +16,9 @@ leptos = { version = "0.8", features = ["csr"] }
 lcw-render = { path = "../../../crates/lcw-render", default-features = false }
 # Shared domain types: rebuild the CodeGraph from the engine's snapshot.
 lcw-core = { path = "../../../crates/lcw-core" }
+# Navigation queries (outline, entry points, node cards, flow tracing, call
+# trees): the same pure code the CLI and native viewer use.
+lcw-query = { path = "../../../crates/lcw-query" }
 
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"

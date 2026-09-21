@@ -27,6 +27,7 @@ semantic = ["lcw-engine/semantic"]
 lcw-core = { path = "../../crates/lcw-core" }
 lcw-config = { path = "../../crates/lcw-config" }
 lcw-engine = { path = "../../crates/lcw-engine" }
+lcw-query = { path = "../../crates/lcw-query" }
 lcw-telemetry = { path = "../../crates/lcw-telemetry" }
 lcw-layout = { path = "../../crates/lcw-layout", optional = true }
 lcw-render = { path = "../../crates/lcw-render", optional = true }

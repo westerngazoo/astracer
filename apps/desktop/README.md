@@ -24,8 +24,11 @@ apps/desktop
 
 Three columns:
 
-* **Explorer (left)** — *Start here*: the entry points (`main`, public roots,
-  private roots, tests; `main`s show how many functions they reach). Below it
+* **Explorer (left)** — *Start here*: the entry points, ranked by how much code
+  each drives — `main`/`_start`, then **exported** (symbols a bootloader,
+  hardware trap vector, WASM host or FFI caller enters through, which is where
+  a kernel or WASM module actually starts), then public roots, private roots
+  and tests. Below it
   the **Outline**: crate ▸ module ▸ type ▸ function, collapsible, with a
   filter box, a cyclomatic-complexity badge per function and entry badges.
   Clicking a function selects it and centers the canvas on it.
@@ -74,15 +77,24 @@ view instead of calling the engine, so the whole interface can be developed,
 screenshotted and tested in a plain browser.
 
 ```bash
-cargo build -p lcw-cli --features viewer
-./target/debug/lcw analyze /path/to/repo --format view -o /tmp/fixture.json
-
-cd apps/desktop/frontend
-trunk build --release
-cp /tmp/fixture.json dist/fixture.json
-(cd dist && python3 -m http.server 8765)
-# open http://127.0.0.1:8765/ and press Analyze
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+apps/desktop/frontend/browser-dev.sh /path/to/repo
 ```
+
+The first two lines are the prerequisites, needed once. The script checks for
+both and stops with the install command if either is missing, since without the
+wasm target `trunk` fails deep inside a cargo build, behind screens of `E0463`
+from every dependency in the tree.
+
+The script builds the analyzer and the wasm UI, analyzes the repository into a
+graph fixture, and serves the result on <http://127.0.0.1:8765/>; type
+`fixture.json` in the path box and press **Analyze**. `just ui /path/to/repo`
+does the same.
+
+The bundle goes to `frontend/target/browser-dev/`, not `frontend/dist/`, so a
+browser session and a `tauri dev`/`tauri build` bundle never fight over the same
+directory.
 
 `tests/ui_smoke.mjs` drives exactly that setup in headless Chromium
 (`node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots`, needs Playwright)
@@ -98,6 +110,22 @@ same code.
 > canvas** and the app re-attaches its pointer listeners
 > (`WebViewer::canvas()`). This is what makes the graph render under WebKitGTK
 > and in headless browsers.
+
+## Why the build hooks set a working directory
+
+Tauri runs `beforeDevCommand` / `beforeBuildCommand` in what it calls the
+*frontend directory*, which it takes to be the parent of `src-tauri` — the
+usual layout, where `package.json` sits next to it. Here the frontend is a
+sibling folder (`apps/desktop/frontend`), so a bare `trunk serve` would start in
+`apps/desktop`, find no `Trunk.toml`, and fail with "Unable to find any Trunk
+configuration". Both hooks therefore name the directory explicitly:
+
+```json
+"beforeDevCommand": { "script": "trunk serve", "cwd": "../frontend" }
+```
+
+A relative `cwd` resolves against `src-tauri` (the CLI chdirs there before
+running the hook), which is also what `frontendDist` is relative to.
 
 ## Prerequisites
 
@@ -133,9 +161,12 @@ cargo tauri build
 
 This runs `trunk build` (emitting `frontend/dist/`) and bundles the app.
 
-> The checked-in `frontend/dist/index.html` is only a placeholder so the backend
-> compiles standalone (`generate_context!` embeds `frontendDist`); `trunk build`
-> overwrites it with the real bundle.
+> `frontend/dist/` is git-ignored whole. `generate_context!` embeds it at compile
+> time, so it has to exist; `src-tauri/build.rs` writes a placeholder page there
+> when no bundle is present, and leaves a real one alone. Keeping it out of git
+> is what stops a `checkout` or `pull` from restoring that placeholder over a
+> bundle you already built — a failure that looks like the app broke, when all
+> that happened was a branch switch.
 
 ## Optional features
 

@@ -225,7 +225,47 @@ fn compute_flags(func: TsNode, text: &str, module_path: &str, name: &str) -> Nod
         is_test: is_test_fn(func, text, module_path, name),
         is_method: has_self_param(func),
         is_generic: func.child_by_field_name("type_parameters").is_some(),
+        is_exported: is_exported_fn(func, text, header),
     }
+}
+
+/// Is this definition reachable from outside Rust, through a foreign ABI?
+///
+/// Two independent signals, either of which is enough:
+///
+/// * an `#[no_mangle]` / `#[export_name = "..."]` attribute, which exists only
+///   so a foreign caller can find the symbol by name (Rust 2024's
+///   `#[unsafe(no_mangle)]` is the same attribute and matches too);
+/// * an explicit `extern "C"`-style ABI in the signature, which exists only so
+///   a foreign caller can call it (directly, or as a callback it was handed).
+///
+/// A body is required, so the `fn` declarations inside an `extern` block —
+/// which are *imports*, the opposite direction — never qualify.
+fn is_exported_fn(func: TsNode, text: &str, header: &str) -> bool {
+    if func.child_by_field_name("body").is_none() {
+        return false;
+    }
+    if header.contains("extern") {
+        return true;
+    }
+    // Attributes sit above the `fn`, possibly behind doc comments. Only
+    // attribute nodes are inspected, so prose mentioning `#[no_mangle]` in a
+    // doc comment cannot trigger this.
+    let mut sib = func.prev_sibling();
+    while let Some(s) = sib {
+        match s.kind() {
+            "attribute_item" | "inner_attribute_item" => {
+                let t = node_text(s, text);
+                if t.contains("no_mangle") || t.contains("export_name") {
+                    return true;
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => break,
+        }
+        sib = s.prev_sibling();
+    }
+    false
 }
 
 fn compute_stats(func: TsNode, text: &str) -> NodeStats {

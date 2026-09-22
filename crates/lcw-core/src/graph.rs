@@ -98,6 +98,15 @@ pub struct NodeFlags {
     pub is_test: bool,
     pub is_method: bool,
     pub is_generic: bool,
+    /// Exported across a **foreign ABI**: `#[no_mangle]` / `#[export_name]`,
+    /// or an explicit `extern "C"`-style ABI on a definition with a body.
+    ///
+    /// Such a symbol exists precisely so that something *outside* the analyzed
+    /// code can call it — a bootloader, a hardware trap vector, a WASM host, a
+    /// C caller, a callback registered with a foreign runtime. A call graph
+    /// built from this source can never show that caller, so an exported
+    /// symbol with no in-graph callers is an entry point, not dead code.
+    pub is_exported: bool,
 }
 
 /// Raw structural counts captured while parsing a function body. These are the

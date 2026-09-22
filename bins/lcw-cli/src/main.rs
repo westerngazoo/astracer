@@ -40,7 +40,8 @@ enum Command {
     Flow(FlowArgs),
     /// Print the code hierarchy (crate ▸ module ▸ type ▸ function) as a tree.
     Outline(OutlineArgs),
-    /// List entry points: `main`, uncalled public API, private roots, tests.
+    /// List entry points: `main`/`_start`, foreign-ABI exports, uncalled
+    /// public API, private roots, tests.
     Entries(EntriesArgs),
     /// Print the call tree below (or above) a symbol: what it triggers.
     Calls(CallsArgs),
@@ -251,6 +252,7 @@ struct OutlineArgs {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum EntryKindArg {
     Main,
+    Exported,
     Public,
     Root,
     Test,
@@ -260,6 +262,7 @@ impl From<EntryKindArg> for EntryKind {
     fn from(k: EntryKindArg) -> Self {
         match k {
             EntryKindArg::Main => EntryKind::Main,
+            EntryKindArg::Exported => EntryKind::Exported,
             EntryKindArg::Public => EntryKind::PublicRoot,
             EntryKindArg::Root => EntryKind::Root,
             EntryKindArg::Test => EntryKind::Test,
@@ -627,21 +630,40 @@ fn run_entries(args: EntriesArgs, log_override: Option<&str>) -> Result<()> {
         let kind: EntryKind = kind.into();
         entries.retain(|e| e.kind == kind);
     }
+
+    // Program entries and foreign-ABI exports always get their reach: on a
+    // bare-metal or WASM codebase those *are* the starting points, and "drives
+    // N functions" is what separates the real one from a build script.
+    let mut rows: Vec<(lcw_query::EntryPoint, Option<usize>)> = entries
+        .into_iter()
+        .map(|e| {
+            let always = matches!(e.kind, EntryKind::Main | EntryKind::Exported);
+            let reach =
+                (args.reach || always).then(|| lcw_query::reach_count(g, e.id, Direction::Callees));
+            (e, reach)
+        })
+        .collect();
+    // Rank within a kind by how much code each entry drives, so the most
+    // substantial one leads. Ties (and entries with no reach computed) fall
+    // back to the name, keeping the output deterministic.
+    rows.sort_by(|(ea, ra), (eb, rb)| {
+        ea.kind
+            .cmp(&eb.kind)
+            .then_with(|| rb.cmp(ra))
+            .then_with(|| {
+                g.node(ea.id)
+                    .qualified_name
+                    .cmp(&g.node(eb.id).qualified_name)
+            })
+    });
     // Cap per kind so a library with thousands of public roots stays readable.
     let mut per_kind = std::collections::HashMap::new();
-    entries.retain(|e| {
+    rows.retain(|(e, _)| {
         let n = per_kind.entry(e.kind).or_insert(0usize);
         *n += 1;
         *n <= args.limit
     });
-
-    let reach: Vec<Option<usize>> = entries
-        .iter()
-        .map(|e| {
-            (args.reach || e.kind == EntryKind::Main)
-                .then(|| lcw_query::reach_count(g, e.id, Direction::Callees))
-        })
-        .collect();
+    let (entries, reach): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
 
     if args.json {
         println!(

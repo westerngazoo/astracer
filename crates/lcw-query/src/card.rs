@@ -206,6 +206,9 @@ pub fn flags_of(n: &Node) -> Vec<&'static str> {
     if n.flags.is_generic {
         v.push("generic");
     }
+    if n.flags.is_exported {
+        v.push("export");
+    }
     v
 }
 

@@ -181,6 +181,10 @@ fn compute_flags(func: TsNode, name: &str, is_method: bool) -> NodeFlags {
         is_test: name.starts_with("Test") || name.starts_with("Benchmark"),
         is_method,
         is_generic: func.child_by_field_name("type_parameters").is_some(),
+        // A capitalized Go name is exported to other *Go* packages, which
+        // `is_pub` already records. True foreign-ABI export needs a cgo
+        // `//export` directive; detecting that is a separate change.
+        is_exported: false,
     }
 }
 

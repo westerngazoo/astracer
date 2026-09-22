@@ -119,14 +119,30 @@ definitions of "who is a root" drift. Make the lens consume
 analysis crate must not depend on the query crate — it is 20 lines and has no
 dependencies).
 
-### F5 — Language-specific entry rules live in the wrong layer
+### F5 — Language-specific entry rules live in the wrong layer (partly fixed)
 
 `classify_entry` sniffs the file extension to treat Go's `init` as an entry.
-That is a smell: the *adapter* knows the language. Add a trait method with a
-default, e.g. `LanguageAdapter::entry_kinds(&self, node: &Node) -> Option<EntryKind>`,
-or have adapters set a `NodeFlags::is_entry` bit at extraction time (Python's
-`if __name__ == "__main__":` block, TypeScript default exports, Go `init`,
-Rust `#[entry]` / `#[tokio::main]`). The query crate then only reads flags.
+That is a smell: the *adapter* knows the language.
+
+The half that mattered most is now done the right way round. The Rust adapter
+sets `NodeFlags::is_exported` at extraction time — `#[no_mangle]`,
+`#[export_name]`, or an explicit `extern "C"`-style ABI on a definition with a
+body — and the query crate only reads that flag, classifying an uncalled export
+as `EntryKind::Exported`. `_start` joined `main` as a program-entry name, since
+an ELF loader and a WASI host both hand control to it.
+
+This was not cosmetic. On a RISC-V microkernel (Wari, 858 functions) the
+"where do I start" list previously offered six host build tools, while the real
+entries sat among 44 public roots: `kmain`, which drives **229** functions, and
+`handle_trap`, the vector the hardware jumps to. Both now lead the list, and
+the two WASM app `_start` exports are program entries.
+
+What remains for a later pass: the same treatment for the other adapters
+(Python's `if __name__ == "__main__":`, Go's cgo `//export`, TypeScript entry
+modules), moving the Go `init` rule out of the query crate behind a
+`LanguageAdapter` method, and macro-generated exports — Wari's driver shims are
+emitted from a `macro_rules!` body, which tree-sitter does not expand, so they
+are invisible to any purely syntactic adapter.
 
 ### F6 — `Config` cannot be extended by other crates
 

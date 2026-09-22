@@ -242,7 +242,9 @@ fn build_explorer(graph: &CodeGraph) -> ExplorerData {
             name: graph.node(e.id).qualified_name.clone(),
             kind: e.kind,
             location: short_location(graph, e.id),
-            reach: (e.kind == EntryKind::Main)
+            // Program entries and foreign-ABI exports always get their reach:
+            // on a bare-metal or WASM codebase those *are* the starting points.
+            reach: matches!(e.kind, EntryKind::Main | EntryKind::Exported)
                 .then(|| reach_count(graph, e.id, Direction::Callees)),
         })
         .collect();
@@ -695,12 +697,18 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    // "Main": jump to the program's first entry point.
+    // "Entry": jump to the best starting point — of the program entries and
+    // foreign-ABI exports, whichever drives the most code (`reach` is computed
+    // for exactly those). On a workspace full of build scripts and dev tools
+    // that is the real binary; on a kernel it is the export the bootloader
+    // jumps to, which is not a `main` at all.
     let on_main = move |_| {
         let main = explorer.with_untracked(|ex| {
             ex.entries
                 .iter()
-                .find(|e| e.kind == EntryKind::Main)
+                .filter(|e| e.reach.is_some())
+                .max_by_key(|e| e.reach)
+                .or_else(|| ex.entries.first())
                 .map(|e| e.node)
         });
         if let Some(idx) = main {
@@ -765,7 +773,7 @@ pub fn App() -> impl IntoView {
                 <button class="primary" on:click=on_analyze disabled=move || busy.get()>
                     {move || if busy.get() { "Analyzing…" } else { "Analyze" }}
                 </button>
-                <button on:click=on_main disabled=move || !has_graph() title="Jump to main">"Main"</button>
+                <button on:click=on_main disabled=move || !has_graph() title="Jump to the program entry">"Entry"</button>
                 <button on:click=on_fit disabled=move || !has_graph()>"Fit"</button>
                 <input
                     class="search"
@@ -850,6 +858,7 @@ fn entry_badge(kind: Option<EntryKind>) -> Option<AnyView> {
     kind.map(|k| {
         let (class, text) = match k {
             EntryKind::Main => ("badge main", "main"),
+            EntryKind::Exported => ("badge export", "export"),
             EntryKind::PublicRoot => ("badge pub", "pub"),
             EntryKind::Root => ("badge root", "root"),
             EntryKind::Test => ("badge test", "test"),
@@ -861,6 +870,10 @@ fn entry_badge(kind: Option<EntryKind>) -> Option<AnyView> {
 fn entry_title(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Main => "program entry: where execution starts",
+        EntryKind::Exported => {
+            "exported across a foreign ABI and called by nobody here: a bootloader, \
+             hardware trap vector, WASM host or FFI caller enters through it"
+        }
         EntryKind::PublicRoot => "public item nobody calls internally: an API surface or handler",
         EntryKind::Root => "private item with no callers: dynamic dispatch or dead code",
         EntryKind::Test => "test with no callers",
@@ -870,6 +883,7 @@ fn entry_title(kind: EntryKind) -> &'static str {
 fn entry_group_title(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Main => "main",
+        EntryKind::Exported => "exported entries",
         EntryKind::PublicRoot => "public roots",
         EntryKind::Root => "private roots",
         EntryKind::Test => "tests",
@@ -885,6 +899,7 @@ fn entries_view(entries: &[EntryRow], nav: Nav, go: &Rc<dyn Fn(usize, bool)>) ->
     let mut groups: Vec<AnyView> = Vec::new();
     for kind in [
         EntryKind::Main,
+        EntryKind::Exported,
         EntryKind::PublicRoot,
         EntryKind::Root,
         EntryKind::Test,

@@ -96,8 +96,10 @@ Every navigation command takes `--path <repo>` (default `.`), `--json` for a
 machine-readable slice, and `--semantic` for the rust-analyzer backend.
 
 ```bash
-# Where does it start? main, uncalled public API, private roots, tests.
-lcw entries --reach            # --reach: how many functions each root drives
+# Where does it start? Ranked by how much code each entry drives.
+lcw entries                    # main/_start, foreign-ABI exports, public roots, tests
+lcw entries --kind exported    # kernel/WASM/FFI entries only
+lcw entries --reach            # also measure reach for the public/private roots
 
 # How is it organized? crate ▸ module ▸ type ▸ function, with cc / fan-in / fan-out.
 lcw outline --depth 1          # collapse below top-level modules

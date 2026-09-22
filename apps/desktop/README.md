@@ -102,6 +102,22 @@ same code.
 > (`WebViewer::canvas()`). This is what makes the graph render under WebKitGTK
 > and in headless browsers.
 
+## Why the build hooks set a working directory
+
+Tauri runs `beforeDevCommand` / `beforeBuildCommand` in what it calls the
+*frontend directory*, which it takes to be the parent of `src-tauri` — the
+usual layout, where `package.json` sits next to it. Here the frontend is a
+sibling folder (`apps/desktop/frontend`), so a bare `trunk serve` would start in
+`apps/desktop`, find no `Trunk.toml`, and fail with "Unable to find any Trunk
+configuration". Both hooks therefore name the directory explicitly:
+
+```json
+"beforeDevCommand": { "script": "trunk serve", "cwd": "../frontend" }
+```
+
+A relative `cwd` resolves against `src-tauri` (the CLI chdirs there before
+running the hook), which is also what `frontendDist` is relative to.
+
 ## Prerequisites
 
 ```bash

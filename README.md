@@ -87,8 +87,18 @@ cargo run -p lcw-cli -- analyze /path/to/repo --format summary
 cargo test
 
 # Native interactive viewer (winit + wgpu power mode):
-cargo run -p lcw-cli --features viewer -- view /path/to/repo
+cargo xtask view /path/to/repo
+
+# The same graph in a browser, no Tauri and no GPU needed:
+cargo xtask ui /path/to/repo
+
+# What is missing before either of those will run:
+cargo xtask doctor
 ```
+
+`cargo xtask` is the developer task runner in [`xtask/`](xtask/): it checks the
+environment first and names the exact command for anything missing. It has no
+dependencies and no shell, so it behaves the same on macOS, Linux and Windows.
 
 ## Walking a codebase from the CLI
 

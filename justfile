@@ -41,21 +41,25 @@ features:
 analyze path=".":
     cargo run -p lcw-cli -- analyze {{path}} --format summary
 
-# Native interactive viewer (winit + wgpu "power mode").
+# Native interactive viewer (winit + wgpu "power mode"), prerequisites checked.
 view path=".":
-    cargo run -p lcw-cli --features viewer -- view {{path}}
+    cargo xtask view {{path}}
 
 # Type-check the Leptos/wasm desktop frontend (mirrors the `wasm` CI job).
 # Needs: rustup target add wasm32-unknown-unknown
 wasm-check:
     cd apps/desktop/frontend && cargo check --target wasm32-unknown-unknown --locked
 
+# Check the environment before anything else: cargo, toolchain, wasm target,
+# trunk, the repo path, the port. Prints the exact fix for whatever is missing.
+doctor:
+    cargo xtask doctor
+
 # Run the UI in a plain browser against a repo (no Tauri, no GPU needed).
-# Usage: `just ui /path/to/repo`. Needs, once:
-#   rustup target add wasm32-unknown-unknown
-#   cargo install trunk --locked
+# Usage: `just ui /path/to/repo`. Checks prerequisites first and names the
+# install command for anything missing.
 ui path=".":
-    apps/desktop/frontend/browser-dev.sh {{path}}
+    cargo xtask ui {{path}}
 
 # Desktop app (Tauri v2 + Leptos/WASM) dev server. Needs trunk + tauri-cli:
 #   rustup target add wasm32-unknown-unknown

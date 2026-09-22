@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+description = "Cross-platform developer task runner: environment checks, browser dev mode, native viewer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+# No dependencies, on purpose: this is the thing you run *before* the toolchain
+# is known to work, and it should compile in about a second from a cold cache.
+[dependencies]
+
+[lints]
+workspace = true

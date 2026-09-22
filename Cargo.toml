@@ -16,6 +16,7 @@ members = [
     "crates/lcw-adapter-ts",
     "crates/lcw-adapter-py",
     "crates/lcw-adapter-go",
+    "xtask",
 ]
 
 # The desktop app is built with its own toolchain flow (Tauri bundler for the

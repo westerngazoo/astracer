@@ -5,10 +5,10 @@
 // finds. It runs against browser dev mode (`transport::FixtureTransport`), so
 // no Tauri shell, engine or GPU hardware is needed.
 //
-//   apps/desktop/frontend/browser-dev.sh /path/to/repo &
+//   cargo xtask ui /path/to/repo --no-open &
 //   npm i -g playwright && node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots
 //
-// The script builds the UI and the fixture and serves them; the test then types
+// The runner builds the UI and the fixture and serves them; the test then types
 // `fixture.json` into the path box, which is the name it writes.
 //
 // It is deliberately not wired into CI: that would add a Node/Playwright

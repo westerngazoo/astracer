@@ -77,20 +77,31 @@ view instead of calling the engine, so the whole interface can be developed,
 screenshotted and tested in a plain browser.
 
 ```bash
-rustup target add wasm32-unknown-unknown
-cargo install trunk --locked
-apps/desktop/frontend/browser-dev.sh /path/to/repo
+cargo xtask ui /path/to/repo
 ```
 
-The first two lines are the prerequisites, needed once. The script checks for
-both and stops with the install command if either is missing, since without the
-wasm target `trunk` fails deep inside a cargo build, behind screens of `E0463`
-from every dependency in the tree.
-
-The script builds the analyzer and the wasm UI, analyzes the repository into a
-graph fixture, and serves the result on <http://127.0.0.1:8765/>; type
+That builds the analyzer and the wasm UI, analyzes the repository into a graph
+fixture, serves it on <http://127.0.0.1:8765/> and opens a browser; type
 `fixture.json` in the path box and press **Analyze**. `just ui /path/to/repo`
-does the same.
+does the same, and `--port N` / `--no-open` are there when you need them.
+
+It checks the environment first and stops with the exact install command for
+anything missing, rather than letting the failure surface later and deeper:
+
+```bash
+cargo xtask doctor
+```
+
+Without the wasm target, for instance, `trunk` starts normally and then dies
+inside cargo with an `E0463` from *every* crate in the tree at once — there is
+no `libcore.rlib` for that target, so the implicit `extern crate core` fails
+everywhere — and the one `note:` naming the cause scrolls past.
+
+The runner is a dependency-free Rust binary (`xtask/`), not a shell script, so
+it works the same on macOS, Linux and Windows; it serves the bundle from
+`std::net` rather than shelling out to `python3 -m http.server`, and it answers
+`application/wasm` for the module, which `WebAssembly.instantiateStreaming`
+requires and refuses to work without.
 
 The bundle goes to `frontend/target/browser-dev/`, not `frontend/dist/`, so a
 browser session and a `tauri dev`/`tauri build` bundle never fight over the same

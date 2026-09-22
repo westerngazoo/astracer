@@ -77,15 +77,19 @@ view instead of calling the engine, so the whole interface can be developed,
 screenshotted and tested in a plain browser.
 
 ```bash
-cargo build -p lcw-cli --features viewer
-./target/debug/lcw analyze /path/to/repo --format view -o /tmp/fixture.json
-
-cd apps/desktop/frontend
-trunk build --release
-cp /tmp/fixture.json dist/fixture.json
-(cd dist && python3 -m http.server 8765)
-# open http://127.0.0.1:8765/ and press Analyze
+apps/desktop/frontend/browser-dev.sh /path/to/repo
 ```
+
+That builds the analyzer and the wasm UI, analyzes the repository into a graph
+fixture, and serves the result on <http://127.0.0.1:8765/>; type `fixture.json`
+in the path box and press **Analyze**. `just ui /path/to/repo` does the same.
+
+The bundle goes to `frontend/target/browser-dev/`, not `frontend/dist/`.
+`dist/index.html` is a *tracked placeholder* that has to exist for the backend's
+`generate_context!` to compile: building into `dist` overwrites it and dirties
+the working tree, and serving `dist` before a build serves the placeholder,
+whose page reads "Run `trunk build` ...". Keeping the bundle under the
+git-ignored `target/` avoids both.
 
 `tests/ui_smoke.mjs` drives exactly that setup in headless Chromium
 (`node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots`, needs Playwright)

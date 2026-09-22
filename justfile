@@ -50,6 +50,11 @@ view path=".":
 wasm-check:
     cd apps/desktop/frontend && cargo check --target wasm32-unknown-unknown --locked
 
+# Run the UI in a plain browser against a repo (no Tauri, no GPU needed).
+# Usage: `just ui /path/to/repo`. Needs trunk; see apps/desktop/README.md.
+ui path=".":
+    apps/desktop/frontend/browser-dev.sh {{path}}
+
 # Desktop app (Tauri v2 + Leptos/WASM) dev server. Needs trunk + tauri-cli:
 #   rustup target add wasm32-unknown-unknown
 #   cargo install trunk tauri-cli --locked

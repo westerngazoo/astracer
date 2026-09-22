@@ -5,12 +5,11 @@
 // finds. It runs against browser dev mode (`transport::FixtureTransport`), so
 // no Tauri shell, engine or GPU hardware is needed.
 //
-//   cargo build -p lcw-cli --features viewer
-//   ./target/debug/lcw analyze . --format view -o /tmp/fixture.json
-//   cd apps/desktop/frontend && trunk build --release
-//   cp /tmp/fixture.json dist/fixture.json
-//   (cd dist && python3 -m http.server 8765) &
+//   apps/desktop/frontend/browser-dev.sh /path/to/repo &
 //   npm i -g playwright && node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots
+//
+// The script builds the UI and the fixture and serves them; the test then types
+// `fixture.json` into the path box, which is the name it writes.
 //
 // It is deliberately not wired into CI: that would add a Node/Playwright
 // dependency to a pure-Rust workspace. The `wasm` CI job type-checks the same

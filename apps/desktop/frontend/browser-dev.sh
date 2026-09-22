@@ -24,10 +24,25 @@ PORT=${2:-8765}
 OUT="$FRONTEND_DIR/target/browser-dev"
 LCW="$REPO_ROOT/target/debug/lcw"
 
+# Both prerequisites are checked up front. Without the wasm target `trunk`
+# starts happily and then fails deep inside a cargo build, where the real cause
+# ("the wasm32-unknown-unknown target may not be installed") is one line among
+# several screens of E0463 from every dependency in the tree.
+
 if ! command -v trunk >/dev/null 2>&1; then
     echo "error: 'trunk' is not installed. Install it with:" >&2
-    echo "    rustup target add wasm32-unknown-unknown" >&2
     echo "    cargo install trunk --locked" >&2
+    exit 1
+fi
+
+# Only meaningful under rustup; a distro or nix toolchain manages targets its
+# own way, so there the build is left to speak for itself.
+if command -v rustup >/dev/null 2>&1 &&
+    ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+    echo "error: the wasm32-unknown-unknown target is not installed for the active" >&2
+    echo "toolchain ($(rustup show active-toolchain 2>/dev/null || echo unknown))." >&2
+    echo "Install it with:" >&2
+    echo "    rustup target add wasm32-unknown-unknown" >&2
     exit 1
 fi
 

@@ -77,12 +77,20 @@ view instead of calling the engine, so the whole interface can be developed,
 screenshotted and tested in a plain browser.
 
 ```bash
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
 apps/desktop/frontend/browser-dev.sh /path/to/repo
 ```
 
-That builds the analyzer and the wasm UI, analyzes the repository into a graph
-fixture, and serves the result on <http://127.0.0.1:8765/>; type `fixture.json`
-in the path box and press **Analyze**. `just ui /path/to/repo` does the same.
+The first two lines are the prerequisites, needed once. The script checks for
+both and stops with the install command if either is missing, since without the
+wasm target `trunk` fails deep inside a cargo build, behind screens of `E0463`
+from every dependency in the tree.
+
+The script builds the analyzer and the wasm UI, analyzes the repository into a
+graph fixture, and serves the result on <http://127.0.0.1:8765/>; type
+`fixture.json` in the path box and press **Analyze**. `just ui /path/to/repo`
+does the same.
 
 The bundle goes to `frontend/target/browser-dev/`, not `frontend/dist/`, so a
 browser session and a `tauri dev`/`tauri build` bundle never fight over the same

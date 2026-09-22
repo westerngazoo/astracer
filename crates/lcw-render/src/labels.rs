@@ -22,6 +22,12 @@ pub struct LabelOptions {
     pub min_radius_px: f32,
     /// Cull nodes whose center is more than this many px outside the viewport.
     pub margin_px: f32,
+    /// Half-extents (px) of the box a drawn label is assumed to occupy. A
+    /// candidate whose center falls inside an already-placed label's box is
+    /// dropped, so labels thin out instead of stacking on top of each other.
+    /// The horizontal extent is the larger one because text is wide and short.
+    /// `[0.0, 0.0]` disables the check.
+    pub min_separation_px: [f32; 2],
 }
 
 impl Default for LabelOptions {
@@ -30,6 +36,7 @@ impl Default for LabelOptions {
             max_labels: 48,
             min_radius_px: 7.0,
             margin_px: 96.0,
+            min_separation_px: [92.0, 19.0],
         }
     }
 }
@@ -84,8 +91,28 @@ pub fn select_labels(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.index.cmp(&b.index))
     });
-    candidates.truncate(opts.max_labels);
-    candidates
+
+    // Greedy de-overlap: importance order means a dropped label always loses to
+    // a bigger (higher fan-in) neighbor, so the ones that survive are the ones
+    // worth reading. O(max_labels * candidates) with a tiny constant.
+    let [sx, sy] = opts.min_separation_px;
+    if sx <= 0.0 && sy <= 0.0 {
+        candidates.truncate(opts.max_labels);
+        return candidates;
+    }
+    let mut placed: Vec<LabelPlacement> = Vec::with_capacity(opts.max_labels);
+    for c in candidates {
+        if placed.len() >= opts.max_labels {
+            break;
+        }
+        let clear = placed.iter().all(|p| {
+            (p.screen[0] - c.screen[0]).abs() >= sx || (p.screen[1] - c.screen[1]).abs() >= sy
+        });
+        if clear {
+            placed.push(c);
+        }
+    }
+    placed
 }
 
 #[cfg(test)]
@@ -121,6 +148,7 @@ mod tests {
             max_labels: 10,
             min_radius_px: 7.0,
             margin_px: 96.0,
+            min_separation_px: [0.0, 0.0],
         };
         let out = select_labels(&nodes, &cam(), &opts);
         assert_eq!(out.len(), 2);
@@ -145,6 +173,34 @@ mod tests {
         let out = select_labels(&nodes, &cam(), &opts);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].index, 0); // the largest
+    }
+
+    #[test]
+    fn crowded_labels_are_thinned_keeping_the_biggest() {
+        // Three nodes a few px apart on screen: only the largest survives the
+        // separation test, and a distant fourth is unaffected.
+        let nodes = vec![
+            node([0.0, 0.0], 8.0, 1),
+            node([5.0, 0.0], 12.0, 2),
+            node([-4.0, 2.0], 9.0, 3),
+            node([80.0, 40.0], 10.0, 4),
+        ];
+        let opts = LabelOptions {
+            max_labels: 10,
+            min_radius_px: 7.0,
+            margin_px: 96.0,
+            min_separation_px: [40.0, 12.0],
+        };
+        let out = select_labels(&nodes, &cam(), &opts);
+        let kept: Vec<usize> = out.iter().map(|p| p.index).collect();
+        assert_eq!(kept, vec![1, 3], "biggest of the cluster, plus the far one");
+
+        // Disabling the separation keeps everything (old behavior).
+        let loose = LabelOptions {
+            min_separation_px: [0.0, 0.0],
+            ..opts
+        };
+        assert_eq!(select_labels(&nodes, &cam(), &loose).len(), 4);
     }
 
     #[test]

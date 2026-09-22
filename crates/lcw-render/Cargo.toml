@@ -25,10 +25,26 @@ winit = { version = "0.30.13", optional = true }
 
 # wasm target: create a wgpu surface from an HTML <canvas> for the Tauri
 # webview (and a future VS Code webview).
+#
+# `webgl` compiles wgpu's WebGL2 backend into the wasm build. Without it the
+# only web backend is WebGPU, so every webview that lacks WebGPU — notably
+# WebKitGTK, which is what Tauri embeds on Linux — fails with "no compatible
+# GPU adapter" and shows an empty canvas.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "Document"] }
+web-sys = { version = "0.3", features = [
+    "Attr",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "NamedNodeMap",
+    "Navigator",
+    "Node",
+    "Window",
+] }
+wgpu = { version = "24.0.5", features = ["webgl"] }
 
 [features]
 # Native winit+wgpu driver (desktop validation / "power mode"). The renderer

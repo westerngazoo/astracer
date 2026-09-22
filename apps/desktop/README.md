@@ -66,6 +66,39 @@ The graph crosses the process boundary as a serde snapshot, so the backend
 (native, `rayon` layout) and the frontend (wasm, `wgpu`) never share memory or a
 non-portable dependency (Principle I).
 
+## Browser dev mode (no Tauri, no GPU hardware)
+
+The UI detects whether it is hosted by Tauri (`window.__TAURI__`). When it is
+not, `transport::FixtureTransport` takes over: **Analyze** fetches a JSON graph
+view instead of calling the engine, so the whole interface can be developed,
+screenshotted and tested in a plain browser.
+
+```bash
+cargo build -p lcw-cli --features viewer
+./target/debug/lcw analyze /path/to/repo --format view -o /tmp/fixture.json
+
+cd apps/desktop/frontend
+trunk build --release
+cp /tmp/fixture.json dist/fixture.json
+(cd dist && python3 -m http.server 8765)
+# open http://127.0.0.1:8765/ and press Analyze
+```
+
+`tests/ui_smoke.mjs` drives exactly that setup in headless Chromium
+(`node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots`, needs Playwright)
+and walks the whole interface: analyze, jump to main, follow a callee, trace a
+flow, go back, toggle and filter the outline, click the canvas. It reports
+console errors and takes screenshots at each step. It is not in CI, which would
+mean adding Node to a pure-Rust workspace; the `wasm` CI job type-checks the
+same code.
+
+> A canvas hands out one kind of drawing context for its lifetime. Where a
+> browser advertises WebGPU but yields no adapter, the failed attempt makes that
+> element unusable for WebGL2, so `WebViewer` retries on a **replacement
+> canvas** and the app re-attaches its pointer listeners
+> (`WebViewer::canvas()`). This is what makes the graph render under WebKitGTK
+> and in headless browsers.
+
 ## Prerequisites
 
 ```bash

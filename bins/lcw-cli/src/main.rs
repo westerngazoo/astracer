@@ -88,6 +88,12 @@ enum Format {
     Json,
     Dot,
     Graphml,
+    /// The laid-out graph view the desktop frontend consumes: the report
+    /// snapshot plus one `[x, y]` position per node. Serve it as
+    /// `fixture.json` next to the built frontend to run the UI in a plain
+    /// browser (browser dev mode) without the Tauri shell.
+    #[cfg(feature = "viewer")]
+    View,
 }
 
 /// Which graph a visual command renders.
@@ -488,6 +494,15 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
         }
         Format::Dot => export::export_dot(&report.graph),
         Format::Graphml => export::export_graphml(&report.graph),
+        #[cfg(feature = "viewer")]
+        Format::View => {
+            let layout = lcw_layout::layout(&report.graph, &lcw_layout::LayoutParams::default());
+            let view = serde_json::json!({
+                "report": report.snapshot(),
+                "positions": layout.positions,
+            });
+            serde_json::to_string(&view).context("serializing graph view to JSON")?
+        }
     };
 
     match args.output {

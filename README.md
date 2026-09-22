@@ -135,6 +135,10 @@ call tree below the node, and back navigation. See
 In the native viewer (`lcw view`): click to inspect, `f` to set a flow source
 then click a target, `m` to jump to `main`, `o` to open the code in an editor.
 
+`lcw analyze --format view` (viewer build) writes the laid-out graph the
+frontend consumes, which lets the UI run in a plain browser against a fixture —
+see the desktop README's *Browser dev mode*.
+
 ### Optional features
 
 ```bash

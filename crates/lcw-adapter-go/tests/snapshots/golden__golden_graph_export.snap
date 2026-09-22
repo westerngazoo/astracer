@@ -26,7 +26,8 @@ expression: graph.export()
         "is_unsafe": false,
         "is_test": false,
         "is_method": false,
-        "is_generic": false
+        "is_generic": false,
+        "is_exported": false
       },
       "stats": {
         "lines_of_code": 3,
@@ -59,7 +60,8 @@ expression: graph.export()
         "is_unsafe": false,
         "is_test": false,
         "is_method": true,
-        "is_generic": false
+        "is_generic": false,
+        "is_exported": false
       },
       "stats": {
         "lines_of_code": 4,
@@ -92,7 +94,8 @@ expression: graph.export()
         "is_unsafe": false,
         "is_test": false,
         "is_method": true,
-        "is_generic": false
+        "is_generic": false,
+        "is_exported": false
       },
       "stats": {
         "lines_of_code": 8,
@@ -125,7 +128,8 @@ expression: graph.export()
         "is_unsafe": false,
         "is_test": false,
         "is_method": false,
-        "is_generic": false
+        "is_generic": false,
+        "is_exported": false
       },
       "stats": {
         "lines_of_code": 6,
@@ -158,7 +162,8 @@ expression: graph.export()
         "is_unsafe": false,
         "is_test": false,
         "is_method": false,
-        "is_generic": false
+        "is_generic": false,
+        "is_exported": false
       },
       "stats": {
         "lines_of_code": 0,

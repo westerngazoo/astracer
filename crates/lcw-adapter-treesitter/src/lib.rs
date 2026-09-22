@@ -155,6 +155,37 @@ mod tests {
     }
 
     #[test]
+    fn foreign_abi_exports_are_flagged() {
+        let g = parse(
+            r#"
+            /// Entry the bootloader jumps to. Mentions #[no_mangle] in prose.
+            #[no_mangle]
+            pub extern "C" fn kmain() -> ! { loop {} }
+
+            #[export_name = "trap_entry"]
+            fn trap_handler() {}
+
+            extern "C" fn callback(x: i32) -> i32 { x }
+
+            /// Plain Rust: not reachable from a foreign ABI.
+            pub fn helper() {}
+
+            unsafe extern "C" {
+                pub fn host_write(fd: i32);
+            }
+            "#,
+        );
+        let flags = |qn: &str| g.node(g.node_by_qualified(qn).expect(qn)).flags;
+        assert!(flags("crate::kmain").is_exported, "#[no_mangle]");
+        assert!(flags("crate::trap_handler").is_exported, "#[export_name]");
+        assert!(flags("crate::callback").is_exported, "extern \"C\" fn");
+        assert!(!flags("crate::helper").is_exported, "plain pub fn");
+        // A declaration inside an `extern` block is an *import*: the symbol is
+        // defined elsewhere, so it must never count as an export.
+        assert!(!flags("crate::host_write").is_exported, "extern block decl");
+    }
+
+    #[test]
     fn type_qualified_calls_bind_only_to_matching_types() {
         let g = parse(
             r#"

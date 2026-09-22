@@ -558,15 +558,16 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Select the program's `main` (first entry point) and center the camera
-    /// on it — the usual place to start a walk.
+    /// Select the best place to start reading and center the camera on it: of
+    /// the program entries and foreign-ABI exports, the one that drives the
+    /// most code (see [`lcw_query::primary_entry`]).
     fn jump_to_main(&mut self) {
         let Some(graph) = &self.graph else {
-            lcw_telemetry::info!(target: "lcw::render", "no call graph in this view; cannot jump to main");
+            lcw_telemetry::info!(target: "lcw::render", "no call graph in this view; cannot jump to the entry point");
             return;
         };
-        let Some(main) = lcw_query::mains(graph).first().copied() else {
-            lcw_telemetry::info!(target: "lcw::render", "no `main` found in the graph");
+        let Some(main) = lcw_query::primary_entry(graph) else {
+            lcw_telemetry::info!(target: "lcw::render", "no entry point found in the graph");
             return;
         };
         let idx = main.0 as usize;

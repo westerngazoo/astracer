@@ -99,6 +99,7 @@ pub struct OutlineStyle {
 fn entry_marker(entry: Option<EntryKind>) -> &'static str {
     match entry {
         Some(EntryKind::Main) => "  ★ main",
+        Some(EntryKind::Exported) => "  ⇥ export",
         Some(EntryKind::PublicRoot) => "  ◇ pub root",
         Some(EntryKind::Root) => "  ○ root",
         Some(EntryKind::Test) => "  ⚑ test",
@@ -197,6 +198,9 @@ pub fn format_entries(
             let count = entries.iter().filter(|x| x.kind == e.kind).count();
             let title = match e.kind {
                 EntryKind::Main => "main — where the program starts",
+                EntryKind::Exported => {
+                    "exported — called from outside this code: bootloader, hardware, WASM host, FFI"
+                }
                 EntryKind::PublicRoot => "public roots — API surface nobody calls internally",
                 EntryKind::Root => "private roots — uncalled: dynamic dispatch or dead code",
                 EntryKind::Test => "tests — roots for the test harness",

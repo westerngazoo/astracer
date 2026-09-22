@@ -29,7 +29,7 @@ pub mod reach;
 pub mod resolve;
 
 pub use card::{edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard};
-pub use entries::{classify_entry, entry_points, mains, EntryKind, EntryPoint};
+pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
 pub use flow::{shortest_path, shortest_paths, FlowPaths};
 pub use outline::{outline, Outline, OutlineKind, OutlineNode};
 pub use reach::{

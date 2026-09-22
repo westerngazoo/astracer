@@ -24,8 +24,11 @@ apps/desktop
 
 Three columns:
 
-* **Explorer (left)** — *Start here*: the entry points (`main`, public roots,
-  private roots, tests; `main`s show how many functions they reach). Below it
+* **Explorer (left)** — *Start here*: the entry points, ranked by how much code
+  each drives — `main`/`_start`, then **exported** (symbols a bootloader,
+  hardware trap vector, WASM host or FFI caller enters through, which is where
+  a kernel or WASM module actually starts), then public roots, private roots
+  and tests. Below it
   the **Outline**: crate ▸ module ▸ type ▸ function, collapsible, with a
   filter box, a cyclomatic-complexity badge per function and entry badges.
   Clicking a function selects it and centers the canvas on it.

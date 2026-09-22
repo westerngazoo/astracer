@@ -166,6 +166,9 @@ fn compute_flags(func: TsNode, text: &str, name: &str, is_method: bool) -> NodeF
         is_test: name.starts_with("test"),
         is_method,
         is_generic: func.child_by_field_name("type_parameters").is_some(),
+        // Python has no foreign-ABI export marker in its own syntax; a C
+        // extension's entry points live in C sources this adapter never sees.
+        is_exported: false,
     }
 }
 

@@ -84,12 +84,9 @@ That builds the analyzer and the wasm UI, analyzes the repository into a graph
 fixture, and serves the result on <http://127.0.0.1:8765/>; type `fixture.json`
 in the path box and press **Analyze**. `just ui /path/to/repo` does the same.
 
-The bundle goes to `frontend/target/browser-dev/`, not `frontend/dist/`.
-`dist/index.html` is a *tracked placeholder* that has to exist for the backend's
-`generate_context!` to compile: building into `dist` overwrites it and dirties
-the working tree, and serving `dist` before a build serves the placeholder,
-whose page reads "Run `trunk build` ...". Keeping the bundle under the
-git-ignored `target/` avoids both.
+The bundle goes to `frontend/target/browser-dev/`, not `frontend/dist/`, so a
+browser session and a `tauri dev`/`tauri build` bundle never fight over the same
+directory.
 
 `tests/ui_smoke.mjs` drives exactly that setup in headless Chromium
 (`node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots`, needs Playwright)
@@ -156,9 +153,12 @@ cargo tauri build
 
 This runs `trunk build` (emitting `frontend/dist/`) and bundles the app.
 
-> The checked-in `frontend/dist/index.html` is only a placeholder so the backend
-> compiles standalone (`generate_context!` embeds `frontendDist`); `trunk build`
-> overwrites it with the real bundle.
+> `frontend/dist/` is git-ignored whole. `generate_context!` embeds it at compile
+> time, so it has to exist; `src-tauri/build.rs` writes a placeholder page there
+> when no bundle is present, and leaves a real one alone. Keeping it out of git
+> is what stops a `checkout` or `pull` from restoring that placeholder over a
+> bundle you already built — a failure that looks like the app broke, when all
+> that happened was a branch switch.
 
 ## Optional features
 

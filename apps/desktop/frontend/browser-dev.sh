@@ -9,12 +9,11 @@
 #
 # Defaults to analyzing this repository on port 8765.
 #
-# The bundle is built into `target/browser-dev/` rather than `dist/`, on purpose.
-# `dist/index.html` is a *tracked* placeholder that must exist for the Tauri
-# backend's `generate_context!` to compile; building into it overwrites that file
-# and leaves the working tree dirty, and serving it *before* a build silently
-# serves the placeholder — which reads "Run `trunk build` ...", the symptom this
-# script exists to prevent. `target/` is git-ignored, so neither can happen.
+# The bundle is built into `target/browser-dev/` rather than `dist/`, on purpose:
+# `dist/` belongs to the Tauri build (`generate_context!` embeds it), and a
+# browser session that builds into it would fight a `tauri dev` over the same
+# directory. Serving a directory this script has just built also means a stale
+# or placeholder page can never be what you end up looking at.
 
 set -eu
 

@@ -200,6 +200,63 @@ first, graph second, so the UI paints early); or a binary snapshot
 (`bincode`-style) behind the same `EngineTransport` trait — the seam is
 already there, so this is a local change.
 
+### F13 — The web renderer could never work without WebGPU (fixed)
+
+Three compounding defects meant the desktop app's canvas was blank on any
+webview lacking WebGPU — which includes **WebKitGTK, the webview Tauri embeds
+on Linux**, and any Chrome session where the GPU is blocklisted:
+
+1. `lcw-render` did not enable wgpu's `webgl` feature, so the WebGL2 backend
+   was not compiled into the wasm binary at all. The only web backend present
+   was WebGPU.
+2. The device was requested with wgpu's *default* limits, which are far above
+   what WebGL2 can provide; `request_device` would have failed even once the
+   backend existed. It now requests exactly `adapter.limits()`.
+3. Most subtly: a canvas hands out **one kind of drawing context for its
+   lifetime**. `canvas.getContext("webgpu")` returns a `GPUCanvasContext` even
+   where WebGPU cannot produce an adapter, and from then on
+   `getContext("webgl2")` on that element returns `null`. So the natural "try
+   WebGPU, fall back to WebGL2" on a single canvas destroys its own fallback.
+
+`WebViewer::new` now prefers WebGPU only when `navigator.gpu` exists, and when
+that attempt yields no adapter it retries on a **replacement canvas element**
+(attributes copied, swapped into the DOM), returning the canvas it actually
+used so the app can re-attach the pointer listeners that belonged to the old
+node. Verified in headless Chromium, which is precisely the
+"WebGPU advertised, no adapter" case: before, an error banner and an empty
+canvas; after, the graph renders through WebGL2.
+
+The general lesson: a fallback that shares mutable, one-shot state with the
+attempt it is meant to rescue is not a fallback.
+
+### F14 — UI defects only a browser could reveal (fixed)
+
+Driving the real bundle (`apps/desktop/frontend/tests/ui_smoke.mjs`) found four
+issues no unit test would:
+
+* **The outline was below the fold.** The "Start here" card was unbounded, and
+  with 146 test roots it filled the sidebar, pushing the outline — the main
+  navigation surface — entirely out of view. It is now height-capped and
+  scrolls on its own.
+* **"Main" jumped to a build script.** Entry points were listed alphabetically,
+  so `build::main` (which drives 0 functions) came before `lcw_cli::main`
+  (which drives 178). `main`s are now ranked by reachable-function count.
+* **The detail pane kept its scroll offset**, so selecting a node from deep in
+  the call tree left the new node's header above the fold. It now scrolls back
+  to the top on selection.
+* **Labels stacked on top of each other.** `select_labels` ranked by on-screen
+  size but never checked overlap. It now drops a candidate that falls inside an
+  already-placed label's box, so the survivors are the biggest in each
+  neighborhood.
+
+A fifth observation is not fixed and is worth knowing: **a panic in wasm leaves
+a `RefCell` borrowed forever**. The release profile sets `panic = "abort"`, so
+no `Drop` runs and the borrow guard never releases; every later event handler
+then panics with "already mutably borrowed" and the app is a zombie that still
+paints but responds to nothing. The first wgpu panic above was observed doing
+exactly this. Keeping GPU work out of `borrow_mut()` scopes where possible, and
+returning `Result` rather than panicking, is the practical mitigation.
+
 ## 4. Recommendations by axis
 
 ### Engineering (correctness, precision, trust)
@@ -278,7 +335,14 @@ ancestors so a search never shows an orphaned leaf.
   (unchanged by the resolver fix) and the engine's self-analysis.
 * `cargo clippy --workspace --all-targets -- -D warnings`: clean.
 * `cargo check --target wasm32-unknown-unknown` for `apps/desktop/frontend`:
-  green (no `trunk`/webview available here, so the UI was type-checked, not
-  run).
+  green.
 * The CLI was run against this repository (`outline`, `entries`, `calls`,
   `explain`, `flow`); the F1 numbers above come from those runs.
+* The desktop UI was **built with `trunk` and driven in headless Chromium**
+  against a fixture produced by `lcw analyze --format view`: analyze, jump to
+  main, follow a callee, trace a flow, back, toggle and filter the outline,
+  select from the outline, click the canvas, search. F13 and F14 come from
+  those runs; afterwards the graph renders and no console errors remain. Not
+  covered: the Tauri shell itself (no webview toolchain in that environment),
+  so the `TauriTransport` path and the real `analyze_repo` command are still
+  only type-checked.

@@ -159,6 +159,14 @@
         margin-bottom: 0;
       }
 
+      /* "Start here" can list hundreds of roots; cap it so the outline — the
+         main navigation surface — is never pushed below the fold. */
+      .explorer .card.entries {
+        flex-shrink: 0;
+        max-height: 38%;
+        overflow-y: auto;
+      }
+
       .explorer .card.outline {
         display: flex;
         flex-direction: column;
@@ -300,8 +308,16 @@
         font-size: 12px;
         color: var(--muted);
         font-family: var(--mono);
-        word-break: break-all;
         margin-bottom: 8px;
+        /* Keep the badge on the line: the path ellipsizes instead of wrapping
+           (the full location is in the element's title). */
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .meta .badge {
+        margin-left: auto;
       }
 
       ul.stats {

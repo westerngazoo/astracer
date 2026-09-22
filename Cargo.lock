@@ -1625,6 +1625,7 @@ dependencies = [
  "bytemuck",
  "font8x8",
  "glam",
+ "js-sys",
  "lcw-core",
  "lcw-query",
  "lcw-telemetry",

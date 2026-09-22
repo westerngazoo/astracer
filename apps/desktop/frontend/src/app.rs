@@ -32,7 +32,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent, WheelEvent};
 
-use crate::transport::{self, EngineTransport, TauriTransport};
+use crate::transport::{self, EngineTransport, FixtureTransport, TauriTransport};
 use crate::viewer::hit_test;
 
 /// Max hops when tracing a flow from the anchor to the selection.
@@ -40,8 +40,11 @@ const FLOW_MAX_DEPTH: u32 = 64;
 /// Bounded call tree shown under the selected node.
 const TREE_DEPTH: u32 = 3;
 const TREE_WIDTH: usize = 8;
-/// Zoom (px per world unit) guaranteed when the camera jumps to a node.
-const FOCUS_ZOOM: f32 = 3.0;
+/// Zoom (px per world unit) guaranteed when the camera jumps to a node. Enough
+/// to tell neighbors apart, low enough to keep the surrounding structure in
+/// frame: jumping straight to maximum magnification loses the context that
+/// makes the jump useful.
+const FOCUS_ZOOM: f32 = 1.5;
 /// Rows shown per entry-point kind before "… n more".
 const ENTRIES_PER_KIND: usize = 12;
 /// Callers/callees listed in the detail pane before "… n more".
@@ -209,13 +212,30 @@ fn visible_rows(rows: &[Row], expanded: &HashSet<usize>) -> Vec<Row> {
     out
 }
 
+/// A path shortened to its last two components (`src-tauri/build.rs:1`), which
+/// keeps the directory that disambiguates a file without the absolute prefix.
+/// The full path stays available as a tooltip.
+fn compact_location(location: &str) -> String {
+    let (path, line) = match location.rsplit_once(':') {
+        Some((p, l)) if l.chars().all(|c| c.is_ascii_digit()) && !l.is_empty() => (p, Some(l)),
+        _ => (location, None),
+    };
+    let mut parts: Vec<&str> = path.rsplit(['/', '\\']).take(2).collect();
+    parts.reverse();
+    let short = parts.join("/");
+    match line {
+        Some(l) => format!("{short}:{l}"),
+        None => short,
+    }
+}
+
 fn build_explorer(graph: &CodeGraph) -> ExplorerData {
     let outline = outline(graph);
     let mut rows = Vec::with_capacity(outline.functions + outline.scopes);
     for root in &outline.roots {
         flatten_into(root, None, &mut rows);
     }
-    let entries = entry_points(graph)
+    let mut entries: Vec<EntryRow> = entry_points(graph)
         .into_iter()
         .map(|e| EntryRow {
             node: e.id.0 as usize,
@@ -226,6 +246,16 @@ fn build_explorer(graph: &CodeGraph) -> ExplorerData {
                 .then(|| reach_count(graph, e.id, Direction::Callees)),
         })
         .collect();
+    // Rank the `main`s by how much code they drive, so the program's real
+    // entry comes first and the "Main" button lands there. A repo usually has
+    // several: a build script, a two-line wasm bootstrap, the actual binary.
+    // Alphabetical order would offer `build::main` (reach 0) first.
+    entries.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| b.reach.cmp(&a.reach))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     ExplorerData {
         outline,
         rows,
@@ -386,6 +416,10 @@ fn select_node(
     nav.card.set(Some(card));
     nav.tree.set(Some(tree));
     nav.chain.set(chain.clone());
+    // The detail pane keeps its scroll position, so after clicking something
+    // far down (a callee, a call-tree row) the new node's header would be
+    // above the fold. Bring it back into view.
+    scroll_side_to_top();
 
     // 3. Recolor the scene, move the camera if asked.
     {
@@ -562,7 +596,8 @@ pub fn App() -> impl IntoView {
         let state = state.clone();
         move |_| {
             let repo = path.get();
-            if repo.trim().is_empty() {
+            let hosted = transport::has_tauri();
+            if hosted && repo.trim().is_empty() {
                 error.set(Some("Please enter a repository path.".into()));
                 return;
             }
@@ -571,9 +606,23 @@ pub fn App() -> impl IntoView {
             busy.set(true);
             error.set(None);
             nav.reset();
-            status.set("Starting analysis…".into());
+            status.set(
+                if hosted {
+                    "Starting analysis…"
+                } else {
+                    "Browser dev mode: loading fixture…"
+                }
+                .into(),
+            );
             spawn_local(async move {
-                match TauriTransport.analyze(repo, sem).await {
+                // Tauri hosts the engine; a plain browser gets a fixture (see
+                // `transport::FixtureTransport`). Same trait, same UI code.
+                let result = if hosted {
+                    TauriTransport.analyze(repo, sem).await
+                } else {
+                    FixtureTransport.analyze(repo, sem).await
+                };
+                match result {
                     Ok(view) => {
                         let report = view.report;
                         summary.set(Some(report.summary));
@@ -606,13 +655,21 @@ pub fn App() -> impl IntoView {
                             s.compose_scene()
                         };
                         state.borrow_mut().scene = scene;
-                        if let Err(e) = present_scene(&state).await {
-                            error.set(Some(e));
-                        } else {
-                            refresh_view(&state, labels);
-                            status.set(
-                                "Analysis complete — pick an entry point to start walking.".into(),
-                            );
+                        match present_scene(&state).await {
+                            Err(e) => error.set(Some(e)),
+                            Ok(swapped) => {
+                                // The renderer fell back to a replacement canvas
+                                // (see `present_scene`): its listeners went with
+                                // the old node, so wire the new one.
+                                if let Some(fresh) = swapped {
+                                    wire_pointer_events(&fresh, state.clone(), nav, labels);
+                                }
+                                refresh_view(&state, labels);
+                                status.set(
+                                    "Analysis complete — pick an entry point to start walking."
+                                        .into(),
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -693,7 +750,7 @@ pub fn App() -> impl IntoView {
                 <input
                     class="path"
                     type="text"
-                    placeholder="/path/to/repo"
+                    placeholder=if transport::has_tauri() { "/path/to/repo" } else { "fixture.json (browser dev mode)" }
                     prop:value=move || path.get()
                     on:input=move |ev| path.set(target_value(&ev))
                 />
@@ -979,7 +1036,7 @@ fn ExplorerPane(
 
     view! {
         <aside class="explorer">
-            <div class="card">
+            <div class="card entries">
                 <h3>"Start here"</h3>
                 {move || {
                     let go = actions.with_value(|a| a.go.clone());
@@ -1104,7 +1161,8 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
             let m = card.metrics;
             let (fan_in, fan_out) = (card.fan_in, card.fan_out);
             let (n_in, n_out) = (card.inputs.len(), card.outputs.len());
-            let meta = format!("{} · {}", kind_str(card.kind), card.location());
+            let full_location = card.location();
+            let meta = format!("{} · {}", kind_str(card.kind), compact_location(&full_location));
 
             let trace = a.trace.clone();
             let back = a.back.clone();
@@ -1122,7 +1180,7 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                         </div>
                     </div>
                     <div class="qname">{card.qualified_name.clone()}</div>
-                    <div class="meta">{meta}{badge}</div>
+                    <div class="meta" title=full_location>{meta}{badge}</div>
                     {flags}
                     <ul class="stats compact">
                         <li><span>"complexity"</span><b>{m.cyclomatic}</b></li>
@@ -1324,19 +1382,30 @@ fn Legend() -> impl IntoView {
 
 /// Create the viewer on first use, otherwise swap the scene; then draw. Care is
 /// taken never to hold the `RefCell` borrow across the async device request.
-async fn present_scene(state: &Shared) -> Result<(), String> {
+async fn present_scene(state: &Shared) -> Result<Option<HtmlCanvasElement>, String> {
     let (need_viewer, canvas, scene) = {
         let s = state.borrow();
         (s.viewer.is_none(), s.canvas.clone(), s.scene.clone())
     };
     let Some(scene) = scene else {
-        return Ok(());
+        return Ok(None);
     };
 
+    let mut swapped = None;
     if need_viewer {
         let canvas = canvas.ok_or_else(|| "canvas is not ready yet".to_string())?;
         resize_canvas(&canvas);
-        let viewer = WebViewer::new(canvas, &scene).await?;
+        let viewer = WebViewer::new(canvas.clone(), &scene).await?;
+        // A WebGPU attempt that fails leaves its canvas unusable for the WebGL2
+        // retry, so the viewer may have swapped in a replacement element. The
+        // old node (and its listeners) is gone from the document; hand the new
+        // one back so the caller can re-wire it.
+        let used = viewer.canvas();
+        if !canvas.is_same_node(Some(&used)) {
+            resize_canvas(&used);
+            swapped = Some(used.clone());
+            state.borrow_mut().canvas = Some(used);
+        }
         state.borrow_mut().viewer = Some(viewer);
     } else if let Some(viewer) = state.borrow_mut().viewer.as_mut() {
         viewer.set_scene(&scene);
@@ -1345,7 +1414,17 @@ async fn present_scene(state: &Shared) -> Result<(), String> {
     if let Some(viewer) = state.borrow_mut().viewer.as_mut() {
         viewer.render();
     }
-    Ok(())
+    Ok(swapped)
+}
+
+/// Scroll the right-hand pane back to the top (see `select_node`).
+fn scroll_side_to_top() {
+    if let Some(side) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(".side").ok().flatten())
+    {
+        side.set_scroll_top(0);
+    }
 }
 
 /// Match the canvas backing store to its CSS pixel size so mouse coordinates

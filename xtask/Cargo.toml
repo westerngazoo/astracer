@@ -8,6 +8,19 @@ authors.workspace = true
 rust-version.workspace = true
 publish = false
 
+# A distinct binary name, because this is meant to be installed globally:
+#
+#     cargo install --path xtask
+#
+# A `cargo xtask` alias resolves through `.cargo/config.toml`, which cargo finds
+# by walking up from the *current* directory — so the alias only exists while
+# your shell is inside this repository, and is useless for analyzing some other
+# project from that project's directory. An installed `lcw-dev` is on PATH
+# everywhere and needs no `cd`.
+[[bin]]
+name = "lcw-dev"
+path = "src/main.rs"
+
 # No dependencies, on purpose: this is the thing you run *before* the toolchain
 # is known to work, and it should compile in about a second from a cold cache.
 [dependencies]

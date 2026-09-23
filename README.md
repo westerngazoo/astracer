@@ -86,19 +86,29 @@ cargo run -p lcw-cli -- analyze /path/to/repo --format summary
 # Tests:
 cargo test
 
+# Install the task runner once, then use it from anywhere:
+cargo install --path xtask
+
+# What is missing before the UI will run:
+lcw-dev doctor
+
 # Native interactive viewer (winit + wgpu power mode):
-cargo xtask view /path/to/repo
+lcw-dev view /path/to/repo
 
 # The same graph in a browser, no Tauri and no GPU needed:
-cargo xtask ui /path/to/repo
-
-# What is missing before either of those will run:
-cargo xtask doctor
+lcw-dev ui /path/to/repo
 ```
 
-`cargo xtask` is the developer task runner in [`xtask/`](xtask/): it checks the
+`lcw-dev` is the developer task runner in [`xtask/`](xtask/): it checks the
 environment first and names the exact command for anything missing. It has no
 dependencies and no shell, so it behaves the same on macOS, Linux and Windows.
+
+Install it rather than relying on the `cargo xtask` alias: cargo finds an alias
+through `.cargo/config.toml`, which it discovers by walking up from the
+*current* directory, so the alias exists only while your shell is inside this
+repository — no use for pointing the tool at some other project from that
+project's directory, which is the whole job. Inside this repo the alias is
+there and `cargo xtask <task>` runs the same binary.
 
 ## Walking a codebase from the CLI
 

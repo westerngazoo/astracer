@@ -11,11 +11,17 @@
 //! So the runner is a dependency-free Rust binary instead: no shell, no Python,
 //! one implementation for macOS, Linux and Windows.
 //!
+//! Installed globally it needs no `cd` and no `--manifest-path`, which is the
+//! point: you analyze *other* projects with it, from wherever you happen to be.
+//!
 //! ```text
-//! cargo xtask doctor [--mode browser|native|all]
-//! cargo xtask ui   [REPO] [--port N] [--no-open]
-//! cargo xtask view [REPO] [--module]
+//! cargo install --path xtask
+//! lcw-dev doctor [--mode browser|native|all]
+//! lcw-dev ui   [REPO] [--port N] [--no-open]
+//! lcw-dev view [REPO] [--module]
 //! ```
+//!
+//! From inside this repository, `cargo xtask <task>` is the same thing.
 
 mod doctor;
 mod serve;
@@ -29,7 +35,8 @@ const USAGE: &str = "\
 Live Code Walk developer tasks.
 
 USAGE:
-    cargo xtask <COMMAND> [OPTIONS]
+    lcw-dev <COMMAND> [OPTIONS]        (after `cargo install --path xtask`)
+    cargo xtask <COMMAND> [OPTIONS]    (from inside this repository)
 
 COMMANDS:
     doctor          Check the environment and print what is missing
@@ -69,6 +76,15 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     let opts = Options::parse(&args[1..])?;
+    let root = repo_root();
+    if !is_repo_root(&root) {
+        return Err(format!(
+            "cannot find the Live Code Walk checkout (looked in {} and above the \
+             current directory). If the clone moved, reinstall it: \
+             cargo install --path <clone>/xtask",
+            root.display()
+        ));
+    }
     match cmd.as_str() {
         "doctor" => cmd_doctor(&opts),
         "ui" => cmd_ui(&opts),
@@ -121,9 +137,7 @@ impl Options {
 
     /// The repository to analyze: the argument, or this one.
     fn target_repo(&self) -> PathBuf {
-        self.repo
-            .clone()
-            .unwrap_or_else(|| repo_root().to_path_buf())
+        self.repo.clone().unwrap_or_else(repo_root)
     }
 
     fn port(&self) -> u16 {
@@ -131,12 +145,35 @@ impl Options {
     }
 }
 
-/// This repository's root, resolved at compile time so the runner works from
-/// any working directory (`cargo run` does not chdir to the workspace root).
-fn repo_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+/// This repository's root.
+///
+/// Baked in at compile time, because `cargo run` does not chdir to the
+/// workspace root and the runner still has to find `apps/desktop/frontend`
+/// whatever directory it was invoked from. Once installed with `cargo install`
+/// that path can go stale — the clone gets moved or renamed — so the working
+/// directory is searched upward as a fallback, which also covers running from
+/// a second checkout.
+fn repo_root() -> PathBuf {
+    let built = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask/ always has a parent")
+        .expect("xtask/ always has a parent");
+    if is_repo_root(built) {
+        return built.to_path_buf();
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            cwd.ancestors()
+                .find(|d| is_repo_root(d))
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| built.to_path_buf())
+}
+
+/// Whether `dir` is a Live Code Walk checkout. Both manifests, because a lone
+/// `Cargo.toml` is just any Rust project.
+fn is_repo_root(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file() && dir.join("xtask").join("Cargo.toml").is_file()
 }
 
 fn frontend_dir() -> PathBuf {
@@ -332,8 +369,16 @@ mod tests {
 
     #[test]
     fn repo_root_holds_the_workspace() {
-        assert!(repo_root().join("Cargo.toml").is_file());
+        assert!(is_repo_root(&repo_root()));
         assert!(frontend_dir().join("Trunk.toml").is_file());
         assert!(browser_out().starts_with(frontend_dir().join("target")));
+    }
+
+    #[test]
+    fn a_bare_rust_project_is_not_mistaken_for_this_one() {
+        // A lone Cargo.toml is any crate; the xtask manifest is what makes it
+        // this checkout, so the upward search must not stop short of it.
+        assert!(!is_repo_root(Path::new(env!("CARGO_MANIFEST_DIR"))));
+        assert!(!is_repo_root(Path::new("/")));
     }
 }

@@ -77,7 +77,8 @@ view instead of calling the engine, so the whole interface can be developed,
 screenshotted and tested in a plain browser.
 
 ```bash
-cargo xtask ui /path/to/repo
+cargo install --path xtask   # once
+lcw-dev ui /path/to/repo
 ```
 
 That builds the analyzer and the wasm UI, analyzes the repository into a graph
@@ -89,7 +90,7 @@ It checks the environment first and stops with the exact install command for
 anything missing, rather than letting the failure surface later and deeper:
 
 ```bash
-cargo xtask doctor
+lcw-dev doctor
 ```
 
 Without the wasm target, for instance, `trunk` starts normally and then dies

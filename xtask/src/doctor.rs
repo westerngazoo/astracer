@@ -139,7 +139,7 @@ fn check_repo(repo: &Path) -> Check {
         Check::missing(
             "repository",
             format!("not a directory: {}", repo.display()),
-            "pass a path that exists: cargo xtask ui /path/to/repo",
+            "pass a path that exists: lcw-dev ui /path/to/repo",
         )
     }
 }

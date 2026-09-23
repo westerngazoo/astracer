@@ -50,6 +50,11 @@ view path=".":
 wasm-check:
     cd apps/desktop/frontend && cargo check --target wasm32-unknown-unknown --locked
 
+# Install the task runner as `lcw-dev`, so it works from any directory (the
+# `cargo xtask` alias below only resolves from inside this repository).
+install-dev:
+    cargo install --path xtask
+
 # Check the environment before anything else: cargo, toolchain, wasm target,
 # trunk, the repo path, the port. Prints the exact fix for whatever is missing.
 doctor:

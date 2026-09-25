@@ -43,4 +43,4 @@ ra_ap_vfs = { version = "0.0.352", optional = true }
 # tops out at 0.1.4 (Unicode 17.0.0), so `unicode-ident` must stay on the 17.0.0
 # line (<= 1.0.24); 1.0.25+ moved to Unicode 18.0.0 and breaks the build. This
 # `=` pin keeps the shared lockfile aligned.
-unicode-ident = { version = "=1.0.24", optional = true }
+unicode-ident = { version = "=1.0.26", optional = true }

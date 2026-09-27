@@ -98,6 +98,15 @@ pub struct NodeFlags {
     pub is_test: bool,
     pub is_method: bool,
     pub is_generic: bool,
+    /// Exported across a **foreign ABI**: `#[no_mangle]` / `#[export_name]`,
+    /// or an explicit `extern "C"`-style ABI on a definition with a body.
+    ///
+    /// Such a symbol exists precisely so that something *outside* the analyzed
+    /// code can call it — a bootloader, a hardware trap vector, a WASM host, a
+    /// C caller, a callback registered with a foreign runtime. A call graph
+    /// built from this source can never show that caller, so an exported
+    /// symbol with no in-graph callers is an entry point, not dead code.
+    pub is_exported: bool,
 }
 
 /// Raw structural counts captured while parsing a function body. These are the
@@ -400,6 +409,21 @@ impl CodeGraph {
             .map(to_id)
     }
 
+    /// Outgoing edges of `id` as `(callee, &edge)`, so callers can see the
+    /// edge kind, multiplicity and call site — not just the neighbor.
+    pub fn edges_out(&self, id: NodeId) -> impl Iterator<Item = (NodeId, &Edge)> + '_ {
+        self.graph
+            .edges_directed(to_idx(id), Outgoing)
+            .map(|e| (to_id(e.target()), e.weight()))
+    }
+
+    /// Incoming edges of `id` as `(caller, &edge)`.
+    pub fn edges_in(&self, id: NodeId) -> impl Iterator<Item = (NodeId, &Edge)> + '_ {
+        self.graph
+            .edges_directed(to_idx(id), Incoming)
+            .map(|e| (to_id(e.source()), e.weight()))
+    }
+
     pub fn out_degree(&self, id: NodeId) -> usize {
         self.graph.neighbors_directed(to_idx(id), Outgoing).count()
     }
@@ -578,6 +602,34 @@ mod tests {
             g.estimated_bytes() > empty,
             "a populated graph should estimate larger than an empty one"
         );
+    }
+
+    #[test]
+    fn edges_in_and_out_expose_edge_weights() {
+        let mut g = CodeGraph::new();
+        let f = g.intern_file("src/lib.rs");
+        let a = g.add_node(def_node("m::a"));
+        let b = g.add_node(def_node("m::b"));
+        g.add_edge(
+            a,
+            b,
+            Edge::new(EdgeKind::MethodCall, SourceSpan::new(f, 7, 0, 7, 9)),
+        );
+        g.add_edge(
+            a,
+            b,
+            Edge::new(EdgeKind::MethodCall, SourceSpan::new(f, 9, 0, 9, 9)),
+        );
+        let out: Vec<_> = g.edges_out(a).collect();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, b);
+        assert_eq!(out[0].1.kind, EdgeKind::MethodCall);
+        assert_eq!(out[0].1.count, 2);
+        assert_eq!(out[0].1.call_site.start_line, 7);
+        let inc: Vec<_> = g.edges_in(b).collect();
+        assert_eq!(inc.len(), 1);
+        assert_eq!(inc[0].0, a);
+        assert!(g.edges_in(a).next().is_none());
     }
 
     #[test]

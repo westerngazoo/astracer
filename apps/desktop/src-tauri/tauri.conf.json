@@ -6,8 +6,14 @@
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "trunk serve",
-    "beforeBuildCommand": "trunk build"
+    "beforeDevCommand": {
+      "script": "trunk serve",
+      "cwd": "../frontend"
+    },
+    "beforeBuildCommand": {
+      "script": "trunk build",
+      "cwd": "../frontend"
+    }
   },
   "app": {
     "withGlobalTauri": true,

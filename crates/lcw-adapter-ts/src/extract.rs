@@ -251,6 +251,10 @@ fn compute_flags(func: TsNode, text: &str, name: &str, is_method: bool) -> NodeF
         is_test: is_test_name(name),
         is_method,
         is_generic: func.child_by_field_name("type_parameters").is_some(),
+        // No foreign-ABI concept here: a TypeScript `export` is visible to
+        // the JS/TS call graph itself (`is_pub` covers it), not to a caller
+        // the graph structurally cannot see.
+        is_exported: false,
     }
 }
 

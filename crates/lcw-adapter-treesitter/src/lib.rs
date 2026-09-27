@@ -155,6 +155,85 @@ mod tests {
     }
 
     #[test]
+    fn foreign_abi_exports_are_flagged() {
+        let g = parse(
+            r#"
+            /// Entry the bootloader jumps to. Mentions #[no_mangle] in prose.
+            #[no_mangle]
+            pub extern "C" fn kmain() -> ! { loop {} }
+
+            #[export_name = "trap_entry"]
+            fn trap_handler() {}
+
+            extern "C" fn callback(x: i32) -> i32 { x }
+
+            /// Plain Rust: not reachable from a foreign ABI.
+            pub fn helper() {}
+
+            unsafe extern "C" {
+                pub fn host_write(fd: i32);
+            }
+            "#,
+        );
+        let flags = |qn: &str| g.node(g.node_by_qualified(qn).expect(qn)).flags;
+        assert!(flags("crate::kmain").is_exported, "#[no_mangle]");
+        assert!(flags("crate::trap_handler").is_exported, "#[export_name]");
+        assert!(flags("crate::callback").is_exported, "extern \"C\" fn");
+        assert!(!flags("crate::helper").is_exported, "plain pub fn");
+        // A declaration inside an `extern` block is an *import*: the symbol is
+        // defined elsewhere, so it must never count as an export.
+        assert!(!flags("crate::host_write").is_exported, "extern block decl");
+    }
+
+    #[test]
+    fn type_qualified_calls_bind_only_to_matching_types() {
+        let g = parse(
+            r#"
+            struct A;
+            struct B;
+            impl A { fn new() -> Self { A } }
+            impl B { fn new() -> Self { B } }
+            fn f() {
+                let _a = A::new();
+                let _b = B::new();
+                let _v: Vec<u8> = Vec::new();
+            }
+            "#,
+        );
+        let f = g.node_by_qualified("crate::f").unwrap();
+        let a_new = g.node_by_qualified("crate::A::new").unwrap();
+        let b_new = g.node_by_qualified("crate::B::new").unwrap();
+        let callees: Vec<_> = g.neighbors_out(f).collect();
+        assert!(callees.contains(&a_new));
+        assert!(callees.contains(&b_new));
+        // `Vec` is not defined here: the call must stay external instead of
+        // being glued to an unrelated `new` (which would invent a flow edge).
+        let ext = callees
+            .iter()
+            .copied()
+            .find(|&c| g.node(c).kind == NodeKind::External)
+            .expect("Vec::new stays external");
+        assert_eq!(g.node(ext).qualified_name, "Vec::new");
+        assert_eq!(callees.len(), 3);
+    }
+
+    #[test]
+    fn ambiguous_short_names_prefer_the_callers_crate() {
+        // Two crates define `helper`; a call from crate `a` (a different
+        // module than either def) must bind to `a::helper`, whatever the file
+        // order, not to whichever def happened to be declared first.
+        let files = vec![
+            SourceFile::new("crates/b/src/lib.rs", "pub fn helper() {}"),
+            SourceFile::new("crates/a/src/lib.rs", "pub fn helper() {}"),
+            SourceFile::new("crates/a/src/x.rs", "pub fn go() { helper(); }"),
+        ];
+        let g = RustTreeSitterAdapter::new().parse(&files).unwrap();
+        let go = g.node_by_qualified("a::x::go").unwrap();
+        let a_helper = g.node_by_qualified("a::helper").unwrap();
+        assert_eq!(g.neighbors_out(go).collect::<Vec<_>>(), vec![a_helper]);
+    }
+
+    #[test]
     fn unresolved_calls_become_external() {
         let g = parse(
             r#"

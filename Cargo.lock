@@ -1562,6 +1562,7 @@ dependencies = [
  "lcw-core",
  "lcw-engine",
  "lcw-layout",
+ "lcw-query",
  "lcw-render",
  "lcw-telemetry",
  "serde_json",
@@ -1620,13 +1621,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcw-query"
+version = "0.1.0"
+dependencies = [
+ "lcw-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lcw-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "font8x8",
  "glam",
+ "js-sys",
  "lcw-core",
+ "lcw-query",
  "lcw-telemetry",
  "png",
  "pollster",
@@ -4068,13 +4080,12 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.26.13"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17ebdd3a5a7e28a1890b876fdbd0c3c0fe0a6336cffaa104f11b9f720c9daa29"
+checksum = "2038684e0058edba0d17302619f62eabce4a8e11c6ac59506996a8d79848851d"
 dependencies = [
  "cc",
  "regex",
- "regex-syntax",
  "serde_json",
  "streaming-iterator",
  "tree-sitter-language",
@@ -4951,6 +4962,10 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
 
 [[package]]
 name = "yoke"

@@ -9,12 +9,14 @@ members = [
     "crates/lcw-analysis",
     "crates/lcw-suggest",
     "crates/lcw-engine",
+    "crates/lcw-query",
     "crates/lcw-layout",
     "crates/lcw-render",
     "bins/lcw-cli",
     "crates/lcw-adapter-ts",
     "crates/lcw-adapter-py",
     "crates/lcw-adapter-go",
+    "xtask",
 ]
 
 # The desktop app is built with its own toolchain flow (Tauri bundler for the

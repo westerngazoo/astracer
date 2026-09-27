@@ -30,11 +30,16 @@ same ref are cancelled (`concurrency`).
 | `test` | `ubuntu-latest`, `macos-latest` | `cargo test --workspace --locked` |
 | `features` | `ubuntu-latest` | `cargo test -p lcw-layout --features gpu --locked` |
 | `semantic` | `ubuntu-latest` | `cargo check -p lcw-engine --features semantic --locked` |
+| `wasm` | `ubuntu-latest` | `cargo check --target wasm32-unknown-unknown --locked` in `apps/desktop/frontend` |
 
 - The workspace sets clippy lints to `warn`; CI promotes them to errors with
   `-D warnings`.
 - `features` exercises `lcw-layout`'s `gpu` (wgpu-compute) feature. It has a CPU
   fallback, so it runs green headless with no GPU adapter.
+- `wasm` type-checks the Leptos frontend for `wasm32-unknown-unknown`. It is
+  the only job that compiles `apps/desktop/frontend`, so it is what catches a
+  change in `lcw-core` / `lcw-query` / `lcw-render` that breaks the UI. No
+  `trunk`, webview or GPU is needed for a `cargo check`.
 - `semantic` is kept **separate and heavy**: `lcw-engine`'s `semantic` feature
   pulls the rust-analyzer `ra_ap_*` crates. It only `cargo check`s (no link) and
   uses a dedicated, reusable cache key (`shared-key: semantic`,
@@ -93,5 +98,5 @@ Weekly updates, grouped to reduce PR noise:
 
 ## Local mirror — `justfile`
 
-`just build` / `test` / `lint` / `bench` / `features` / `analyze` / `view` /
-`tauri-dev` / `tauri-build` mirror the CI commands so local runs match CI.
+`just build` / `test` / `lint` / `bench` / `features` / `wasm-check` / `analyze` /
+`view` / `tauri-dev` / `tauri-build` mirror the CI commands so local runs match CI.

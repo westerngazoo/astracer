@@ -4,10 +4,10 @@ Cargo.lock.bak
 *.rs.bk
 .DS_Store
 
-# Tauri / frontend build artifacts (keep the checked-in placeholder so the
-# backend's generate_context! compiles standalone in a fresh checkout/worktree).
-apps/desktop/frontend/dist/*
-!apps/desktop/frontend/dist/index.html
+# Tauri / frontend build artifacts. `dist/` is ignored whole, placeholder
+# included: src-tauri/build.rs writes one when it is missing, so a fresh
+# checkout still compiles and git can never restore it over a built bundle.
+apps/desktop/frontend/dist/
 apps/desktop/src-tauri/gen
 node_modules
 

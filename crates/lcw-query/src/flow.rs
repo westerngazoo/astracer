@@ -130,6 +130,57 @@ pub fn shortest_path(
     shortest_paths(graph, &[from], &[to], 1, max_depth).and_then(|fp| fp.paths.into_iter().next())
 }
 
+/// How two nodes are connected by calls, looked for in both directions.
+///
+/// "Flow from here" has an obvious reading — where does control go from the
+/// source — and an equally common intent the one-way search silently fails:
+/// the reader anchors a deep function and clicks `main`, asking *how does
+/// control get here*. Answering only the first leaves the second looking like
+/// a broken feature, so both directions are tried and the answer says which
+/// one held. An empty path is never the answer: "no connection" is its own
+/// variant, so a front end can say so rather than showing nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Connection {
+    /// Source and target are the same node.
+    Same,
+    /// The source calls its way to the target: the path runs
+    /// `source ..= target`, in call order.
+    Downstream(Vec<NodeId>),
+    /// The source does not reach the target, but the target reaches the
+    /// source: the path runs `target ..= source`, in call order.
+    Upstream(Vec<NodeId>),
+    /// No call path either way within the depth bound. In fast mode this is
+    /// often a dynamic call (trait object, function pointer, closure) or an
+    /// unresolved one, not a true absence.
+    Unconnected,
+}
+
+impl Connection {
+    /// The traced path in call order, or empty.
+    pub fn path(&self) -> &[NodeId] {
+        match self {
+            Connection::Downstream(p) | Connection::Upstream(p) => p,
+            Connection::Same | Connection::Unconnected => &[],
+        }
+    }
+}
+
+/// Find how `source` and `target` connect: downstream first (the direct
+/// reading of "flow from here"), then upstream. Each search is a shortest
+/// path, so whichever direction holds is reported in the fewest hops.
+pub fn connection(graph: &CodeGraph, source: NodeId, target: NodeId, max_depth: u32) -> Connection {
+    if source == target {
+        return Connection::Same;
+    }
+    if let Some(p) = shortest_path(graph, source, target, max_depth) {
+        return Connection::Downstream(p);
+    }
+    if let Some(p) = shortest_path(graph, target, source, max_depth) {
+        return Connection::Upstream(p);
+    }
+    Connection::Unconnected
+}
+
 /// Walk predecessors backward from `node` to every source, emitting each
 /// distinct path (in forward order) until `max` have been collected.
 fn enumerate(
@@ -168,6 +219,60 @@ mod tests {
     use super::*;
     use crate::fixtures::{app_graph, call, id, plain};
     use lcw_core::EdgeKind;
+    #[test]
+    fn connection_prefers_downstream_and_falls_back_to_upstream() {
+        let g = app_graph();
+        let main = id(&g, "app::main");
+        let parse = id(&g, "app::core::parse");
+
+        // Anchor at main, pick parse: the ordinary reading.
+        match connection(&g, main, parse, 16) {
+            Connection::Downstream(p) => {
+                assert_eq!(p.first(), Some(&main));
+                assert_eq!(p.last(), Some(&parse));
+            }
+            other => panic!("expected downstream, got {other:?}"),
+        }
+
+        // Anchor at parse, pick main: the one-way search found nothing here
+        // and the viewer showed nothing. Now it is the same path, flagged as
+        // upstream and still in call order.
+        match connection(&g, parse, main, 16) {
+            Connection::Upstream(p) => {
+                assert_eq!(p.first(), Some(&main), "call order: caller first");
+                assert_eq!(p.last(), Some(&parse));
+            }
+            other => panic!("expected upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_names_the_empty_cases_instead_of_returning_nothing() {
+        let g = app_graph();
+        let main = id(&g, "app::main");
+        let orphan = id(&g, "app::orphan");
+        assert_eq!(connection(&g, main, main, 16), Connection::Same);
+        assert_eq!(connection(&g, main, orphan, 16), Connection::Unconnected);
+        assert_eq!(connection(&g, orphan, main, 16), Connection::Unconnected);
+        assert!(Connection::Unconnected.path().is_empty());
+    }
+
+    #[test]
+    fn connection_respects_the_depth_bound_in_both_directions() {
+        let g = app_graph();
+        let main = id(&g, "app::main");
+        let parse = id(&g, "app::core::parse");
+        let hops = shortest_path(&g, main, parse, 16).unwrap().len() - 1;
+        assert!(hops >= 2, "fixture needs a multi-hop path");
+        assert_eq!(
+            connection(&g, main, parse, (hops - 1) as u32),
+            Connection::Unconnected
+        );
+        assert_eq!(
+            connection(&g, parse, main, (hops - 1) as u32),
+            Connection::Unconnected
+        );
+    }
 
     #[test]
     fn finds_the_shortest_route_and_records_depths() {

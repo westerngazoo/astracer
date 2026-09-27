@@ -14,6 +14,7 @@ pub mod filter;
 pub mod flow_view;
 pub mod highlight;
 pub mod hud;
+pub mod interact;
 pub mod labels;
 pub mod minimap;
 pub mod module_view;

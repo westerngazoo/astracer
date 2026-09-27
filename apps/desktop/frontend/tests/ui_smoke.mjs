@@ -5,11 +5,12 @@
 // finds. It runs against browser dev mode (`transport::FixtureTransport`), so
 // no Tauri shell, engine or GPU hardware is needed.
 //
-//   cargo xtask ui /path/to/repo --no-open &
-//   npm i -g playwright && node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots
+//   lcw-dev ui /path/to/repo --no-open &
+//   NODE_PATH=$(npm root -g) node tests/ui_smoke.mjs http://127.0.0.1:8765/ /tmp/shots
 //
-// The runner builds the UI and the fixture and serves them; the test then types
-// `fixture.json` into the path box, which is the name it writes.
+// The runner builds the UI and the fixture and serves them, and the page loads
+// the fixture by itself. For assertions rather than a walkthrough, see
+// `flow_e2e.mjs`.
 //
 // It is deliberately not wired into CI: that would add a Node/Playwright
 // dependency to a pure-Rust workspace. The `wasm` CI job type-checks the same
@@ -17,6 +18,10 @@
 //
 // Exits non-zero when a step fails, and prints every console error, page error
 // and UI problem it detected. Screenshots land in <outdir>.
+// `.mjs` is an ES module, where `require` does not exist; `createRequire`
+// restores it (and with it NODE_PATH, which a global Playwright install needs).
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -54,9 +59,7 @@ const shot = async (page, name) => {
   log('page loaded in', Date.now() - t0, 'ms; placeholder =', await page.getAttribute('.toolbar .path', 'placeholder'));
   await shot(page, '01-idle');
 
-  await page.fill('.toolbar .path', 'fixture.json');
   const t1 = Date.now();
-  await page.click('button.primary');
   await page.waitForSelector('.explorer .row.fn', { timeout: 120000 });
   log('analysis presented in', Date.now() - t1, 'ms');
   await page.waitForTimeout(800);
@@ -70,7 +73,7 @@ const shot = async (page, name) => {
   await shot(page, '02-analyzed');
 
   // Jump to main.
-  await page.click('button:has-text("Main")');
+  await page.click('button:has-text("Entry")');
   await page.waitForSelector('.detail .qname', { timeout: 10000 });
   log('selected:', await page.textContent('.detail .qname'));
   log('meta:', await page.textContent('.detail .meta'));

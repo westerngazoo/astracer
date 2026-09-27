@@ -16,10 +16,11 @@ use std::rc::Rc;
 
 use lcw_core::{CodeGraph, Diagnostic, NodeId, NodeKind, Suggestion, Summary};
 use lcw_query::{
-    call_tree, edge_kind_str, entry_points, kind_str, node_card, outline, reach_count,
-    shortest_path, CallRef, CallTreeNode, CallTreeOptions, Direction, EntryKind, NodeCard, Outline,
+    call_tree, connection, edge_kind_str, entry_points, kind_str, node_card, outline, reach_count,
+    CallRef, CallTreeNode, CallTreeOptions, Connection, Direction, EntryKind, NodeCard, Outline,
     OutlineNode,
 };
+use lcw_render::interact;
 use lcw_render::web::WebViewer;
 use lcw_render::{
     apply_filter, build_scene_with, compute_matches, filter_is_active, highlight, select_labels,
@@ -33,10 +34,7 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent, WheelEvent};
 
 use crate::transport::{self, EngineTransport, FixtureTransport, TauriTransport};
-use crate::viewer::hit_test;
 
-/// Max hops when tracing a flow from the anchor to the selection.
-const FLOW_MAX_DEPTH: u32 = 64;
 /// Bounded call tree shown under the selected node.
 const TREE_DEPTH: u32 = 3;
 const TREE_WIDTH: usize = 8;
@@ -85,9 +83,13 @@ struct RenderState {
     selected: Option<usize>,
     anchor: Option<usize>,
     path: Vec<usize>,
+    /// Where the current press landed: what a click picks, and what the drag
+    /// threshold is measured from.
+    press: Option<(f64, f64)>,
     /// Last cursor position while a drag is in progress.
     drag: Option<(f64, f64)>,
-    /// Whether the pointer moved meaningfully since mousedown (drag vs click).
+    /// Whether the press has travelled past the click slop, making it a pan.
+    /// Until then the camera stays put and a release is a click.
     moved: bool,
     /// Whether a minimap drag (recenter) is in progress.
     mm_drag: bool,
@@ -310,8 +312,10 @@ struct Nav {
     /// Flow source ("trace from here").
     anchor: RwSignal<Option<usize>>,
     anchor_name: RwSignal<String>,
-    /// Traced path anchor .. selection (empty when none / unreachable).
+    /// Traced path between anchor and selection, in call order (empty when
+    /// none); `flow` says which way it runs, or why there is none.
     chain: RwSignal<Vec<Hop>>,
+    flow: RwSignal<FlowKind>,
     tree: RwSignal<Option<TreeItem>>,
     /// Previously selected nodes, for "back".
     history: RwSignal<Vec<usize>>,
@@ -325,6 +329,7 @@ impl Nav {
             anchor: RwSignal::new(None),
             anchor_name: RwSignal::new(String::new()),
             chain: RwSignal::new(Vec::new()),
+            flow: RwSignal::new(FlowKind::Idle),
             tree: RwSignal::new(None),
             history: RwSignal::new(Vec::new()),
         }
@@ -336,9 +341,24 @@ impl Nav {
         self.anchor.set(None);
         self.anchor_name.set(String::new());
         self.chain.set(Vec::new());
+        self.flow.set(FlowKind::Idle);
         self.tree.set(None);
         self.history.set(Vec::new());
     }
+}
+
+/// How the flow source and the selection connect — the shape of
+/// [`lcw_query::Connection`] without its path, which lives in `Nav::chain`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlowKind {
+    /// No source set, or the source itself is selected.
+    Idle,
+    /// The source calls its way to the selection.
+    Downstream,
+    /// The selection calls its way to the source.
+    Upstream,
+    /// No call path either way.
+    Unconnected,
 }
 
 /// The actions components can trigger. `Rc` closures because they capture the
@@ -372,7 +392,7 @@ fn select_node(
     push_history: bool,
 ) {
     // 1. Query the graph under a short borrow.
-    let (card, tree, chain, pos) = {
+    let (card, tree, chain, flow, pos) = {
         let s = state.borrow();
         let Some(graph) = s.graph.as_ref() else {
             return;
@@ -387,18 +407,30 @@ fn select_node(
             ..Default::default()
         };
         let tree = tree_item(graph, &call_tree(graph, id, &opts));
-        let chain: Vec<Hop> = match nav.anchor.get_untracked() {
-            Some(a) if a != idx => shortest_path(graph, NodeId(a as u32), id, FLOW_MAX_DEPTH)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|h| Hop {
-                    node: h.0 as usize,
-                    name: graph.node(h).name.clone(),
-                })
-                .collect(),
-            _ => Vec::new(),
+        // Both directions, and "no path" as its own answer: see
+        // `lcw_query::connection` for why a one-way search looked broken.
+        let (chain, flow) = match nav.anchor.get_untracked() {
+            Some(a) if a != idx => {
+                let c = connection(graph, NodeId(a as u32), id, interact::FLOW_MAX_DEPTH);
+                let kind = match &c {
+                    Connection::Downstream(_) => FlowKind::Downstream,
+                    Connection::Upstream(_) => FlowKind::Upstream,
+                    Connection::Unconnected => FlowKind::Unconnected,
+                    Connection::Same => FlowKind::Idle,
+                };
+                let hops = c
+                    .path()
+                    .iter()
+                    .map(|&h| Hop {
+                        node: h.0 as usize,
+                        name: graph.node(h).name.clone(),
+                    })
+                    .collect();
+                (hops, kind)
+            }
+            _ => (Vec::new(), FlowKind::Idle),
         };
-        (card, tree, chain, s.positions.get(idx).copied())
+        (card, tree, chain, flow, s.positions.get(idx).copied())
     };
 
     // 2. History + reactive state.
@@ -418,6 +450,7 @@ fn select_node(
     nav.card.set(Some(card));
     nav.tree.set(Some(tree));
     nav.chain.set(chain.clone());
+    nav.flow.set(flow);
     // The detail pane keeps its scroll position, so after clicking something
     // far down (a callee, a call-tree row) the new node's header would be
     // above the fold. Bring it back into view.
@@ -442,6 +475,7 @@ fn clear_selection(state: &Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) {
     nav.card.set(None);
     nav.tree.set(None);
     nav.chain.set(Vec::new());
+    nav.flow.set(FlowKind::Idle);
     {
         let mut s = state.borrow_mut();
         s.selected = None;
@@ -470,6 +504,7 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
             nav.anchor.set(Some(sel));
             nav.anchor_name.set(name);
             nav.chain.set(Vec::new());
+            nav.flow.set(FlowKind::Idle);
             {
                 let mut s = state.borrow_mut();
                 s.anchor = Some(sel);
@@ -484,6 +519,7 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
             nav.anchor.set(None);
             nav.anchor_name.set(String::new());
             nav.chain.set(Vec::new());
+            nav.flow.set(FlowKind::Idle);
             {
                 let mut s = state.borrow_mut();
                 s.anchor = None;
@@ -573,17 +609,6 @@ pub fn App() -> impl IntoView {
     let canvas_ref = NodeRef::<Canvas>::new();
     let minimap_ref = NodeRef::<Canvas>::new();
 
-    // Once the canvas is connected to the DOM, remember it and wire interaction.
-    {
-        let state = state.clone();
-        canvas_ref.on_load(move |canvas: HtmlCanvasElement| {
-            resize_canvas(&canvas);
-            state.borrow_mut().canvas = Some(canvas.clone());
-            wire_pointer_events(&canvas, state.clone(), nav, labels);
-            wire_resize(state.clone(), labels);
-        });
-    }
-
     // The minimap canvas: remember it and wire click/drag-to-recenter.
     {
         let state = state.clone();
@@ -594,17 +619,20 @@ pub fn App() -> impl IntoView {
         });
     }
 
-    let on_analyze = {
+    // The analysis itself, shared by the Analyze button and the automatic load
+    // in browser dev mode. Reads its inputs untracked: it runs from an event
+    // handler or a mount hook, never as part of a reactive computation.
+    let run_analysis: Rc<dyn Fn()> = {
         let state = state.clone();
-        move |_| {
-            let repo = path.get();
+        Rc::new(move || {
+            let repo = path.get_untracked();
             let hosted = transport::has_tauri();
             if hosted && repo.trim().is_empty() {
                 error.set(Some("Please enter a repository path.".into()));
                 return;
             }
             let state = state.clone();
-            let sem = semantic.get();
+            let sem = semantic.get_untracked();
             busy.set(true);
             error.set(None);
             nav.reset();
@@ -681,8 +709,34 @@ pub fn App() -> impl IntoView {
                 }
                 busy.set(false);
             });
-        }
+        })
     };
+    let on_analyze = {
+        let run = run_analysis.clone();
+        move |_| run()
+    };
+
+    // Once the canvas is connected to the DOM, remember it and wire
+    // interaction. In browser dev mode, also load the analysis: `lcw-dev ui`
+    // serves exactly one, the fixture it wrote beside the page, so there is
+    // nothing to ask — and waiting for someone to type its name hid the whole
+    // Explorer behind an empty screen. It starts here rather than in a
+    // separate effect because presenting a scene needs the canvas this hook
+    // has just recorded; anywhere else could race it. Tauri has no such
+    // default: there the user picks the repository.
+    {
+        let state = state.clone();
+        let run = run_analysis.clone();
+        canvas_ref.on_load(move |canvas: HtmlCanvasElement| {
+            resize_canvas(&canvas);
+            state.borrow_mut().canvas = Some(canvas.clone());
+            wire_pointer_events(&canvas, state.clone(), nav, labels);
+            wire_resize(state.clone(), labels);
+            if !transport::has_tauri() {
+                run();
+            }
+        });
+    }
 
     let on_fit = {
         let state = state.clone();
@@ -1225,10 +1279,14 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                                     <p class="hint">{format!("source: {} — now pick a target.", nav.anchor_name.get())}</p>
                                 }.into_any(),
                                 Some(_) if chain.is_empty() => view! {
-                                    <p class="hint warn">{format!("no call path from {} to this node (in fast mode cross-crate method calls may be missing — try semantic).", nav.anchor_name.get())}</p>
+                                    <p class="hint warn">{format!("no call path between {} and this node, in either direction. Often a dynamic call (trait object, function pointer, closure) or one fast mode could not resolve — try semantic.", nav.anchor_name.get())}</p>
                                 }.into_any(),
                                 Some(_) => {
                                     let hops = chain.len() - 1;
+                                    let heading = match nav.flow.get() {
+                                        FlowKind::Upstream => format!("{hops} hop(s) — this node reaches the source"),
+                                        _ => format!("{hops} hop(s)"),
+                                    };
                                     let items: Vec<AnyView> = chain
                                         .into_iter()
                                         .enumerate()
@@ -1245,7 +1303,7 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                                         .collect();
                                     view! {
                                         <div class="chain">
-                                            <div class="hint">{format!("{hops} hop(s)")}</div>
+                                            <div class="hint">{heading}</div>
                                             {items}
                                         </div>
                                     }.into_any()
@@ -1466,7 +1524,9 @@ fn wire_pointer_events(
         let state = state.clone();
         let cb = Closure::wrap(Box::new(move |ev: MouseEvent| {
             let mut s = state.borrow_mut();
-            s.drag = Some((ev.offset_x() as f64, ev.offset_y() as f64));
+            let at = (ev.offset_x() as f64, ev.offset_y() as f64);
+            s.press = Some(at);
+            s.drag = Some(at);
             s.moved = false;
         }) as Box<dyn FnMut(MouseEvent)>);
         let _ = canvas.add_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref());
@@ -1482,16 +1542,30 @@ fn wire_pointer_events(
                 if let Some((lx, ly)) = s.drag {
                     let x = ev.offset_x() as f64;
                     let y = ev.offset_y() as f64;
-                    let dx = (x - lx) as f32;
-                    let dy = (y - ly) as f32;
-                    if dx.abs() + dy.abs() > 2.0 {
+                    // Measured from the press, in CSS pixels (scale 1); see
+                    // `lcw_render::interact::is_click`. Until the slop is
+                    // exceeded nothing pans, so a click never nudges the view.
+                    let (px, py) = s.press.unwrap_or((lx, ly));
+                    let delta = if s.moved {
+                        Some(((x - lx) as f32, (y - ly) as f32))
+                    } else if !interact::is_click(
+                        [px as f32, py as f32],
+                        [x as f32, y as f32],
+                        1.0,
+                    ) {
                         s.moved = true;
-                    }
+                        Some(((x - px) as f32, (y - py) as f32))
+                    } else {
+                        None
+                    };
                     s.drag = Some((x, y));
-                    if let Some(viewer) = s.viewer.as_mut() {
-                        viewer.pan(dx, dy);
+                    match (delta, s.viewer.as_mut()) {
+                        (Some((dx, dy)), Some(viewer)) => {
+                            viewer.pan(dx, dy);
+                            true
+                        }
+                        _ => false,
                     }
-                    true
                 } else {
                     false
                 }
@@ -1509,25 +1583,32 @@ fn wire_pointer_events(
     {
         let state = state.clone();
         let cb = Closure::wrap(Box::new(move |ev: MouseEvent| {
-            let x = ev.offset_x() as f32;
-            let y = ev.offset_y() as f32;
             let hit = {
                 let mut s = state.borrow_mut();
                 let is_click = s.drag.is_some() && !s.moved;
+                // Pick where the press landed: that is where the user aimed.
+                let (x, y) = s
+                    .press
+                    .unwrap_or((ev.offset_x() as f64, ev.offset_y() as f64));
                 s.drag = None;
+                s.press = None;
                 if !is_click {
                     return;
                 }
                 match (s.viewer.as_ref(), s.scene.as_ref()) {
                     (Some(viewer), Some(scene)) => {
-                        let world = viewer.screen_to_world(x, y);
-                        hit_test(scene, world)
+                        let world = viewer.screen_to_world(x as f32, y as f32);
+                        let slop = interact::pick_slop_world(viewer.camera().zoom, 1.0);
+                        interact::pick_node(scene, world, slop)
                     }
                     _ => None,
                 }
             };
             match hit {
                 Some(idx) => select_node(&state, nav, labels, idx, false, true),
+                // With a flow source set, a background click is almost always a
+                // near miss on the target: keep the source and the selection.
+                None if nav.anchor.get_untracked().is_some() => {}
                 None => clear_selection(&state, nav, labels),
             }
         }) as Box<dyn FnMut(MouseEvent)>);

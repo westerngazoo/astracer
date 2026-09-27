@@ -82,9 +82,10 @@ lcw-dev ui /path/to/repo
 ```
 
 That builds the analyzer and the wasm UI, analyzes the repository into a graph
-fixture, serves it on <http://127.0.0.1:8765/> and opens a browser; type
-`fixture.json` in the path box and press **Analyze**. `just ui /path/to/repo`
-does the same, and `--port N` / `--no-open` are there when you need them.
+fixture, serves it on <http://127.0.0.1:8765/> and opens a browser, where the
+analysis loads by itself — start from **Start here** in the Explorer, or press
+**Entry**. `just ui /path/to/repo` does the same, and `--port N` / `--no-open`
+are there when you need them.
 
 It checks the environment first and stops with the exact install command for
 anything missing, rather than letting the failure surface later and deeper:

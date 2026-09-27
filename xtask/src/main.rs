@@ -272,7 +272,8 @@ fn cmd_ui(opts: &Options) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}/");
     println!("\n    {url}");
     println!("    the analysis loads by itself; the Run tree starts at main and each thread,");
-    println!("    and clicking a row opens what it calls\n");
+    println!("    and clicking a row opens what it calls. On the canvas every function sits");
+    println!("    in a box for its crate, callers above callees\n");
     if !opts.no_open {
         open_url(&url);
     }

@@ -251,6 +251,23 @@
         overflow: hidden;
       }
 
+      .group-label {
+        position: absolute;
+        box-sizing: border-box;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        pointer-events: none;
+        color: #f4f7fb;
+        font-family: var(--mono);
+        font-weight: 600;
+        line-height: 1;
+        margin: 6px 0 0 6px;
+        padding: 3px 6px;
+        border-left: 3px solid transparent;
+        border-radius: 3px;
+        background: rgba(9, 12, 18, 0.72);
+      }
       .node-label {
         position: absolute;
         transform: translate(-50%, -150%);

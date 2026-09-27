@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use lcw_config::{AdapterMode, Config};
-use lcw_core::ReportSnapshot;
+use lcw_core::{GroupBox, ReportSnapshot};
 use lcw_engine::{Engine, Progress as EngineProgress};
 use lcw_layout::LayoutParams;
 use serde::Serialize;
@@ -31,6 +31,8 @@ const PROGRESS_EVENT: &str = "analyze-progress";
 pub struct GraphView {
     pub report: ReportSnapshot,
     pub positions: Vec<[f32; 2]>,
+    /// One box per crate around its functions (the layout is grouped).
+    pub groups: Vec<GroupBox>,
 }
 
 /// A single progress update emitted while an analysis runs.
@@ -86,25 +88,16 @@ fn analyze_blocking(window: Window, root: PathBuf, semantic: bool) -> Result<Gra
         "layout",
         format!("laying out {} nodes", report.graph.node_count()),
     );
-    let laid = compute_layout(&report.graph, &LayoutParams::default());
+    // One box per crate, crates in rows by call order. Each crate is its own
+    // (smaller) simulation, so this is also cheaper than one over everything.
+    let laid = lcw_layout::layout_by_crate(&report.graph, &LayoutParams::default());
 
     emit(&window, "done", "analysis complete");
     Ok(GraphView {
         report: report.snapshot(),
         positions: laid.positions,
+        groups: laid.groups,
     })
-}
-
-/// Lay out the graph, using the GPU-compute backend when the `gpu` feature is
-/// enabled (with an automatic CPU fallback if no adapter is present).
-#[cfg(feature = "gpu")]
-fn compute_layout(graph: &lcw_core::CodeGraph, params: &LayoutParams) -> lcw_layout::Layout {
-    lcw_layout::layout_gpu_or_cpu(graph, params)
-}
-
-#[cfg(not(feature = "gpu"))]
-fn compute_layout(graph: &lcw_core::CodeGraph, params: &LayoutParams) -> lcw_layout::Layout {
-    lcw_layout::layout(graph, params)
 }
 
 /// Translate an engine progress event into a UI progress event.

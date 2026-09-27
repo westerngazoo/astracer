@@ -5,7 +5,8 @@
 //! while walking an unfamiliar codebase:
 //!
 //! * *Where do I start?* — [`entry_points`] (`main`, uncalled roots, tests).
-//! * *What is the shape of the code?* — [`outline`] (crate ▸ module ▸ type ▸ fn).
+//! * *What is the shape of the code?* — [`outline`] (crate ▸ module ▸ type ▸ fn)
+//!   and [`crate_groups`] (the parts, callers above callees).
 //! * *What comes in, what goes out?* — [`node_card`] (callers/callees with the
 //!   edge kind, multiplicity and call site).
 //! * *How does control get from here to there?* — [`shortest_paths`].
@@ -24,6 +25,7 @@
 pub mod card;
 pub mod entries;
 pub mod flow;
+pub mod groups;
 pub mod outline;
 pub mod reach;
 pub mod resolve;
@@ -32,6 +34,7 @@ pub mod roots;
 pub use card::{edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard};
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
 pub use flow::{connection, shortest_path, shortest_paths, Connection, FlowPaths};
+pub use groups::{crate_groups, Group, Groups, EXTERNAL_GROUP};
 pub use outline::{outline, Outline, OutlineKind, OutlineNode};
 pub use reach::{
     call_tree, reach_count, reachable, CallTreeNode, CallTreeOptions, Direction, Reached,

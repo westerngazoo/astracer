@@ -156,9 +156,15 @@ fn capped(items: &[String], max: usize) -> Vec<String> {
 }
 
 /// Open a window and render `graph` using the given per-node `positions`
-/// (indexed by `NodeId.0`). Blocks until the window is closed.
-pub fn run(graph: &CodeGraph, positions: &[[f32; 2]]) -> Result<(), RenderError> {
-    let scene = scene::build(graph, positions);
+/// (indexed by `NodeId.0`), with `groups` drawn as boxes behind the nodes
+/// (empty for a free layout). Blocks until the window is closed.
+pub fn run(
+    graph: &CodeGraph,
+    positions: &[[f32; 2]],
+    groups: &[lcw_core::GroupBox],
+) -> Result<(), RenderError> {
+    let mut scene = scene::build(graph, positions);
+    crate::groups::draw_groups(&mut scene, groups, true);
     let infos = build_node_infos(graph);
     let labels: Vec<String> = infos.iter().map(|i| i.title.clone()).collect();
     run_app("Live Code Walk", scene, labels, infos, Some(graph.clone()))

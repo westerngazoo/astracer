@@ -112,6 +112,7 @@ pub fn layout_gpu(graph: &CodeGraph, params: &LayoutParams) -> Result<Layout, Gp
             positions: Vec::new(),
             min: [0.0, 0.0],
             max: [0.0, 0.0],
+            groups: Vec::new(),
         });
     }
 
@@ -279,6 +280,7 @@ pub fn layout_gpu(graph: &CodeGraph, params: &LayoutParams) -> Result<Layout, Gp
         positions,
         min,
         max,
+        groups: Vec::new(),
     })
 }
 

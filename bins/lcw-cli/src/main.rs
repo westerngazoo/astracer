@@ -76,10 +76,10 @@ struct AnalyzeArgs {
     #[arg(long, default_value_t = 10)]
     top: usize,
 
-    /// Which graph the viewer renders: the full call graph, or the aggregated
-    /// module view (crates as boxed clusters). Only affects `view`.
+    /// Which graph the viewer renders: every function boxed by crate, the
+    /// free call graph, or the aggregated module view. Only affects `view`.
     #[cfg(feature = "viewer")]
-    #[arg(long = "view", value_enum, default_value_t = ViewKind::Call)]
+    #[arg(long = "view", value_enum, default_value_t = ViewKind::Crates)]
     view_kind: ViewKind,
 }
 
@@ -90,7 +90,8 @@ enum Format {
     Dot,
     Graphml,
     /// The laid-out graph view the desktop frontend consumes: the report
-    /// snapshot plus one `[x, y]` position per node. Serve it as
+    /// snapshot, one `[x, y]` position per node (laid out one box per crate)
+    /// and the crate boxes themselves. Serve it as
     /// `fixture.json` next to the built frontend to run the UI in a plain
     /// browser (browser dev mode) without the Tauri shell.
     #[cfg(feature = "viewer")]
@@ -101,8 +102,11 @@ enum Format {
 #[cfg(feature = "viewer")]
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq)]
 enum ViewKind {
-    /// The full function-level call graph.
+    /// Every function, inside a box per crate; the boxes stack in rows by call
+    /// order, callers above callees, external code last.
     #[default]
+    Crates,
+    /// The full function-level call graph as one free force layout.
     Call,
     /// Aggregated module view: one node per module, crates as boxed clusters.
     Module,
@@ -130,13 +134,13 @@ struct ShotArgs {
     #[arg(long, default_value_t = 1000)]
     height: u32,
 
-    /// Which graph to render: the full call graph, or the aggregated module
-    /// view (crates as boxed clusters).
-    #[arg(long = "view", value_enum, default_value_t = ViewKind::Call)]
+    /// Which graph to render: every function boxed by crate, the free call
+    /// graph, or the aggregated module view.
+    #[arg(long = "view", value_enum, default_value_t = ViewKind::Crates)]
     view_kind: ViewKind,
 
     /// Highlight one symbol and overlay its detail panel (inputs/outputs).
-    /// Only applies to the call view.
+    /// Only applies to the function-level views (`crates`, `call`).
     #[arg(long)]
     select: Option<String>,
 
@@ -395,10 +399,11 @@ fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
             lcw_render::native::render_to_png_scene(&scene, args.width, args.height, &args.output)
                 .context("rendering screenshot")?;
         }
-        ViewKind::Call => {
+        ViewKind::Call | ViewKind::Crates => {
             let g = &report.graph;
-            let layout = lcw_layout::layout(g, &lcw_layout::LayoutParams::default());
+            let layout = call_layout(g, args.view_kind);
             let mut scene = lcw_render::scene::build(g, &layout.positions);
+            lcw_render::draw_groups(&mut scene, &layout.groups, true);
             let mut hud = Vec::new();
             if let Some(sym) = args.select.as_deref() {
                 let hits = lcw_query::resolve(g, sym);
@@ -477,13 +482,25 @@ fn run_view(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
             );
             lcw_render::native::run_scene(scene, labels).context("running the viewer")?;
         }
-        ViewKind::Call => {
-            let layout = lcw_layout::layout(&report.graph, &lcw_layout::LayoutParams::default());
-            lcw_render::native::run(&report.graph, &layout.positions)
+        ViewKind::Call | ViewKind::Crates => {
+            let layout = call_layout(&report.graph, args.view_kind);
+            lcw_render::native::run(&report.graph, &layout.positions, &layout.groups)
                 .context("running the viewer")?;
         }
     }
     Ok(())
+}
+
+/// The layout of a function-level view: boxed by crate, or one free force
+/// layout over the whole graph.
+#[cfg(feature = "viewer")]
+fn call_layout(g: &lcw_core::CodeGraph, kind: ViewKind) -> lcw_layout::Layout {
+    let params = lcw_layout::LayoutParams::default();
+    if kind == ViewKind::Crates {
+        lcw_layout::layout_by_crate(g, &params)
+    } else {
+        lcw_layout::layout(g, &params)
+    }
 }
 
 fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
@@ -499,10 +516,12 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
         Format::Graphml => export::export_graphml(&report.graph),
         #[cfg(feature = "viewer")]
         Format::View => {
-            let layout = lcw_layout::layout(&report.graph, &lcw_layout::LayoutParams::default());
+            let layout =
+                lcw_layout::layout_by_crate(&report.graph, &lcw_layout::LayoutParams::default());
             let view = serde_json::json!({
                 "report": report.snapshot(),
                 "positions": layout.positions,
+                "groups": layout.groups,
             });
             serde_json::to_string(&view).context("serializing graph view to JSON")?
         }

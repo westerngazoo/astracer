@@ -9,6 +9,7 @@ pub mod adapter;
 pub mod diagnostic;
 pub mod fragment;
 pub mod graph;
+pub mod group;
 pub mod ids;
 pub mod metric;
 pub mod report;
@@ -23,6 +24,7 @@ pub use graph::{
     CodeGraph, Edge, EdgeExport, EdgeKind, GraphExport, GraphSnapshot, Node, NodeFlags, NodeKind,
     NodeStats, SourceSpan,
 };
+pub use group::{GroupBox, GROUP_HEADER};
 pub use ids::{FileId, NodeId};
 pub use metric::{Metric, MetricKind};
 pub use report::{AnalysisReport, ReportExport, ReportSnapshot, Summary};

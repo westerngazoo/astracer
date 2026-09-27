@@ -11,10 +11,13 @@
 //! For very large graphs the O(n^2) repulsion is the bottleneck; the hardening
 //! phase swaps in a Barnes-Hut / GPU-compute variant behind the same API.
 
-use lcw_core::CodeGraph;
+use lcw_core::{CodeGraph, GroupBox};
 use rayon::prelude::*;
 
 mod barnes_hut;
+mod grouped;
+
+pub use grouped::{layout_by_crate, layout_grouped};
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -64,6 +67,9 @@ pub struct Layout {
     pub positions: Vec<Vec2>,
     pub min: Vec2,
     pub max: Vec2,
+    /// The boxes of a grouped layout ([`layout_by_crate`]), one per crate;
+    /// empty for a plain force layout.
+    pub groups: Vec<GroupBox>,
 }
 
 impl Layout {
@@ -88,6 +94,7 @@ pub fn layout(graph: &CodeGraph, params: &LayoutParams) -> Layout {
             positions: Vec::new(),
             min: [0.0, 0.0],
             max: [0.0, 0.0],
+            groups: Vec::new(),
         };
     }
 
@@ -97,6 +104,20 @@ pub fn layout(graph: &CodeGraph, params: &LayoutParams) -> Layout {
         .filter(|(a, b)| a != b && *a < n && *b < n)
         .collect();
 
+    let pos = force(n, &edges, params);
+    let (min, max) = bounds(&pos);
+    Layout {
+        positions: pos,
+        min,
+        max,
+        groups: Vec::new(),
+    }
+}
+
+/// The Fruchterman-Reingold simulation itself, over `n` points joined by
+/// `edges` (index pairs, no self-loops). Shared by the whole-graph layout and
+/// the per-crate layouts of [`layout_by_crate`].
+pub(crate) fn force(n: usize, edges: &[(usize, usize)], params: &LayoutParams) -> Vec<Vec2> {
     let k = params.ideal_length.max(1.0);
     let mut pos = seed_positions(n, k);
 
@@ -118,7 +139,7 @@ pub fn layout(graph: &CodeGraph, params: &LayoutParams) -> Layout {
         }
 
         // Attraction along edges (sequential scatter).
-        for &(a, b) in &edges {
+        for &(a, b) in edges {
             let ex = pos[a][0] - pos[b][0];
             let ey = pos[a][1] - pos[b][1];
             let dist = (ex * ex + ey * ey).sqrt().max(1e-3);
@@ -146,13 +167,7 @@ pub fn layout(graph: &CodeGraph, params: &LayoutParams) -> Layout {
 
         temp = (temp - cooling).max(0.0);
     }
-
-    let (min, max) = bounds(&pos);
-    Layout {
-        positions: pos,
-        min,
-        max,
-    }
+    pos
 }
 
 /// Exact all-pairs repulsion: for each node, sum the `k^2 / d` push from every

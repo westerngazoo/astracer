@@ -68,8 +68,8 @@ navigation code; `lcw-layout` and `lcw-render` support the renderer;
 | `lcw-analysis` | 2 | Engineering lenses & quality metrics. |
 | `lcw-suggest` | 3 | Vertical detection & target-driven suggestions. |
 | `lcw-query` | 4 | Navigation: entry points, outline tree, node cards, flows, call trees, reachability. |
-| `lcw-layout` | - | Force-directed graph layout (CPU by default; GPU-compute behind the `gpu` feature). |
-| `lcw-render` | - | `wgpu` renderer (native + WASM), module/flow views, highlighting. |
+| `lcw-layout` | - | Force-directed graph layout, whole-graph or one box per crate (CPU by default; whole-graph GPU-compute behind the `gpu` feature). |
+| `lcw-render` | - | `wgpu` renderer (native + WASM), crate boxes, module/flow views, highlighting. |
 | `lcw-engine` | - | Orchestrator facade tying the layers together. |
 | `lcw-cli` | - | Standalone CLI (`lcw`). |
 | `apps/desktop` | - | Tauri v2 shell + Rust/WASM UI with the Explorer sidebar. |
@@ -180,8 +180,8 @@ cargo bench -p lcw-adapter-treesitter -p lcw-layout
 ```
 
 Both features are additive and off by default, so the fast path never pays for
-`ra_ap_*` or `wgpu`. The desktop app exposes matching `semantic` / `gpu`
-features (`cargo tauri dev -- --features gpu`).
+`ra_ap_*` or `wgpu`. The desktop app exposes the matching `semantic` feature
+(`cargo tauri dev -- --features semantic`).
 
 The **desktop app** (Tauri v2 + Leptos/WASM) lives in `apps/desktop` and is kept
 out of the main workspace (it has its own wasm/bundler build):

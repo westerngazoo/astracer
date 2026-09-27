@@ -97,6 +97,10 @@ lcw-dev view /path/to/repo
 
 # The same graph in a browser, no Tauri and no GPU needed:
 lcw-dev ui /path/to/repo
+
+# Stay current: fast-forward this checkout to origin/main, and reinstall
+# lcw-dev if the runner itself changed. Refuses rather than overwrite work.
+lcw-dev update
 ```
 
 `lcw-dev` is the developer task runner in [`xtask/`](xtask/): it checks the

@@ -25,6 +25,7 @@
 
 mod doctor;
 mod serve;
+mod update;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -40,6 +41,8 @@ USAGE:
 
 COMMANDS:
     doctor          Check the environment and print what is missing
+    update          Fast-forward this checkout to origin/main; reinstall
+                    lcw-dev if the runner itself changed
     ui [REPO]       Browser dev mode: build the UI, analyze REPO, serve it
     view [REPO]     Native viewer window (wgpu)
 
@@ -87,6 +90,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     match cmd.as_str() {
         "doctor" => cmd_doctor(&opts),
+        "update" => cmd_update(),
         "ui" => cmd_ui(&opts),
         "view" => cmd_view(&opts),
         other => {
@@ -190,7 +194,12 @@ fn browser_out() -> PathBuf {
 
 fn cmd_doctor(opts: &Options) -> Result<(), String> {
     let mode = opts.mode.unwrap_or(Mode::All);
-    let checks = doctor::run(mode, opts.repo.as_deref(), opts.port.unwrap_or(8765));
+    let checks = doctor::run(
+        mode,
+        &repo_root(),
+        opts.repo.as_deref(),
+        opts.port.unwrap_or(8765),
+    );
     if report(&checks, mode) {
         Ok(())
     } else {
@@ -200,7 +209,7 @@ fn cmd_doctor(opts: &Options) -> Result<(), String> {
 
 fn cmd_view(opts: &Options) -> Result<(), String> {
     let repo = opts.target_repo();
-    let checks = doctor::run(Mode::Native, Some(&repo), 0);
+    let checks = doctor::run(Mode::Native, &repo_root(), Some(&repo), 0);
     if !report(&checks, Mode::Native) {
         return Err("environment is not ready; see the fixes above".into());
     }
@@ -228,7 +237,7 @@ fn cmd_view(opts: &Options) -> Result<(), String> {
 fn cmd_ui(opts: &Options) -> Result<(), String> {
     let repo = opts.target_repo();
     let port = opts.port();
-    let checks = doctor::run(Mode::Browser, Some(&repo), port);
+    let checks = doctor::run(Mode::Browser, &repo_root(), Some(&repo), port);
     if !report(&checks, Mode::Browser) {
         return Err("environment is not ready; see the fixes above".into());
     }
@@ -261,6 +270,76 @@ fn cmd_ui(opts: &Options) -> Result<(), String> {
         open_url(&url);
     }
     serve::listen(&out, port)
+}
+
+fn cmd_update() -> Result<(), String> {
+    let root = repo_root();
+    step(&format!("updating {}", root.display()));
+    let s = update::sync(&root)?;
+
+    if let Some(from) = &s.switched_from {
+        println!("    switched from `{from}` to `main`");
+    }
+    if !s.moved() {
+        println!("    already up to date at {}", update::short(&s.after));
+        return Ok(());
+    }
+
+    println!(
+        "    {} -> {}",
+        update::short(&s.before),
+        update::short(&s.after)
+    );
+    let log = update::log(&root, &s.before, &s.after);
+    let lines: Vec<&str> = log.lines().collect();
+    for line in lines.iter().take(15) {
+        println!("      {line}");
+    }
+    if lines.len() > 15 {
+        println!("      ... and {} more", lines.len() - 15);
+    }
+
+    // The analyzer and viewer need nothing here: `view` and `ui` rebuild them
+    // from the checkout on every run, and cargo notices what changed. Only the
+    // runner is a separately installed binary that can fall behind.
+    if update::changed(&root, &s.before, &s.after, "xtask") {
+        step("the runner itself changed; reinstalling lcw-dev");
+        reinstall(&root)?;
+    }
+
+    println!("\n    done. The next `lcw-dev view` or `lcw-dev ui` builds from this checkout.");
+    Ok(())
+}
+
+/// `cargo install` the runner from this checkout, replacing the one on PATH —
+/// quite possibly the very binary executing this function.
+fn reinstall(root: &Path) -> Result<(), String> {
+    // Unix unlinks the old file while this process keeps its inode, so
+    // replacing a running binary just works. Windows refuses to overwrite a
+    // running executable but allows renaming one, so it is moved aside first
+    // and put back if the install fails.
+    let parked = if cfg!(windows) {
+        std::env::current_exe().ok().and_then(|exe| {
+            let aside = exe.with_extension("old.exe");
+            let _ = std::fs::remove_file(&aside);
+            std::fs::rename(&exe, &aside).ok().map(|()| (exe, aside))
+        })
+    } else {
+        None
+    };
+
+    let result = cargo(&[
+        "install",
+        "--force",
+        "--path",
+        &root.join("xtask").to_string_lossy(),
+    ]);
+    if result.is_err() {
+        if let Some((exe, aside)) = &parked {
+            let _ = std::fs::rename(aside, exe);
+        }
+    }
+    result
 }
 
 fn step(what: &str) {

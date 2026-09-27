@@ -55,6 +55,10 @@ wasm-check:
 install-dev:
     cargo install --path xtask
 
+# Fast-forward this checkout to origin/main; reinstall lcw-dev if it changed.
+update:
+    cargo xtask update
+
 # Check the environment before anything else: cargo, toolchain, wasm target,
 # trunk, the repo path, the port. Prints the exact fix for whatever is missing.
 doctor:

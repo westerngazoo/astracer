@@ -50,6 +50,9 @@ pub enum Status {
     /// Could not be determined. Not a failure: an unmanaged toolchain answers
     /// no questions about its targets, and guessing would block a working setup.
     Unknown,
+    /// Works, but there is something worth doing — an update waiting. Never
+    /// blocks: being a few commits behind is not a reason to refuse to run.
+    Warn,
 }
 
 #[derive(Debug)]
@@ -89,11 +92,21 @@ impl Check {
             fix: None,
         }
     }
+
+    fn warn(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Check {
+            name,
+            status: Status::Warn,
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
 }
 
-/// Run the checks for `mode`. `port` of 0 skips the port check.
-pub fn run(mode: Mode, repo: Option<&Path>, port: u16) -> Vec<Check> {
-    let mut out = vec![check_cargo()];
+/// Run the checks for `mode` against the checkout at `root`. `port` of 0
+/// skips the port check.
+pub fn run(mode: Mode, root: &Path, repo: Option<&Path>, port: u16) -> Vec<Check> {
+    let mut out = vec![check_cargo(), check_checkout(root)];
 
     let rustup = first_line("rustup", &["show", "active-toolchain"]);
     out.push(match &rustup {
@@ -118,6 +131,24 @@ pub fn run(mode: Mode, repo: Option<&Path>, port: u16) -> Vec<Check> {
     }
 
     out
+}
+
+/// Which commit the runner is about to build from, and whether a newer one is
+/// waiting. Read from local refs, so it costs nothing and needs no network —
+/// and is therefore only as fresh as the last fetch, which it says.
+fn check_checkout(root: &Path) -> Check {
+    match crate::update::describe(root) {
+        None => Check::unknown("checkout", "not a git checkout; cannot tell its version"),
+        Some(d) if d.behind > 0 => Check::warn(
+            "checkout",
+            format!(
+                "{} @ {}, {} commit(s) behind origin/main as of the last fetch",
+                d.branch, d.short, d.behind
+            ),
+            "lcw-dev update",
+        ),
+        Some(d) => Check::ok("checkout", format!("{} @ {}", d.branch, d.short)),
+    }
 }
 
 fn check_cargo() -> Check {
@@ -242,8 +273,19 @@ pub fn report(checks: &[Check], mode: Mode) -> bool {
             Status::Ok => "ok  ",
             Status::Missing => "MISS",
             Status::Unknown => "?   ",
+            Status::Warn => "warn",
         };
         println!("  [{mark}] {:width$}  {}", c.name, c.detail);
+    }
+
+    let warned: Vec<&Check> = checks.iter().filter(|c| c.status == Status::Warn).collect();
+    if !warned.is_empty() {
+        println!("\nworth doing (not required):\n");
+        for c in &warned {
+            if let Some(fix) = &c.fix {
+                println!("    {fix}");
+            }
+        }
     }
 
     let missing: Vec<&Check> = checks
@@ -281,7 +323,15 @@ mod tests {
 
     #[test]
     fn native_mode_does_not_demand_the_web_toolchain() {
-        let names: Vec<&str> = run(Mode::Native, None, 0).iter().map(|c| c.name).collect();
+        let names: Vec<&str> = run(
+            Mode::Native,
+            Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+            None,
+            0,
+        )
+        .iter()
+        .map(|c| c.name)
+        .collect();
         assert!(!names.contains(&"trunk"));
         assert!(!names.contains(&"wasm target"));
         assert!(names.contains(&"gpu backend"));
@@ -289,7 +339,12 @@ mod tests {
 
     #[test]
     fn browser_mode_checks_the_web_toolchain_and_the_port() {
-        let checks = run(Mode::Browser, None, 0);
+        let checks = run(
+            Mode::Browser,
+            Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+            None,
+            0,
+        );
         let names: Vec<&str> = checks.iter().map(|c| c.name).collect();
         assert!(names.contains(&"trunk"));
         assert!(names.contains(&"wasm target"));
@@ -320,6 +375,24 @@ mod tests {
         let c = check_port(port);
         assert_eq!(c.status, Status::Missing);
         assert!(c.fix.unwrap().contains(&(port + 1).to_string()));
+    }
+
+    #[test]
+    fn a_pending_update_is_advice_not_a_blocker() {
+        let checks = vec![
+            Check::ok("a", "fine"),
+            Check::warn("checkout", "3 behind", "lcw-dev update"),
+        ];
+        assert!(report(&checks, Mode::All));
+    }
+
+    #[test]
+    fn this_checkout_describes_itself() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let c = check_checkout(root);
+        // CI checks out a detached merge commit and a tarball has no .git, so
+        // only assert what holds everywhere: it never blocks.
+        assert_ne!(c.status, Status::Missing);
     }
 
     #[test]

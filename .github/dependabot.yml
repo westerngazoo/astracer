@@ -12,6 +12,14 @@ updates:
       cargo-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # `lcw-adapter-ra` pins `unicode-ident = "=1.0.24"` on purpose: ra_ap's
+      # Unicode tables stop at 17.0.0, and 1.0.25+ moved to Unicode 18, which
+      # breaks the `semantic` build. Dependabot does not read that comment and
+      # rewrote the `=` pin anyway (#8). Lift this together with the pin; the
+      # reason is spelled out beside it in crates/lcw-adapter-ra/Cargo.toml.
+      - dependency-name: "unicode-ident"
+        versions: [">= 1.0.25"]
 
   # Desktop backend (Tauri v2). Excluded from the workspace, so it carries its
   # own Cargo.lock and needs a dedicated entry.
@@ -24,6 +32,14 @@ updates:
       desktop-src-tauri:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # `lcw-adapter-ra` pins `unicode-ident = "=1.0.24"` on purpose: ra_ap's
+      # Unicode tables stop at 17.0.0, and 1.0.25+ moved to Unicode 18, which
+      # breaks the `semantic` build. Dependabot does not read that comment and
+      # rewrote the `=` pin anyway (#8). src-tauri resolves the same pin through its `semantic` feature. Lift this with the pin; the
+      # reason is spelled out beside it in crates/lcw-adapter-ra/Cargo.toml.
+      - dependency-name: "unicode-ident"
+        versions: [">= 1.0.25"]
 
   # Desktop frontend (Leptos/WASM). Also out of the workspace with its own lock.
   - package-ecosystem: cargo

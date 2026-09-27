@@ -42,6 +42,24 @@ jobs:
       # Workspace lints set clippy to `warn`; CI promotes them to hard errors.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  lockfiles:
+    name: lockfile (desktop backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # `apps/desktop/src-tauri` sits outside the workspace with its own
+      # Cargo.lock, and no other job resolves it, because building it needs a
+      # webview toolchain. So a bump to a crate it shares with the workspace —
+      # a Dependabot PR that only touches the root lock — leaves it stale while
+      # every other check stays green, and the first to find out is whoever
+      # next runs `cargo tauri dev`. That happened with tree-sitter 0.27.
+      # `cargo metadata --locked` resolves the graph without compiling anything
+      # (no webview, no system libraries) and fails exactly when the lockfile
+      # no longer satisfies the manifests. The frontend's lock is already held
+      # to `--locked` by the wasm job.
+      - run: cargo metadata --locked --format-version 1 --manifest-path apps/desktop/src-tauri/Cargo.toml > /dev/null
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

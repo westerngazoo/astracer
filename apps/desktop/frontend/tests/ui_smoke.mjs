@@ -66,9 +66,12 @@ const shot = async (page, name) => {
   log('status:', await page.textContent('.status'));
   const err = await page.$('.side .error');
   if (err) log('ERROR BOX:', await err.textContent());
-  log('first main row:', (await page.textContent('.explorer .card:first-child .row.fn')).replace(/\s+/g, ' '));
-  log('entries rows:', await page.$$eval('.explorer .card:first-child .row.fn', (r) => r.length));
-  log('outline rows visible:', await page.$$eval('.tree .row', (r) => r.length));
+  log('run tree rows:', await page.$$eval('.run-tree .row', (r) => r.length));
+  await page.click('.tabs .tab:has-text("Entries")');
+  log('first main row:', (await page.textContent('.card.entries .row.fn')).replace(/\s+/g, ' '));
+  log('entries rows:', await page.$$eval('.card.entries .row.fn', (r) => r.length));
+  await page.click('.tabs .tab:has-text("Outline")');
+  log('outline rows visible:', await page.$$eval('.card.outline .tree .row', (r) => r.length));
   log('overview:', (await page.textContent('.side')).replace(/\s+/g, ' ').slice(0, 200));
   await shot(page, '02-analyzed');
 
@@ -114,20 +117,20 @@ const shot = async (page, name) => {
 
   // Outline: toggle a scope, then filter.
   {
-    const before = await page.$$eval('.tree .row', (r) => r.length);
-    const label = await page.$eval('.tree .row.scope .label', (l) => l.textContent);
-    await page.click('.tree .row.scope', { force: true });
+    const before = await page.$$eval('.card.outline .tree .row', (r) => r.length);
+    const label = await page.$eval('.card.outline .tree .row.scope .label', (l) => l.textContent);
+    await page.click('.card.outline .tree .row.scope', { force: true });
     await page.waitForTimeout(250);
-    const after = await page.$$eval('.tree .row', (r) => r.length);
+    const after = await page.$$eval('.card.outline .tree .row', (r) => r.length);
     log(`toggling scope "${label}": rows ${before} -> ${after}`);
     if (before === after) problems.push(`[ui] toggling scope "${label}" did not change the row count (${before})`);
   }
   await page.fill('.outline-tools .search', 'resolve');
   await page.waitForTimeout(300);
-  const filtered = await page.$$eval('.tree .row.fn .label', (l) => l.map((x) => x.textContent));
+  const filtered = await page.$$eval('.card.outline .tree .row.fn .label', (l) => l.map((x) => x.textContent));
   log('filter "resolve" ->', filtered.length, 'functions:', filtered.slice(0, 8).join(', '));
   await shot(page, '06-outline-filter');
-  const fnRow = await page.$('.tree .row.fn');
+  const fnRow = await page.$('.card.outline .tree .row.fn');
   if (fnRow) {
     await fnRow.click();
     await page.waitForTimeout(300);

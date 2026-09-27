@@ -14,11 +14,11 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use lcw_core::{CodeGraph, Diagnostic, NodeId, NodeKind, Suggestion, Summary};
+use lcw_core::{CodeGraph, Diagnostic, EdgeKind, NodeId, NodeKind, Suggestion, Summary};
 use lcw_query::{
-    call_tree, connection, edge_kind_str, entry_points, kind_str, node_card, outline, reach_count,
-    CallRef, CallTreeNode, CallTreeOptions, Connection, Direction, EntryKind, NodeCard, Outline,
-    OutlineNode,
+    branches, call_tree, connection, edge_kind_str, entry_points, kind_str, node_card, outline,
+    primary_entry, reach_count, run_roots, CallRef, CallTreeNode, CallTreeOptions, Connection,
+    Direction, EntryKind, NodeCard, Outline, OutlineNode, RootKind,
 };
 use lcw_render::interact;
 use lcw_render::web::WebViewer;
@@ -156,12 +156,52 @@ struct EntryRow {
     reach: Option<usize>,
 }
 
+/// Where a thread of control begins (see [`lcw_query::run_roots`]).
+#[derive(Clone, Debug, PartialEq)]
+struct RootRow {
+    node: usize,
+    name: String,
+    kind: RootKind,
+    /// The single best place to start reading.
+    primary: bool,
+    location: String,
+    reach: usize,
+    /// Short names of the functions that spawn it (spawned roots only).
+    spawned_by: Vec<String>,
+    test_only: bool,
+}
+
+/// One visible row of the run tree. Rows are identified by their *path* from
+/// the root, not their node: the same function can hang under several
+/// parents, and opening it under one must not open it under all of them.
+#[derive(Clone, Debug, PartialEq)]
+struct RunRow {
+    path: Vec<usize>,
+    node: usize,
+    depth: usize,
+    name: String,
+    /// Tooltip: where it is and how it is reached.
+    detail: String,
+    /// `(css class, text)` for the badge a root carries.
+    badge: Option<(&'static str, &'static str)>,
+    /// Reached by a spawn rather than a call: a new thread starts here.
+    spawned: bool,
+    recursive: bool,
+    expandable: bool,
+    open: bool,
+}
+
+/// Cap on rendered run-tree rows. Opening everything in a large program can
+/// produce thousands; past this the tree says so rather than freezing the page.
+const RUN_ROWS_MAX: usize = 600;
+
 /// Everything the Explorer sidebar needs.
 #[derive(Clone, Debug, PartialEq, Default)]
 struct ExplorerData {
     outline: Outline,
     rows: Vec<Row>,
     entries: Vec<EntryRow>,
+    roots: Vec<RootRow>,
 }
 
 fn short_location(graph: &CodeGraph, id: NodeId) -> String {
@@ -260,10 +300,121 @@ fn build_explorer(graph: &CodeGraph) -> ExplorerData {
             .then_with(|| b.reach.cmp(&a.reach))
             .then_with(|| a.name.cmp(&b.name))
     });
+    let primary = primary_entry(graph);
+    let roots = run_roots(graph)
+        .into_iter()
+        .map(|r| RootRow {
+            node: r.node.0 as usize,
+            name: graph.node(r.node).qualified_name.clone(),
+            kind: r.kind,
+            primary: Some(r.node) == primary,
+            location: short_location(graph, r.node),
+            reach: r.reach,
+            spawned_by: r
+                .spawned_by
+                .iter()
+                .map(|&s| graph.node(s).name.clone())
+                .collect(),
+            test_only: r.test_only,
+        })
+        .collect();
     ExplorerData {
         outline,
         rows,
         entries,
+        roots,
+    }
+}
+
+/// The run tree's open rows. A row is named by its path: its root's index,
+/// then the index of each branch taken below it. Paths, not node ids, because
+/// one function can sit under several parents and open under only some.
+type OpenPaths = HashSet<Vec<usize>>;
+
+/// The run tree's visible rows: every root, and below each open path the
+/// branches `lcw_query::branches` reports for it — so opening a row costs one
+/// query for that row, and nothing is computed for closed subtrees.
+fn run_rows(graph: &CodeGraph, roots: &[RootRow], open: &OpenPaths) -> Vec<RunRow> {
+    let mut out = Vec::new();
+    for r in roots {
+        let path = vec![r.node];
+        let is_open = open.contains(&path);
+        let how = match r.kind {
+            RootKind::Program => "program entry".to_string(),
+            RootKind::Exported => "exported: entered from outside this code".to_string(),
+            RootKind::Spawned => format!("spawned by {}", r.spawned_by.join(", ")),
+        };
+        let badge = match (r.kind, r.primary, r.test_only) {
+            (_, true, _) => ("main", "start"),
+            (RootKind::Program, ..) => ("main", "main"),
+            (RootKind::Exported, ..) => ("export", "export"),
+            (RootKind::Spawned, _, true) => ("test", "test thread"),
+            (RootKind::Spawned, ..) => ("thread", "thread"),
+        };
+        out.push(RunRow {
+            path: path.clone(),
+            node: r.node,
+            depth: 0,
+            name: r.name.clone(),
+            detail: format!("{how} · reaches {} fn · {}", r.reach, r.location),
+            badge: Some(badge),
+            spawned: r.kind == RootKind::Spawned,
+            recursive: false,
+            expandable: r.reach > 0,
+            open: is_open,
+        });
+        if is_open {
+            grow_run_rows(graph, &path, open, &mut out);
+        }
+        if out.len() >= RUN_ROWS_MAX {
+            break;
+        }
+    }
+    out
+}
+
+fn grow_run_rows(graph: &CodeGraph, path: &[usize], open: &OpenPaths, out: &mut Vec<RunRow>) {
+    let ids: Vec<NodeId> = path.iter().map(|&i| NodeId(i as u32)).collect();
+    let Some(&here) = ids.last() else { return };
+    for b in branches(graph, here, &ids, false) {
+        if out.len() >= RUN_ROWS_MAX {
+            return;
+        }
+        let idx = b.node.0 as usize;
+        let mut child = path.to_vec();
+        child.push(idx);
+        let expandable = b.has_branches && !b.recursive;
+        let is_open = expandable && open.contains(&child);
+        let node = graph.node(b.node);
+        let times = if b.count > 1 {
+            format!(" ×{}", b.count)
+        } else {
+            String::new()
+        };
+        let how = if b.via == EdgeKind::Spawn {
+            "spawned (runs on another thread)"
+        } else {
+            edge_kind_str(b.via)
+        };
+        out.push(RunRow {
+            path: child.clone(),
+            node: idx,
+            depth: path.len(),
+            name: node.name.clone(),
+            detail: format!(
+                "{how}{times} · L{} · {}",
+                b.line,
+                short_location(graph, b.node)
+            ),
+            badge: None,
+            spawned: b.via == EdgeKind::Spawn,
+            recursive: b.recursive,
+            expandable,
+            open: is_open,
+        });
+        if is_open {
+            grow_run_rows(graph, &child, open, out);
+        }
     }
 }
 
@@ -374,7 +525,13 @@ struct Actions {
     /// Center the camera on the selection.
     locate: Rc<dyn Fn()>,
     clear: Rc<dyn Fn()>,
+    /// The run tree's visible rows for the given roots and open paths. An
+    /// action because it needs the graph, which lives in the render state.
+    run_rows: RunRowsFn,
 }
+
+/// See [`Actions::run_rows`].
+type RunRowsFn = Rc<dyn Fn(&[RootRow], &OpenPaths) -> Vec<RunRow>>;
 
 /// A `Copy + Send` handle to the actions. Leptos requires reactive closures
 /// (`{move || ...}` blocks) to be `Send`, and `Actions` is not, so views hold
@@ -557,6 +714,16 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
         let state = state.clone();
         Rc::new(move || clear_selection(&state, nav, labels)) as Rc<dyn Fn()>
     };
+    let run_rows = {
+        let state = state.clone();
+        Rc::new(move |roots: &[RootRow], open: &OpenPaths| {
+            let s = state.borrow();
+            match s.graph.as_ref() {
+                Some(graph) => run_rows(graph, roots, open),
+                None => Vec::new(),
+            }
+        }) as RunRowsFn
+    };
     Actions {
         go,
         trace,
@@ -564,6 +731,7 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
         back,
         locate,
         clear,
+        run_rows,
     }
 }
 
@@ -591,6 +759,8 @@ pub fn App() -> impl IntoView {
     // Explorer + navigation state.
     let explorer = RwSignal::new(ExplorerData::default());
     let expanded = RwSignal::new(HashSet::<usize>::new());
+    // Open paths of the run tree (see `RunRow`).
+    let run_open = RwSignal::new(HashSet::<Vec<usize>>::new());
     let tree_query = RwSignal::new(String::new());
     let nav = Nav::new();
 
@@ -673,6 +843,15 @@ pub fn App() -> impl IntoView {
                             .map(|r| r.id)
                             .collect();
                         expanded.set(open);
+                        // Open the primary root one level: the tree should
+                        // answer "what does the program do first" on sight.
+                        run_open.set(
+                            ex.roots
+                                .iter()
+                                .filter(|r| r.primary)
+                                .map(|r| vec![r.node])
+                                .collect(),
+                        );
                         explorer.set(ex);
                         let scene = {
                             let mut s = state.borrow_mut();
@@ -696,7 +875,7 @@ pub fn App() -> impl IntoView {
                                 }
                                 refresh_view(&state, labels);
                                 status.set(
-                                    "Analysis complete — pick an entry point to start walking."
+                                    "Analysis complete — walk the Run tree from main and its threads."
                                         .into(),
                                 );
                             }
@@ -858,6 +1037,7 @@ pub fn App() -> impl IntoView {
                 <ExplorerPane
                     explorer=explorer
                     expanded=expanded
+                    run_open=run_open
                     tree_query=tree_query
                     nav=nav
                     actions=actions
@@ -1004,6 +1184,70 @@ fn entries_view(entries: &[EntryRow], nav: Nav, go: &Rc<dyn Fn(usize, bool)>) ->
 }
 
 /// One outline row: a collapsible scope or a clickable function.
+/// One run-tree row. Clicking it selects the function *and* opens it, since
+/// walking down what runs is the whole point of this tree; the twisty alone
+/// closes an open row.
+fn run_row_view(
+    r: RunRow,
+    run_open: RwSignal<OpenPaths>,
+    nav: Nav,
+    go: Rc<dyn Fn(usize, bool)>,
+) -> AnyView {
+    let indent = format!("padding-left:{}px", 6 + r.depth * 14);
+    let idx = r.node;
+    let twisty = if !r.expandable {
+        ""
+    } else if r.open {
+        "▾"
+    } else {
+        "▸"
+    };
+    let (select_path, toggle_path) = (r.path.clone(), r.path.clone());
+    let expandable = r.expandable;
+    let class = format!(
+        "row fn{}{}",
+        if r.spawned { " spawned" } else { "" },
+        if r.depth == 0 { " root" } else { "" }
+    );
+    let badge = r
+        .badge
+        .map(|(cls, text)| view! { <span class=format!("badge {cls}")>{text}</span> });
+    view! {
+        <div
+            class=move || format!("{class}{}", if nav.selected.get() == Some(idx) { " selected" } else { "" })
+            style=indent
+            title=r.detail
+            on:click=move |_| {
+                go(idx, true);
+                if expandable {
+                    run_open.update(|o| {
+                        o.insert(select_path.clone());
+                    });
+                }
+            }
+        >
+            <span
+                class="twisty"
+                on:click=move |ev| {
+                    ev.stop_propagation();
+                    run_open.update(|o| {
+                        if !o.remove(&toggle_path) {
+                            o.insert(toggle_path.clone());
+                        }
+                    });
+                }
+            >
+                {twisty}
+            </span>
+            {r.spawned.then(|| view! { <span class="via" title="starts a new thread or task">"⇉"</span> })}
+            <span class="label">{r.name}</span>
+            {badge}
+            {r.recursive.then(|| view! { <span class="recur" title="recursive: already on this path">"↺"</span> })}
+        </div>
+    }
+    .into_any()
+}
+
 fn row_view(
     r: Row,
     expanded: RwSignal<HashSet<usize>>,
@@ -1055,14 +1299,38 @@ fn row_view(
     }
 }
 
+/// The Explorer's three views of one codebase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExplorerTab {
+    /// What runs: a tree rooted at every place control begins.
+    Run,
+    /// How it is organised: crate ▸ module ▸ function.
+    Outline,
+    /// Every entry point, including a library's uncalled public API.
+    Entries,
+}
+
 #[component]
 fn ExplorerPane(
     explorer: RwSignal<ExplorerData>,
     expanded: RwSignal<HashSet<usize>>,
+    run_open: RwSignal<OpenPaths>,
     tree_query: RwSignal<String>,
     nav: Nav,
     actions: ActionsHandle,
 ) -> impl IntoView {
+    let tab = RwSignal::new(ExplorerTab::Run);
+    let tab_button = move |t: ExplorerTab, label: &'static str, title: &'static str| {
+        view! {
+            <button
+                class=move || if tab.get() == t { "tab active" } else { "tab" }
+                title=title
+                on:click=move |_| tab.set(t)
+            >
+                {label}
+            </button>
+        }
+    };
     // Visible rows: the pruned tree while searching, else the expanded subset.
     let rows = Memo::new(move |_| {
         let q = tree_query.get();
@@ -1103,16 +1371,56 @@ fn ExplorerPane(
         expanded.set(roots);
     };
 
+    let run_tree = move || {
+        let roots = explorer.with(|ex| ex.roots.clone());
+        if roots.is_empty() {
+            return view! {
+                <p class="hint">
+                    "No program entry, export or spawned thread — this looks like a library. "
+                    "Its public API is under Entries; its structure under Outline."
+                </p>
+            }
+            .into_any();
+        }
+        let open = run_open.get();
+        let rows = actions.with_value(|a| (a.run_rows)(&roots, &open));
+        let capped = rows.len() >= RUN_ROWS_MAX;
+        let go = actions.with_value(|a| a.go.clone());
+        let views: Vec<AnyView> = rows
+            .into_iter()
+            .map(|r| run_row_view(r, run_open, nav, go.clone()))
+            .collect();
+        view! {
+            <div>
+                {views}
+                {capped.then(|| view! { <p class="more">"…more rows than shown; collapse a branch to see the rest"</p> })}
+            </div>
+        }
+        .into_any()
+    };
+
     view! {
         <aside class="explorer">
-            <div class="card entries">
-                <h3>"Start here"</h3>
+            <div class="tabs">
+                {tab_button(ExplorerTab::Run, "Run tree", "What runs: main, exported entry points and spawned threads, and what each calls")}
+                {tab_button(ExplorerTab::Outline, "Outline", "How the code is organised: crate, module, function")}
+                {tab_button(ExplorerTab::Entries, "Entries", "Every entry point, including a library's public API")}
+            </div>
+            <div class="card run" style:display=move || if tab.get() == ExplorerTab::Run { "flex" } else { "none" }>
+                <div class="outline-head">
+                    <h3>"Run tree"</h3>
+                    <span class="hint">"▸ opens · ⇉ starts a thread"</span>
+                </div>
+                <div class="tree run-tree">{run_tree}</div>
+            </div>
+            <div class="card entries" style:display=move || if tab.get() == ExplorerTab::Entries { "block" } else { "none" }>
+                <h3>"Entry points"</h3>
                 {move || {
                     let go = actions.with_value(|a| a.go.clone());
                     explorer.with(|ex| entries_view(&ex.entries, nav, &go))
                 }}
             </div>
-            <div class="card outline">
+            <div class="card outline" style:display=move || if tab.get() == ExplorerTab::Outline { "flex" } else { "none" }>
                 <div class="outline-head">
                     <h3>"Outline"</h3>
                     <span class="hint">{totals}</span>
@@ -1548,11 +1856,8 @@ fn wire_pointer_events(
                     let (px, py) = s.press.unwrap_or((lx, ly));
                     let delta = if s.moved {
                         Some(((x - lx) as f32, (y - ly) as f32))
-                    } else if !interact::is_click(
-                        [px as f32, py as f32],
-                        [x as f32, y as f32],
-                        1.0,
-                    ) {
+                    } else if !interact::is_click([px as f32, py as f32], [x as f32, y as f32], 1.0)
+                    {
                         s.moved = true;
                         Some(((x - px) as f32, (y - py) as f32))
                     } else {

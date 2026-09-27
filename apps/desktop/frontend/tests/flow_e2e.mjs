@@ -63,7 +63,8 @@ const lastSegment = (q) => q.split('::').pop();
     // 1. Nothing typed, nothing clicked: the Explorer fills in by itself.
     await page.waitForSelector('.explorer .row.fn', { timeout: 120000 });
     check(true, 'analysis loads by itself in browser dev mode');
-    check((await page.$$('.tree .row')).length > 0, 'outline tree is populated');
+    await page.click('.tabs .tab:has-text("Outline")');
+    check((await page.$$('.card.outline .tree .row')).length > 0, 'outline tree is populated');
 
     // 2. Downstream: source = the entry point, target = one of its callees.
     await page.click('button:has-text("Entry")');
@@ -108,9 +109,10 @@ const lastSegment = (q) => q.split('::').pop();
     await page.click('button:has-text("Entry")');
     await page.waitForSelector('.detail .qname');
     await page.click('button:has-text("trace from here")');
+    await page.click('.tabs .tab:has-text("Outline")');
     await page.fill('.outline-tools .search', 'select_node');
     await page.waitForTimeout(300);
-    await page.click('.tree .row.fn');
+    await page.click('.card.outline .tree .row.fn');
     await page.waitForSelector('.flow .hint.warn');
     const none = await text(page, '.flow .hint.warn');
     log('unconnected:', none);

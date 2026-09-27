@@ -101,6 +101,8 @@ fn edge_color(kind: EdgeKind) -> [f32; 4] {
         EdgeKind::MacroCall => [0.95, 0.65, 0.25, 0.55],
         EdgeKind::TraitDispatch => [0.85, 0.45, 0.85, 0.55],
         EdgeKind::Unresolved => [0.40, 0.40, 0.45, 0.30],
+        // Warm and opaque: a new thread of control starts here.
+        EdgeKind::Spawn => [0.98, 0.78, 0.30, 0.85],
     }
 }
 

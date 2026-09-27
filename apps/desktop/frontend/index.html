@@ -159,15 +159,35 @@
         margin-bottom: 0;
       }
 
-      /* "Start here" can list hundreds of roots; cap it so the outline — the
-         main navigation surface — is never pushed below the fold. */
-      .explorer .card.entries {
+      /* Three views, one visible at a time: each gets the full height of the
+         column instead of sharing it three ways. */
+      .tabs {
+        display: flex;
+        gap: 4px;
         flex-shrink: 0;
-        max-height: 38%;
+      }
+
+      .tabs .tab {
+        flex: 1;
+        padding: 6px 4px;
+        font-size: 12px;
+        border-radius: 7px;
+      }
+
+      .tabs .tab.active {
+        color: #fff;
+        border-color: var(--accent);
+        background: rgba(76, 140, 242, 0.22);
+      }
+
+      .explorer .card.entries {
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
       }
 
-      .explorer .card.outline {
+      .explorer .card.outline,
+      .explorer .card.run {
         display: flex;
         flex-direction: column;
         flex: 1;
@@ -470,6 +490,35 @@
       .badge.root {
         color: var(--orange);
         border-color: var(--orange);
+      }
+
+      .badge.thread {
+        color: #1a1a1a;
+        background: var(--accent-2);
+        border-color: var(--accent-2);
+        font-weight: 700;
+      }
+
+      /* Run tree: a root is where control begins; a spawned branch is where a
+         new thread does. */
+      .row.root .label {
+        color: #dfe7f2;
+        font-weight: 600;
+      }
+
+      .row .via {
+        flex-shrink: 0;
+        color: var(--amber);
+        font-weight: 700;
+      }
+
+      .row.spawned .label {
+        color: var(--amber);
+      }
+
+      .row .recur {
+        flex-shrink: 0;
+        color: var(--muted);
       }
 
       .badge.test {

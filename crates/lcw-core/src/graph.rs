@@ -46,6 +46,12 @@ pub enum EdgeKind {
     TraitDispatch,
     /// Edge to an [`NodeKind::External`] / unresolved target.
     Unresolved,
+    /// The source starts the target on another thread or task —
+    /// `thread::spawn(worker)`, `tokio::spawn(async { .. })`, `go f()` — and
+    /// carries on concurrently. Kept distinct from a call because it is where
+    /// a new thread of control begins: the explorer roots a tree at every
+    /// spawn target, and a flow that crosses one crosses into another thread.
+    Spawn,
 }
 
 impl EdgeKind {
@@ -58,6 +64,7 @@ impl EdgeKind {
             EdgeKind::MacroCall => 3,
             EdgeKind::TraitDispatch => 4,
             EdgeKind::Unresolved => 5,
+            EdgeKind::Spawn => 6,
         }
     }
 }

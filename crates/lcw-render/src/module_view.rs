@@ -288,7 +288,12 @@ fn clip_label(s: &str) -> String {
     }
 }
 
-fn push_rect_fill(out: &mut Vec<EdgeVertex>, min: [f32; 2], max: [f32; 2], color: [f32; 4]) {
+pub(crate) fn push_rect_fill(
+    out: &mut Vec<EdgeVertex>,
+    min: [f32; 2],
+    max: [f32; 2],
+    color: [f32; 4],
+) {
     let v = |x: f32, y: f32| EdgeVertex { pos: [x, y], color };
     out.push(v(min[0], max[1]));
     out.push(v(max[0], max[1]));
@@ -298,7 +303,12 @@ fn push_rect_fill(out: &mut Vec<EdgeVertex>, min: [f32; 2], max: [f32; 2], color
     out.push(v(min[0], min[1]));
 }
 
-fn push_rect_outline(out: &mut Vec<EdgeVertex>, min: [f32; 2], max: [f32; 2], color: [f32; 4]) {
+pub(crate) fn push_rect_outline(
+    out: &mut Vec<EdgeVertex>,
+    min: [f32; 2],
+    max: [f32; 2],
+    color: [f32; 4],
+) {
     let v = |x: f32, y: f32| EdgeVertex { pos: [x, y], color };
     let tl = v(min[0], max[1]);
     let tr = v(max[0], max[1]);

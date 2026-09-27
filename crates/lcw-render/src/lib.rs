@@ -12,6 +12,7 @@
 pub mod camera;
 pub mod filter;
 pub mod flow_view;
+pub mod groups;
 pub mod highlight;
 pub mod hud;
 pub mod interact;
@@ -31,6 +32,7 @@ pub mod web;
 pub use camera::Camera2D;
 pub use filter::{apply_filter, compute_matches, is_active as filter_is_active, FilterStyle};
 pub use flow_view::{build as build_flow_view, FlowGraph, FlowNode, FlowOptions};
+pub use groups::{draw_groups, group_color, group_labels, GroupLabel};
 pub use highlight::highlight;
 pub use labels::{select_labels, LabelOptions, LabelPlacement};
 pub use minimap::{MinimapView, Rect as MinimapRect};

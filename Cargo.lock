@@ -1615,6 +1615,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "lcw-core",
+ "lcw-query",
  "pollster",
  "rayon",
  "wgpu",

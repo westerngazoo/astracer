@@ -24,6 +24,10 @@ use wasm_bindgen_futures::JsFuture;
 pub struct GraphView {
     pub report: lcw_core::ReportSnapshot,
     pub positions: Vec<[f32; 2]>,
+    /// One box per crate. Defaults to none, so a `fixture.json` written before
+    /// the layout was grouped still loads.
+    #[serde(default)]
+    pub groups: Vec<lcw_core::GroupBox>,
 }
 
 /// A streaming progress update emitted by the backend during analysis.

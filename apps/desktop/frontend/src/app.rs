@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use lcw_core::{CodeGraph, Diagnostic, EdgeKind, NodeId, NodeKind, Suggestion, Summary};
+use lcw_core::{CodeGraph, Diagnostic, EdgeKind, GroupBox, NodeId, NodeKind, Suggestion, Summary};
 use lcw_query::{
     branches, call_tree, connection, edge_kind_str, entry_points, kind_str, node_card, outline,
     primary_entry, reach_count, run_roots, CallRef, CallTreeNode, CallTreeOptions, Connection,
@@ -23,8 +23,9 @@ use lcw_query::{
 use lcw_render::interact;
 use lcw_render::web::WebViewer;
 use lcw_render::{
-    apply_filter, build_scene_with, compute_matches, filter_is_active, highlight, select_labels,
-    BundleOptions, FilterStyle, LabelOptions, MinimapView, SceneData, SceneOptions,
+    apply_filter, build_scene_with, compute_matches, draw_groups, filter_is_active, group_color,
+    group_labels, highlight, select_labels, BundleOptions, FilterStyle, LabelOptions, MinimapView,
+    SceneData, SceneOptions,
 };
 use leptos::html::Canvas;
 use leptos::prelude::*;
@@ -59,6 +60,10 @@ struct LabelBox {
     y: f64,
     /// Font size in px, scaled with the node's on-screen size.
     font: f64,
+    /// For a crate name rather than a node: the box's CSS color and the
+    /// width the name may take before it is clipped. `x`/`y` are then the
+    /// name's top-left corner.
+    group: Option<(String, f64)>,
 }
 
 /// Non-reactive render state (GPU viewer + data needed for interaction).
@@ -73,6 +78,11 @@ struct RenderState {
     /// Raw per-node positions from the transport, kept so the display scene can
     /// be rebuilt when bundling/filter/selection change.
     positions: Vec<[f32; 2]>,
+    /// One box per crate from the transport; empty when the layout is not
+    /// grouped (an older `fixture.json`).
+    groups: Vec<GroupBox>,
+    /// Whether the crate boxes are drawn (the toolbar's "crates" toggle).
+    boxes_on: bool,
     /// `(short_name, qualified_name)` per node index, for labels + search.
     names: Vec<(String, String)>,
     /// Current toolbar state mirrored here so the pure rebuild is signal-free.
@@ -106,6 +116,10 @@ impl RenderState {
             bundle: self.bundle.then(BundleOptions::default),
         };
         let mut scene = build_scene_with(graph, &self.positions, &opts);
+        if self.boxes_on {
+            // Names go in the DOM overlay (crisp at any zoom), not the scene.
+            draw_groups(&mut scene, &self.groups, false);
+        }
         if filter_is_active(&self.query) {
             let matched = compute_matches(
                 &self.query,
@@ -743,6 +757,7 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
 pub fn App() -> impl IntoView {
     let state: Shared = Rc::new(RefCell::new(RenderState {
         labels_on: true,
+        boxes_on: true,
         ..RenderState::default()
     }));
 
@@ -768,6 +783,7 @@ pub fn App() -> impl IntoView {
     let query = RwSignal::new(String::new());
     let show_labels = RwSignal::new(true);
     let bundle = RwSignal::new(false);
+    let show_boxes = RwSignal::new(true);
     // Projected labels for the DOM overlay; updated on every camera change.
     let labels = RwSignal::new(Vec::<LabelBox>::new());
 
@@ -857,6 +873,7 @@ pub fn App() -> impl IntoView {
                             let mut s = state.borrow_mut();
                             s.graph = Some(graph);
                             s.positions = view.positions.clone();
+                            s.groups = view.groups.clone();
                             s.names = names;
                             s.selected = None;
                             s.anchor = None;
@@ -971,6 +988,17 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    // Toggle the crate boxes (rebuilds the scene; positions stay grouped).
+    let on_boxes = {
+        let state = state.clone();
+        move |ev: web_sys::Event| {
+            let on = target_checked(&ev);
+            show_boxes.set(on);
+            state.borrow_mut().boxes_on = on;
+            rebuild_and_refresh(&state, labels);
+        }
+    };
+
     // Toggle the label overlay (cheap: just recompute the projected set).
     let on_labels = {
         let state = state.clone();
@@ -1031,6 +1059,14 @@ pub fn App() -> impl IntoView {
                     />
                     "bundle"
                 </label>
+                <label class="mode" title="Draw a box around each crate's functions">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || show_boxes.get()
+                        on:change=on_boxes
+                    />
+                    "crates"
+                </label>
             </header>
 
             <div class="body">
@@ -1050,13 +1086,22 @@ pub fn App() -> impl IntoView {
                                 .get()
                                 .into_iter()
                                 .map(|l| {
-                                    let style = format!(
+                                    let mut style = format!(
                                         "left:{:.1}px;top:{:.1}px;font-size:{:.0}px;",
                                         l.x,
                                         l.y,
                                         l.font,
                                     );
-                                    view! { <span class="node-label" style=style>{l.text}</span> }
+                                    let class = match &l.group {
+                                        Some((color, width)) => {
+                                            style.push_str(&format!(
+                                                "max-width:{width:.0}px;border-left-color:{color};"
+                                            ));
+                                            "group-label"
+                                        }
+                                        None => "node-label",
+                                    };
+                                    view! { <span class=class style=style>{l.text}</span> }
                                 })
                                 .collect::<Vec<_>>()
                         }}
@@ -2001,28 +2046,61 @@ fn rebuild_and_refresh(state: &Shared, labels: RwSignal<Vec<LabelBox>>) {
     }
 }
 
-/// Project the important nodes to screen space for the DOM label overlay.
+/// Narrowest a crate box may be on screen and still get its name.
+const GROUP_LABEL_MIN_PX: f32 = 48.0;
+
+/// Project the crate names and the important nodes to screen space for the
+/// DOM label overlay.
 fn compute_label_boxes(s: &RenderState) -> Vec<LabelBox> {
-    if !s.labels_on {
-        return Vec::new();
-    }
     let (Some(viewer), Some(scene)) = (s.viewer.as_ref(), s.scene.as_ref()) else {
         return Vec::new();
     };
     let camera = viewer.camera();
-    select_labels(&scene.nodes, &camera, &LabelOptions::default())
-        .into_iter()
-        .filter_map(|p| {
-            let (short, _qualified) = s.names.get(p.index)?;
-            let font = (9.0 + ((p.radius_px - 7.0) * 0.5) as f64).clamp(9.0, 15.0);
-            Some(LabelBox {
-                text: short.clone(),
-                x: p.screen[0] as f64,
-                y: p.screen[1] as f64,
-                font,
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    if s.boxes_on {
+        out.extend(
+            group_labels(&s.groups, &camera, GROUP_LABEL_MIN_PX)
+                .into_iter()
+                .map(|l| {
+                    let b = &s.groups[l.index];
+                    let [r, g, bl] = group_color(b).map(|c| (c * 255.0) as u8);
+                    let size = if b.external {
+                        format!("{}", b.members)
+                    } else {
+                        format!("{} fn", b.members)
+                    };
+                    LabelBox {
+                        text: format!("{} · {size}", b.name),
+                        x: l.screen[0] as f64,
+                        y: l.screen[1] as f64,
+                        font: 12.0,
+                        // Minus the label's 6px margin on each side (index.html).
+                        group: Some((
+                            format!("rgb({r},{g},{bl})"),
+                            (l.width_px as f64 - 12.0).max(0.0),
+                        )),
+                    }
+                }),
+        );
+    }
+    if s.labels_on {
+        out.extend(
+            select_labels(&scene.nodes, &camera, &LabelOptions::default())
+                .into_iter()
+                .filter_map(|p| {
+                    let (short, _qualified) = s.names.get(p.index)?;
+                    let font = (9.0 + ((p.radius_px - 7.0) * 0.5) as f64).clamp(9.0, 15.0);
+                    Some(LabelBox {
+                        text: short.clone(),
+                        x: p.screen[0] as f64,
+                        y: p.screen[1] as f64,
+                        font,
+                        group: None,
+                    })
+                }),
+        );
+    }
+    out
 }
 
 /// Draw the whole-graph overview (node dots + current viewport rectangle) on

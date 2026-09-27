@@ -22,8 +22,6 @@ crate-type = ["lib"]
 default = []
 # Precise (rust-analyzer) semantic adapter. Heavy; opt-in.
 semantic = ["lcw-engine/semantic"]
-# GPU-compute graph layout (wgpu). Falls back to CPU if no adapter is present.
-gpu = ["lcw-layout/gpu"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -32,7 +32,10 @@ Three columns:
   the **Outline**: crate ▸ module ▸ type ▸ function, collapsible, with a
   filter box, a cyclomatic-complexity badge per function and entry badges.
   Clicking a function selects it and centers the canvas on it.
-* **Canvas (middle)** — the wgpu call graph: drag to pan, scroll to zoom, click
+* **Canvas (middle)** — the wgpu call graph, every function inside a box for
+  its crate. The boxes stack in rows by call order: crates nothing else calls
+  (binaries, apps) on top, the crates they build on below, external code last;
+  the **crates** toggle hides the boxes. Drag to pan, scroll to zoom, click
   a node to select it, click the background to clear. The selection is bright
   yellow, the flow source orange, nodes on the traced path blue, everything
   else dimmed. A minimap and the label overlay track the camera.
@@ -183,14 +186,16 @@ This runs `trunk build` (emitting `frontend/dist/`) and bundles the app.
 
 ## Optional features
 
-The backend mirrors the workspace's optional features (both off by default):
+The backend mirrors the workspace's optional `semantic` feature (off by default):
 
 ```bash
 # Precise call graph via rust-analyzer. The UI's "semantic" toggle only takes
 # effect when the backend is compiled with this feature; otherwise it falls back
 # to the fast tree-sitter adapter.
 cargo tauri dev -- --features semantic
-
-# GPU-compute layout (wgpu). Falls back to the CPU layout if no adapter exists.
-cargo tauri dev -- --features gpu
 ```
+
+The graph is laid out one box per crate (`lcw_layout::layout_by_crate`), each
+crate its own force simulation on the CPU. The GPU-compute layout in
+`lcw-layout` (`--features gpu`) lays out a whole graph at once, so the desktop
+no longer offers it.

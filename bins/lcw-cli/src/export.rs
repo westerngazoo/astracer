@@ -21,6 +21,7 @@ fn edge_kind_str(kind: EdgeKind) -> &'static str {
         EdgeKind::MacroCall => "macro",
         EdgeKind::TraitDispatch => "trait",
         EdgeKind::Unresolved => "unresolved",
+        EdgeKind::Spawn => "spawn",
     }
 }
 

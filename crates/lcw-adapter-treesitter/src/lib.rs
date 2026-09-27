@@ -251,4 +251,204 @@ mod tests {
             .all(|(_, to, e)| g.node(to).kind == NodeKind::External
                 && e.kind == EdgeKind::Unresolved));
     }
+
+    // --- spawn sites: where a new thread of control begins ---------------------
+
+    /// Every edge out of `from`, as (target qualified name, kind).
+    fn edges_from(g: &CodeGraph, from: &str) -> Vec<(String, EdgeKind)> {
+        let f = g
+            .node_by_qualified(from)
+            .unwrap_or_else(|| panic!("{from} missing"));
+        let mut out: Vec<(String, EdgeKind)> = g
+            .edges_out(f)
+            .map(|(to, e)| (g.node(to).qualified_name.clone(), e.kind))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn spawn_targets(g: &CodeGraph, from: &str) -> Vec<String> {
+        edges_from(g, from)
+            .into_iter()
+            .filter(|(_, k)| *k == EdgeKind::Spawn)
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    #[test]
+    fn a_spawned_closure_is_its_own_node_and_owns_its_calls() {
+        let g = parse(
+            r#"
+            fn worker(n: u32) -> u32 { n }
+            fn main() {
+                let h = thread::spawn(move || worker(3));
+            }
+            "#,
+        );
+        let closure = "crate::main::<spawned@L4>";
+        let id = g.node_by_qualified(closure).expect("closure node");
+        assert_eq!(g.node(id).kind, NodeKind::Closure);
+        assert_eq!(
+            g.node(id).module_path,
+            "crate::main",
+            "nested under its caller"
+        );
+        assert_eq!(spawn_targets(&g, "crate::main"), vec![closure.to_string()]);
+        // The body runs on the new thread, so its call belongs to the closure —
+        // including when the body is a bare expression, not a block.
+        assert!(edges_from(&g, closure).contains(&("crate::worker".into(), EdgeKind::DirectCall)));
+        assert!(
+            !edges_from(&g, "crate::main")
+                .iter()
+                .any(|(t, _)| t == "crate::worker"),
+            "main does not call worker; the thread does"
+        );
+    }
+
+    #[test]
+    fn block_bodies_async_blocks_and_builder_chains() {
+        let g = parse(
+            r#"
+            fn crunch() {}
+            fn handle() {}
+            fn main() {
+                thread::Builder::new().name("x".into()).spawn(move || { crunch(); handle(); });
+                tokio::spawn(async move { handle() });
+            }
+            "#,
+        );
+        let spawned = spawn_targets(&g, "crate::main");
+        assert_eq!(
+            spawned,
+            vec!["crate::main::<spawned@L5>", "crate::main::<spawned@L6>"]
+        );
+        assert_eq!(
+            edges_from(&g, "crate::main::<spawned@L5>"),
+            vec![
+                ("crate::crunch".into(), EdgeKind::DirectCall),
+                ("crate::handle".into(), EdgeKind::DirectCall)
+            ]
+        );
+        let task = g.node_by_qualified("crate::main::<spawned@L6>").unwrap();
+        assert!(
+            g.node(task).flags.is_async,
+            "an async block is an async task"
+        );
+        // The builder's own calls still run on main's thread.
+        assert!(edges_from(&g, "crate::main")
+            .iter()
+            .any(|(t, _)| t == "thread::Builder::new"));
+    }
+
+    #[test]
+    fn a_passed_function_is_spawned_not_left_looking_dead() {
+        let g = parse(
+            r#"
+            fn listener() {}
+            mod pool { pub fn run() {} }
+            fn main() {
+                thread::spawn(listener);
+                thread::spawn(pool::run);
+            }
+            "#,
+        );
+        assert_eq!(
+            spawn_targets(&g, "crate::main"),
+            vec!["crate::listener", "crate::pool::run"]
+        );
+    }
+
+    #[test]
+    fn a_variable_is_not_a_function_even_when_a_function_shares_its_name() {
+        // Wari's kernel shape: `spawn(slot)` starts a process from a module
+        // slot number. A function named `slot` elsewhere must not become a
+        // thread root.
+        let g = parse(
+            r#"
+            fn slot() {}
+            fn spawn(_s: u8) {}
+            fn from_let() { let slot = 7u8; spawn(slot); }
+            fn from_param(slot: u8) { spawn(slot); }
+            fn from_closure_param() { (0..3).for_each(|slot| spawn(slot)); }
+            "#,
+        );
+        for f in [
+            "crate::from_let",
+            "crate::from_param",
+            "crate::from_closure_param",
+        ] {
+            assert!(spawn_targets(&g, f).is_empty(), "{f} spawns nothing");
+        }
+    }
+
+    #[test]
+    fn spawn_calls_without_a_runnable_argument_yield_nothing() {
+        let g = parse(
+            r#"
+            fn main() {
+                std::process::Command::new("ls").spawn();
+                let v: Vec<u32> = (0..3).map(|i| i + 1).collect();
+            }
+            "#,
+        );
+        assert!(spawn_targets(&g, "crate::main").is_empty());
+        assert!(
+            !g.nodes().any(|n| n.kind == NodeKind::Closure),
+            "only spawned closures become nodes"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_spawn_target_is_dropped_not_invented() {
+        let g = parse("fn main() { thread::spawn(elsewhere::run); }");
+        assert!(spawn_targets(&g, "crate::main").is_empty());
+        assert!(
+            g.node_by_qualified("elsewhere::run").is_none(),
+            "no external placeholder for a thread root that is not there"
+        );
+    }
+
+    #[test]
+    fn a_bare_spawn_target_binds_only_within_its_crate() {
+        let files = vec![
+            SourceFile::new("jobs/src/lib.rs", "pub fn job() {}"),
+            SourceFile::new("app/src/main.rs", "fn main() { std::thread::spawn(job); }"),
+            SourceFile::new("app/src/tasks.rs", "pub fn local_job() {}"),
+            SourceFile::new(
+                "app/src/run.rs",
+                "fn go() { std::thread::spawn(local_job); }",
+            ),
+        ];
+        let g = RustTreeSitterAdapter::new().parse(&files).unwrap();
+        assert!(
+            spawn_targets(&g, "app::main").is_empty(),
+            "job is another crate's"
+        );
+        assert_eq!(
+            spawn_targets(&g, "app::run::go"),
+            vec!["app::tasks::local_job"]
+        );
+    }
+
+    #[test]
+    fn nested_and_same_line_spawns_get_distinct_nodes() {
+        let g = parse(
+            r#"
+            fn leaf() {}
+            fn main() {
+                thread::spawn(move || { thread::spawn(move || leaf()); });
+                let (a, b) = (thread::spawn(|| leaf()), thread::spawn(|| leaf()));
+            }
+            "#,
+        );
+        let outer = "crate::main::<spawned@L4>";
+        assert_eq!(
+            spawn_targets(&g, outer),
+            vec!["crate::main::<spawned@L4>::<spawned@L4>"],
+            "a spawn inside a spawned closure belongs to that closure"
+        );
+        let from_main = spawn_targets(&g, "crate::main");
+        assert_eq!(from_main.len(), 3, "{from_main:?}");
+        assert!(from_main.contains(&"crate::main::<spawned@L5>#2".to_string()));
+    }
 }

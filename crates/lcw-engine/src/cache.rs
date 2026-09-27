@@ -18,7 +18,11 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when the on-disk layout or the [`FileFragment`] schema changes so stale
 /// caches are discarded instead of mis-deserialized.
-const CACHE_VERSION: u32 = 1;
+///
+/// 2: fragments carry spawn sites (`CallKind::Spawn`) and synthetic nodes for
+/// spawned closures; a version-1 fragment would silently lack both, so a warm
+/// cache would hide every thread root until the file happened to change.
+const CACHE_VERSION: u32 = 2;
 
 /// File name of the cache document inside the cache directory.
 const CACHE_FILE: &str = "fragments.json";

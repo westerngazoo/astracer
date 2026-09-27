@@ -27,6 +27,7 @@ pub mod flow;
 pub mod outline;
 pub mod reach;
 pub mod resolve;
+pub mod roots;
 
 pub use card::{edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard};
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
@@ -36,6 +37,7 @@ pub use reach::{
     call_tree, reach_count, reachable, CallTreeNode, CallTreeOptions, Direction, Reached,
 };
 pub use resolve::{best_match, resolve};
+pub use roots::{branches, run_roots, Branch, RootKind, RunRoot};
 
 /// Shared test fixtures: small hand-built graphs used across the module tests.
 #[cfg(test)]

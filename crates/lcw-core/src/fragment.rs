@@ -37,6 +37,15 @@ pub enum CallKind {
     Associated,
     /// `foo!(...)` — macro invocation.
     Macro,
+    /// The callee is *started*, not called: the argument of a spawn call, or
+    /// the synthetic node for a spawned closure. Resolves to an
+    /// [`EdgeKind::Spawn`] edge, and only ever to a definition — an
+    /// unresolvable spawn target is dropped rather than turned into an
+    /// external placeholder, because a thread root that is not really there
+    /// would be an invented one.
+    ///
+    /// [`EdgeKind::Spawn`]: crate::graph::EdgeKind::Spawn
+    Spawn,
 }
 
 /// A single unresolved call site captured during per-file extraction.

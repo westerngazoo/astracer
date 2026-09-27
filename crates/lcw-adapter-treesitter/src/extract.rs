@@ -9,7 +9,7 @@
 //! Resolution is deliberately *heuristic* (fast mode). The semantic adapter
 //! (`lcw-adapter-ra`) is the precise alternative behind the same trait.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use lcw_core::{
@@ -66,7 +66,17 @@ fn extract_with_parser(parser: &mut Parser, sf: &SourceFile) -> Result<FileFragm
     collect_defs_into(&mut defs, tree.root_node(), &sf.text, &module_base);
 
     let mut calls = Vec::new();
-    collect_calls_into(&mut calls, tree.root_node(), &sf.text, &module_base);
+    let mut spawned = Vec::new();
+    let mut taken = HashSet::new();
+    let mut scan = Scan {
+        calls: &mut calls,
+        spawned: &mut spawned,
+        taken: &mut taken,
+    };
+    collect_calls_into(&mut scan, tree.root_node(), &sf.text, &module_base);
+    // Spawned closures are definitions too: resolution interns them with the
+    // rest, so their spawn edge and their own calls link like any other.
+    defs.extend(spawned);
 
     Ok(FileFragment {
         path: sf.path.clone(),
@@ -110,6 +120,13 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
             // The caller's module scope == its node's `module_path` (defs and
             // calls reconstruct the same scope), so we needn't store it twice.
             let caller_module = graph.node(caller).module_path.clone();
+            if rc.kind == CallKind::Spawn {
+                if let Some(target) = resolve_spawn(&graph, &by_short, rc, &caller_module) {
+                    let call_site = with_file(rc.call_site, file);
+                    graph.add_edge(caller, target, Edge::new(EdgeKind::Spawn, call_site));
+                }
+                continue;
+            }
             let callee = Callee {
                 kind: callkind_to_class(rc.kind),
                 path: rc.path.clone(),
@@ -354,14 +371,22 @@ fn scan_stats(node: TsNode, text: &str, depth: u32, acc: &mut StatAcc) {
 // Pass 2: calls / edges
 // ---------------------------------------------------------------------------
 
-fn collect_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, scope: &str) {
+/// Where a call scan puts what it finds: call sites, synthetic nodes for
+/// spawned closures, and the qualified names already given to those nodes.
+struct Scan<'a> {
+    calls: &'a mut Vec<RawCall>,
+    spawned: &'a mut Vec<Node>,
+    taken: &'a mut HashSet<String>,
+}
+
+fn collect_calls_into(scan: &mut Scan, node: TsNode, text: &str, scope: &str) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "mod_item" => {
                 let inner = join(scope, &field_text(child, "name", text));
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls_into(calls, body, text, &inner);
+                    collect_calls_into(scan, body, text, &inner);
                 }
             }
             "impl_item" => {
@@ -372,13 +397,13 @@ fn collect_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, scope:
                     join(scope, &ty)
                 };
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls_into(calls, body, text, &inner);
+                    collect_calls_into(scan, body, text, &inner);
                 }
             }
             "trait_item" => {
                 let inner = join(scope, &field_text(child, "name", text));
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls_into(calls, body, text, &inner);
+                    collect_calls_into(scan, body, text, &inner);
                 }
             }
             "function_item" | "function_signature_item" => {
@@ -390,16 +415,23 @@ fn collect_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, scope:
                 if let Some(body) = child.child_by_field_name("body") {
                     // The caller's own body calls first, then nested fns (each
                     // its own caller) — mirrors the original edge order.
-                    scan_calls_into(calls, body, text, &qualified);
-                    collect_calls_into(calls, body, text, &qualified);
+                    let locals = local_bindings(child, text);
+                    scan_calls_into(scan, body, text, &qualified, &locals);
+                    collect_calls_into(scan, body, text, &qualified);
                 }
             }
-            _ => collect_calls_into(calls, child, text, scope),
+            _ => collect_calls_into(scan, child, text, scope),
         }
     }
 }
 
-fn scan_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, caller: &str) {
+fn scan_calls_into(
+    scan: &mut Scan,
+    node: TsNode,
+    text: &str,
+    caller: &str,
+    locals: &HashSet<String>,
+) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let kind = child.kind();
@@ -410,17 +442,248 @@ fn scan_calls_into(calls: &mut Vec<RawCall>, node: TsNode, text: &str, caller: &
         }
         if matches!(kind, "call_expression" | "macro_invocation") {
             if let Some(call) = callee_of_call(child, text) {
-                calls.push(RawCall {
+                let spawns = call.kind != CallClass::Macro && is_spawn_name(&call.short);
+                scan.calls.push(RawCall {
                     caller: caller.to_string(),
                     kind: class_to_callkind(call.kind),
                     path: call.path,
                     short: call.short,
                     call_site: span_of(child, FileId(0)),
                 });
+                if spawns && scan_spawn(scan, child, text, caller, locals) {
+                    continue;
+                }
             }
         }
-        scan_calls_into(calls, child, text, caller);
+        scan_calls_into(scan, child, text, caller, locals);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spawn sites: where a new thread of control begins
+// ---------------------------------------------------------------------------
+
+/// Names that start work on another thread or task: `spawn` and the
+/// `spawn_*` family (`spawn_blocking`, `spawn_local`, `spawn_scoped`, and a
+/// project's own `spawn_worker`). That covers `std::thread::spawn`,
+/// `Builder::spawn`, `Scope::spawn`, `tokio::spawn`, `task::spawn_blocking`,
+/// rayon's `spawn` and custom runtimes alike.
+///
+/// A name alone is not enough evidence, and nothing here relies on it alone:
+/// a spawn site only produces an edge when an argument is something that can
+/// run — a closure, an async block, or a path that resolves to a definition.
+/// `Command::new("ls").spawn()` has no such argument and yields nothing, and
+/// Wari's kernel `spawn(slot)` passes a variable, which is filtered out below.
+fn is_spawn_name(short: &str) -> bool {
+    short == "spawn" || short.starts_with("spawn_")
+}
+
+/// Handle a spawn call's subtree: calls in the callee expression stay with
+/// the caller (`Builder::new().name(..)` in a builder chain), a closure or
+/// async block argument becomes its own node, and a function path becomes a
+/// spawn reference. Returns `false` when there is no argument list, so the
+/// caller scans the node normally.
+fn scan_spawn(
+    scan: &mut Scan,
+    call: TsNode,
+    text: &str,
+    caller: &str,
+    locals: &HashSet<String>,
+) -> bool {
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    if let Some(func) = call.child_by_field_name("function") {
+        scan_calls_into(scan, func, text, caller, locals);
+    }
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        match arg.kind() {
+            "closure_expression" | "async_block" => spawn_closure(scan, arg, text, caller, locals),
+            // A bare name that is a parameter or a `let` binding is a value —
+            // `spawn(slot)` with `slot: u8` — not a function to run.
+            "identifier" if locals.contains(node_text(arg, text).as_str()) => {}
+            "identifier" | "scoped_identifier" => spawn_reference(scan, arg, text, caller),
+            _ => scan_calls_into(scan, arg, text, caller, locals),
+        }
+    }
+    true
+}
+
+/// Give a spawned closure or async block its own node, spawned by `caller`,
+/// and credit the calls in its body to it rather than to `caller`: the body
+/// runs on the new thread, not on the caller's.
+///
+/// It is named for where it is — `<spawned@L42>` — and nested under its
+/// caller exactly as a nested `fn` would be (`module_path` is the caller), so
+/// the outline shows it inside the function that starts it. The angle
+/// brackets keep the name out of reach of ordinary call resolution.
+fn spawn_closure(
+    scan: &mut Scan,
+    closure: TsNode,
+    text: &str,
+    caller: &str,
+    outer_locals: &HashSet<String>,
+) {
+    let line = closure.start_position().row + 1;
+    let base = format!("<spawned@L{line}>");
+    let mut name = base.clone();
+    let mut n = 1;
+    while !scan.taken.insert(join(caller, &name)) {
+        n += 1;
+        name = format!("{base}#{n}");
+    }
+    let qualified = join(caller, &name);
+
+    let is_closure = closure.kind() == "closure_expression";
+    let body = if is_closure {
+        closure.child_by_field_name("body")
+    } else {
+        Some(closure)
+    };
+    let mut acc = StatAcc::default();
+    if let Some(body) = body {
+        scan_stats(body, text, 0, &mut acc);
+    }
+    let parameters = closure
+        .child_by_field_name("parameters")
+        .map_or(0, |p| p.named_child_count() as u32);
+    let start = closure.start_position().row as u32;
+    let end = closure.end_position().row as u32;
+    scan.spawned.push(Node {
+        id: NodeId(0),
+        name: name.clone(),
+        qualified_name: qualified.clone(),
+        module_path: caller.to_string(),
+        kind: NodeKind::Closure,
+        span: span_of(closure, FileId(0)),
+        flags: NodeFlags {
+            is_async: !is_closure || node_text(closure, text).starts_with("async"),
+            ..Default::default()
+        },
+        stats: NodeStats {
+            lines_of_code: end.saturating_sub(start) + 1,
+            decision_points: acc.decision_points,
+            parameters,
+            statements: acc.statements,
+            max_nesting: acc.max_nesting,
+            returns: acc.returns,
+            unsafe_blocks: acc.unsafe_blocks,
+            allocations: acc.allocations,
+            awaits: acc.awaits,
+        },
+    });
+    scan.calls.push(RawCall {
+        caller: caller.to_string(),
+        kind: CallKind::Spawn,
+        path: qualified.clone(),
+        short: name,
+        call_site: span_of(closure, FileId(0)),
+    });
+
+    // Captured variables are still values inside the closure.
+    let mut locals = outer_locals.clone();
+    if let Some(params) = closure.child_by_field_name("parameters") {
+        identifiers_in(params, text, &mut locals);
+    }
+    if let Some(body) = body {
+        bindings_in(body, text, &mut locals);
+    }
+    // Scan the closure node, not its body: the scan looks at a node's
+    // children, and in `move || worker(rx)` the body *is* the call, so
+    // scanning the body alone would lose the thread's only call.
+    scan_calls_into(scan, closure, text, &qualified, &locals);
+}
+
+/// `spawn(worker)` / `spawn(workers::run)`: the function is passed, not
+/// called, so without this there is no edge at all and `worker` looks like
+/// dead code. Resolution decides whether it names a real definition.
+fn spawn_reference(scan: &mut Scan, arg: TsNode, text: &str, caller: &str) {
+    let path = node_text(arg, text);
+    scan.calls.push(RawCall {
+        caller: caller.to_string(),
+        kind: CallKind::Spawn,
+        short: last_segment(&path),
+        path,
+        call_site: span_of(arg, FileId(0)),
+    });
+}
+
+/// Names bound inside a function: its parameters and every pattern in its
+/// body (`let`, `for`, `if let`, match arms, closure parameters), stopping at
+/// nested functions. Over-approximate on purpose — treating a name as local
+/// only ever withholds a spawn edge, never invents one.
+fn local_bindings(func: TsNode, text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if let Some(params) = func.child_by_field_name("parameters") {
+        identifiers_in(params, text, &mut out);
+    }
+    if let Some(body) = func.child_by_field_name("body") {
+        bindings_in(body, text, &mut out);
+    }
+    out
+}
+
+fn bindings_in(node: TsNode, text: &str, out: &mut HashSet<String>) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "function_item" => continue,
+            "let_declaration" | "let_condition" | "for_expression" => {
+                if let Some(pat) = child.child_by_field_name("pattern") {
+                    identifiers_in(pat, text, out);
+                }
+            }
+            "closure_parameters" | "match_pattern" => identifiers_in(child, text, out),
+            _ => {}
+        }
+        bindings_in(child, text, out);
+    }
+}
+
+fn identifiers_in(node: TsNode, text: &str, out: &mut HashSet<String>) {
+    if node.kind() == "identifier" {
+        out.insert(node_text(node, text));
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        identifiers_in(child, text, out);
+    }
+}
+
+/// Resolve a spawn target to a definition, or to nothing — never to an
+/// external placeholder, since a thread root that is not really there would
+/// be an invented one.
+///
+/// A spawned closure matches its synthetic node exactly. A path must match
+/// its qualifiers, as a qualified call must. A bare name is weaker evidence
+/// than a call (it may be a variable the binding scan did not see), so it
+/// only binds within the caller's own crate.
+fn resolve_spawn(
+    graph: &CodeGraph,
+    by_short: &HashMap<String, Vec<NodeId>>,
+    rc: &RawCall,
+    caller_module: &str,
+) -> Option<NodeId> {
+    if let Some(id) = graph.node_by_qualified(&rc.path) {
+        return (graph.node(id).kind != NodeKind::External).then_some(id);
+    }
+    let qualifiers = path_qualifiers(&rc.path);
+    let caller_crate = caller_module.split("::").next().unwrap_or("");
+    let eligible: Vec<NodeId> = by_short
+        .get(&rc.short)?
+        .iter()
+        .copied()
+        .filter(|&id| {
+            let n = graph.node(id);
+            if qualifiers.is_empty() {
+                n.module_path.split("::").next() == Some(caller_crate)
+            } else {
+                has_qualifiers(&n.qualified_name, &qualifiers)
+            }
+        })
+        .collect();
+    pick_nearest(graph, &eligible, caller_module)
 }
 
 fn resolve_target(
@@ -543,7 +806,9 @@ fn class_to_callkind(c: CallClass) -> CallKind {
 
 fn callkind_to_class(k: CallKind) -> CallClass {
     match k {
-        CallKind::Direct => CallClass::Direct,
+        // Spawn sites resolve through `resolve_spawn` before this is reached;
+        // the arm exists so the match stays exhaustive.
+        CallKind::Direct | CallKind::Spawn => CallClass::Direct,
         CallKind::Method => CallClass::Method,
         CallKind::Associated => CallClass::Associated,
         CallKind::Macro => CallClass::Macro,

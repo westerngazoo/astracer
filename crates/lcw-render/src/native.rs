@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use glam::Vec2;
-use lcw_core::{CodeGraph, NodeId, NodeKind};
-use lcw_query::{node_card, CallRef, NodeCard};
+use lcw_core::{CodeGraph, NodeKind};
+use lcw_query::{node_card, CallRef, Connection, NodeCard};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -18,6 +18,7 @@ use winit::window::{Window, WindowId};
 use crate::camera::Camera2D;
 use crate::highlight::highlight;
 use crate::hud;
+use crate::interact::{self, Selection};
 use crate::scene::{self, SceneData};
 use crate::{RenderError, Renderer};
 
@@ -352,13 +353,12 @@ struct App {
     cursor: Vec2,
     press_origin: Option<Vec2>,
     dragging: bool,
-    moved_while_pressed: bool,
-    /// Currently inspected node (pick id).
-    selected: Option<usize>,
-    /// Node marked as the start of a flow trace (`f` on a selection).
-    flow_anchor: Option<usize>,
-    /// Pick ids of the currently highlighted flow path (source .. target).
-    path: Vec<usize>,
+    /// Whether the current press has travelled far enough to be a pan. Until
+    /// it has, the camera stays put and a release is a click.
+    panning: bool,
+    /// Selection, flow source and how they connect: the same state machine the
+    /// web UI runs (see [`crate::interact`]), which is what the tests cover.
+    sel: Selection,
 }
 
 impl App {
@@ -380,10 +380,8 @@ impl App {
             cursor: Vec2::ZERO,
             press_origin: None,
             dragging: false,
-            moved_while_pressed: false,
-            selected: None,
-            flow_anchor: None,
-            path: Vec::new(),
+            panning: false,
+            sel: Selection::default(),
         }
     }
 
@@ -472,72 +470,78 @@ impl App {
         frame.present();
     }
 
-    fn pick_at_cursor(&mut self) {
-        let Some(gfx) = &mut self.gfx else { return };
-        let picked = gfx.renderer.pick(
-            &gfx.device,
-            &gfx.queue,
-            gfx.config.width,
-            gfx.config.height,
-            self.cursor.x as u32,
-            self.cursor.y as u32,
-        );
-        match picked {
-            Some(idx) => self.select(idx as usize),
-            None => self.clear_selection(),
+    /// Window pixels per logical pixel: 2 on a Retina display. Cursor
+    /// positions and the camera viewport are physical, so every threshold
+    /// expressed in logical pixels is scaled by this.
+    fn scale_factor(&self) -> f32 {
+        self.gfx
+            .as_ref()
+            .map_or(1.0, |g| g.window.scale_factor() as f32)
+    }
+
+    /// Resolve a click at `screen` to a node on the CPU, with a slop measured
+    /// in screen pixels (see [`interact::pick_node`]). The GPU pick buffer
+    /// only answered for the exact pixel under the cursor, so any click that
+    /// grazed a small node was a miss.
+    fn pick_at(&mut self, screen: Vec2) {
+        let world = self.camera.screen_to_world(screen);
+        let slop = interact::pick_slop_world(self.camera.zoom, self.scale_factor());
+        match interact::pick_node(&self.scene, world.into(), slop) {
+            Some(idx) => self.select(idx),
+            None => {
+                if self.sel.miss() {
+                    self.refresh_selection();
+                }
+            }
         }
     }
 
-    /// Select a node: trace a flow if an anchor is set, rebuild the detail
-    /// panel, and recolor the graph to highlight the selection/path.
+    /// Select a node — tracing a flow to it when a source is set — then
+    /// redraw the panel and highlight.
     fn select(&mut self, idx: usize) {
-        self.path = match self.flow_anchor {
-            Some(anchor) if anchor != idx => self.trace(anchor, idx),
-            _ => Vec::new(),
-        };
+        self.sel.select(self.graph.as_ref(), idx);
         let label = self
             .labels
             .get(idx)
             .map(String::as_str)
             .unwrap_or("<unknown>");
-        if self.path.len() > 1 {
-            lcw_telemetry::info!(target: "lcw::render", node = idx, %label, hops = self.path.len() - 1, "flow traced");
-        } else {
-            lcw_telemetry::info!(target: "lcw::render", node = idx, %label, "picked node");
+        match &self.sel.connection {
+            Some(Connection::Unconnected) => {
+                lcw_telemetry::info!(target: "lcw::render", node = idx, %label, "no call path to the flow source")
+            }
+            Some(c) if !c.path().is_empty() => {
+                lcw_telemetry::info!(target: "lcw::render", node = idx, %label, hops = c.path().len() - 1, "flow traced")
+            }
+            _ => lcw_telemetry::info!(target: "lcw::render", node = idx, %label, "picked node"),
         }
-        self.selected = Some(idx);
+        self.refresh_selection();
+    }
+
+    fn refresh_selection(&mut self) {
         self.rebuild_hud();
         self.recolor();
         self.request_redraw();
     }
 
     fn clear_selection(&mut self) {
-        self.selected = None;
-        self.flow_anchor = None;
-        self.path.clear();
-        if let Some(gfx) = &mut self.gfx {
-            gfx.renderer.set_hud(&gfx.device, &[]);
-            gfx.renderer.set_nodes(&gfx.device, &self.scene.nodes);
-            gfx.renderer.set_edges(&gfx.device, &self.scene.edges);
-        }
-        self.request_redraw();
+        self.sel.clear();
+        self.refresh_selection();
     }
 
-    /// Mark the current selection as the start of a flow; the next pick traces
-    /// the shortest call path to it.
+    /// `f`: make the selection the flow source; the next pick traces how the
+    /// two connect, in whichever direction a call path exists.
     fn mark_flow_anchor(&mut self) {
-        if let Some(sel) = self.selected {
-            self.flow_anchor = Some(sel);
-            lcw_telemetry::info!(target: "lcw::render", node = sel, "flow anchor set");
-            self.rebuild_hud();
-            self.recolor();
-            self.request_redraw();
+        if self.sel.anchor_here() {
+            lcw_telemetry::info!(target: "lcw::render", node = ?self.sel.anchor, "flow source set");
+            self.refresh_selection();
+        } else {
+            lcw_telemetry::info!(target: "lcw::render", "select a node first, then press f");
         }
     }
 
     /// Open the selected node's source location in an editor.
     fn open_selected(&self) {
-        let Some(sel) = self.selected else { return };
+        let Some(sel) = self.sel.selected else { return };
         let Some(info) = self.infos.get(sel) else {
             return;
         };
@@ -546,16 +550,6 @@ impl App {
             return;
         }
         open_in_editor(&info.file, info.line);
-    }
-
-    /// Shortest call path between two pick ids (== node ids), via `lcw-query`.
-    fn trace(&self, from: usize, to: usize) -> Vec<usize> {
-        let Some(graph) = &self.graph else {
-            return Vec::new();
-        };
-        lcw_query::shortest_path(graph, NodeId(from as u32), NodeId(to as u32), 64)
-            .map(|p| p.into_iter().map(|id| id.0 as usize).collect())
-            .unwrap_or_default()
     }
 
     /// Select the best place to start reading and center the camera on it: of
@@ -587,23 +581,22 @@ impl App {
     }
 
     fn rebuild_hud(&mut self) {
-        let Some(sel) = self.selected else { return };
-        let mut panel = panel_for(&self.infos, sel, &self.path);
-        if self.flow_anchor == Some(sel) {
-            panel.subtitle = format!("{}   [flow source — pick a target]", panel.subtitle);
-        }
-        let crumb = (self.path.len() > 1).then(|| {
-            let chain: Vec<&str> = self
-                .path
-                .iter()
-                .map(|&i| {
-                    self.infos
-                        .get(i)
-                        .map(|x| short_name(&x.title))
-                        .unwrap_or("?")
-                })
-                .collect();
-            format!("flow: {}", chain.join(" -> "))
+        let Some(sel) = self.sel.selected else {
+            if let Some(gfx) = &mut self.gfx {
+                gfx.renderer.set_hud(&gfx.device, &[]);
+            }
+            return;
+        };
+        let path = self.sel.path();
+        let panel = panel_for(&self.infos, sel, &path);
+        // Every flow state gets a line, including the two that used to show
+        // nothing at all: "source set, pick a target" and "no path".
+        let infos = &self.infos;
+        let crumb = self.sel.flow_status(|i| {
+            infos
+                .get(i)
+                .map_or("?", |x| short_name(&x.title))
+                .to_string()
         });
         let Some(gfx) = &mut self.gfx else { return };
         let (w, h) = (gfx.config.width, gfx.config.height);
@@ -616,13 +609,14 @@ impl App {
 
     /// Recolor nodes and edges to focus the current selection / traced path.
     fn recolor(&mut self) {
+        let path = self.sel.path();
         let Some(gfx) = &mut self.gfx else { return };
-        if self.selected.is_none() && self.path.is_empty() {
+        if self.sel.selected.is_none() && path.is_empty() {
             gfx.renderer.set_nodes(&gfx.device, &self.scene.nodes);
             gfx.renderer.set_edges(&gfx.device, &self.scene.edges);
             return;
         }
-        let (nodes, edges) = highlight(&self.scene, self.selected, self.flow_anchor, &self.path);
+        let (nodes, edges) = highlight(&self.scene, self.sel.selected, self.sel.anchor, &path);
         gfx.renderer.set_nodes(&gfx.device, &nodes);
         gfx.renderer.set_edges(&gfx.device, &edges);
     }
@@ -700,13 +694,29 @@ impl ApplicationHandler for App {
                 let PhysicalPosition { x, y } = position;
                 let new = Vec2::new(x as f32, y as f32);
                 if self.dragging {
-                    let delta = new - self.cursor;
-                    if delta.length() > 0.5 {
-                        self.moved_while_pressed = true;
-                    }
-                    self.camera.pan_pixels(delta);
-                    if let Some(gfx) = &self.gfx {
-                        gfx.window.request_redraw();
+                    let delta = if self.panning {
+                        Some(new - self.cursor)
+                    } else {
+                        match self.press_origin {
+                            Some(origin)
+                                if !interact::is_click(
+                                    origin.into(),
+                                    new.into(),
+                                    self.scale_factor(),
+                                ) =>
+                            {
+                                // Past the click slop: this is a pan. Catch up
+                                // on the travel held back so far, so the graph
+                                // stays under the cursor.
+                                self.panning = true;
+                                Some(new - origin)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(delta) = delta {
+                        self.camera.pan_pixels(delta);
+                        self.request_redraw();
                     }
                 }
                 self.cursor = new;
@@ -716,14 +726,18 @@ impl ApplicationHandler for App {
                     match state {
                         ElementState::Pressed => {
                             self.dragging = true;
-                            self.moved_while_pressed = false;
+                            self.panning = false;
                             self.press_origin = Some(self.cursor);
                         }
                         ElementState::Released => {
                             self.dragging = false;
-                            if !self.moved_while_pressed {
-                                self.pick_at_cursor();
+                            if !self.panning {
+                                // Pick where the press landed: that is where
+                                // the user aimed, and the camera has not moved.
+                                let at = self.press_origin.unwrap_or(self.cursor);
+                                self.pick_at(at);
                             }
+                            self.panning = false;
                         }
                     }
                 }

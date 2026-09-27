@@ -30,7 +30,7 @@ pub mod resolve;
 
 pub use card::{edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard};
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
-pub use flow::{shortest_path, shortest_paths, FlowPaths};
+pub use flow::{connection, shortest_path, shortest_paths, Connection, FlowPaths};
 pub use outline::{outline, Outline, OutlineKind, OutlineNode};
 pub use reach::{
     call_tree, reach_count, reachable, CallTreeNode, CallTreeOptions, Direction, Reached,

@@ -230,7 +230,13 @@ fn cmd_view(opts: &Options) -> Result<(), String> {
         args.push("--view".into());
         args.push("module".into());
     }
-    println!("    press `m` to jump to the primary entry point, `f` to anchor a flow\n");
+    // This window is the graph canvas only. Someone who wants the tree —
+    // outline, entry points, callers and callees — was sent here once and
+    // found "a bunch of circles and edges"; say where the Explorer is.
+    println!("    graph canvas: `m` jumps to the entry point, click a node, `f` then click");
+    println!("    another node to trace the flow between them, `esc` clears.");
+    println!("    the tree Explorer (outline, entry points, callers/callees) is in the");
+    println!("    browser UI: lcw-dev ui {}\n", path_arg(&repo));
     run_tool(&lcw_binary("release"), &args)
 }
 
@@ -265,7 +271,8 @@ fn cmd_ui(opts: &Options) -> Result<(), String> {
 
     let url = format!("http://127.0.0.1:{port}/");
     println!("\n    {url}");
-    println!("    type `fixture.json` in the path box, press Analyze, then Entry\n");
+    println!("    the analysis loads by itself; start from \"Start here\" in the Explorer,");
+    println!("    or press Entry to jump to where the program begins\n");
     if !opts.no_open {
         open_url(&url);
     }

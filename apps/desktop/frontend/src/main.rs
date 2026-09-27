@@ -2,7 +2,6 @@
 
 mod app;
 mod transport;
-mod viewer;
 
 use app::App;
 use leptos::mount::mount_to_body;

@@ -48,7 +48,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows is in the matrix because the analyzer is portable by
+        # construction (module paths come from `Path::components()`, so a
+        # backslash never reaches a qualified name) and that claim is worth
+        # nothing untested.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

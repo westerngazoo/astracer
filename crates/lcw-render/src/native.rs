@@ -649,13 +649,34 @@ fn open_in_editor(file: &str, line: u32) {
             return;
         }
     }
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
-    match Command::new(opener).arg(file).spawn() {
+    match os_opener(file).spawn() {
         Ok(_) => lcw_telemetry::info!(target: "lcw::render", %file, "opened via OS opener"),
         Err(e) => lcw_telemetry::warn!(target: "lcw::render", error = %e, "could not open editor"),
+    }
+}
+
+/// The desktop's "open this with whatever handles it" command, per platform.
+///
+/// Windows has no such program: `start` is a builtin of `cmd`, so it has to be
+/// invoked through the shell, and its first argument is the console *title* —
+/// omit the empty string and a path containing spaces is taken for the title
+/// and nothing opens. This used to fall through to `xdg-open` off macOS, which
+/// on Windows is a program that does not exist, so the viewer's open-in-editor
+/// key did nothing for anyone without VS Code on PATH.
+fn os_opener(file: &str) -> std::process::Command {
+    use std::process::Command;
+    if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg(file);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(file);
+        c
+    } else {
+        let mut c = Command::new("xdg-open");
+        c.arg(file);
+        c
     }
 }
 

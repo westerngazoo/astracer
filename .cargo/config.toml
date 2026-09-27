@@ -1,0 +1,5 @@
+# `cargo xtask <task>` — the developer task runner in `xtask/`. It replaces the
+# shell script that used to drive browser dev mode, so the same command works on
+# macOS, Linux and Windows.
+[alias]
+xtask = "run --quiet --package xtask --"

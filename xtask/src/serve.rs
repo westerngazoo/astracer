@@ -13,8 +13,9 @@
 //! console error, not a fallback.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 pub fn listen(root: &Path, port: u16) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", port))
@@ -36,8 +37,18 @@ fn serve(listener: TcpListener, root: PathBuf) {
     }
 }
 
-fn handle(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+fn handle(stream: TcpStream, root: &Path) -> std::io::Result<()> {
+    let result = answer(&stream, root);
+    close_without_reset(&stream);
+    result
+}
+
+/// Read one request and write its response. Reads and writes go through the
+/// one handle: `&TcpStream` is both `Read` and `Write`, so there is no need for
+/// `try_clone`, whose duplicated descriptor makes the close depend on the order
+/// two handles are dropped in — on Windows, a `WSADuplicateSocket` pair.
+fn answer(stream: &TcpStream, root: &Path) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
@@ -55,20 +66,42 @@ fn handle(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
             Ok(mut f) => {
                 let mut body = Vec::new();
                 f.read_to_end(&mut body)?;
-                respond(&mut stream, "200 OK", mime_for(&path), &body)
+                respond(stream, "200 OK", mime_for(&path), &body)
             }
-            Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"not found\n"),
+            Err(_) => respond(stream, "404 Not Found", "text/plain", b"not found\n"),
         },
-        None => respond(
-            &mut stream,
-            "400 Bad Request",
-            "text/plain",
-            b"bad request\n",
-        ),
+        None => respond(stream, "400 Bad Request", "text/plain", b"bad request\n"),
     }
 }
 
-fn respond(stream: &mut TcpStream, status: &str, mime: &str, body: &[u8]) -> std::io::Result<()> {
+/// Close so the client receives every byte of the response.
+///
+/// Closing a socket that still has unread input makes the stack send a reset
+/// rather than a normal shutdown, and a reset entitles the *peer's* stack to
+/// discard response data it has not yet handed to the application. A browser
+/// fetching a multi-megabyte wasm module can then get a truncated one — or,
+/// as the Windows CI runner showed, `ConnectionReset` mid-read. Input can be
+/// left unread whenever the client sends anything after the headers we
+/// consumed: a pipelined request, a body, a keep-alive probe.
+///
+/// So: announce end-of-response with a half-close, then read and discard
+/// whatever the client still sends until it closes its side, so nothing is
+/// unread when this socket goes. Bounded in time and size, so a client that
+/// never closes costs one short-lived thread, not a hung one.
+fn close_without_reset(mut stream: &TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut sink = [0u8; 8192];
+    let mut budget: usize = 1 << 20;
+    while budget > 0 {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => budget = budget.saturating_sub(n),
+        }
+    }
+}
+
+fn respond(mut stream: &TcpStream, status: &str, mime: &str, body: &[u8]) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\n\
@@ -198,6 +231,48 @@ mod tests {
         let escape = get(port, "/../../etc/passwd");
         assert!(escape.contains("400"), "{escape}");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The response must arrive whole even when the client has sent bytes the
+    /// server never reads — here a pipelined second request. A socket closed
+    /// with unread input is reset rather than shut down, and a reset lets the
+    /// peer's stack drop response data it has not yet delivered: with a
+    /// wasm-sized body still in flight, that is a truncated module.
+    #[test]
+    fn unread_input_does_not_cost_the_client_its_response() {
+        let dir = std::env::temp_dir().join(format!("lcw-serve-rst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = vec![b'w'; 4 << 20];
+        std::fs::write(dir.join("big.wasm"), &body).unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = dir.clone();
+        std::thread::spawn(move || serve(listener, root));
+
+        for _ in 0..20 {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(b"GET /big.wasm HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+            // Wait until the server is mid-response, so it is no longer
+            // reading: bytes sent now sit unread in its kernel queue rather
+            // than in a userspace buffer, which is the case that matters.
+            let mut got = vec![0u8; 1];
+            s.read_exact(&mut got).unwrap();
+            s.write_all(b"GET /big.wasm HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+            // Let the server finish and close before we read the rest, which
+            // is when a reset does its damage.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            s.read_to_end(&mut got).expect("response, not a reset");
+            assert!(
+                got.ends_with(&body[body.len() - 64..]),
+                "truncated: {} bytes",
+                got.len()
+            );
+            assert!(got.len() > body.len(), "truncated: {} bytes", got.len());
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

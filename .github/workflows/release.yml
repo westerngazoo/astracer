@@ -38,7 +38,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # aarch64 Linux is cross-compiled from an x86_64 runner: install the GNU
       # cross toolchain, which provides both the linker and the C cross-compiler
@@ -89,7 +89,7 @@ jobs:
           echo "asset=${asset}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.package.outputs.asset }}
           fail_on_unmatched_files: true
@@ -105,7 +105,7 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Tauri v2 Linux (webkit2gtk 4.1) system prerequisites.
       - name: Install Tauri system dependencies
@@ -141,7 +141,7 @@ jobs:
         run: cargo tauri build
 
       - name: Upload desktop bundles to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           fail_on_unmatched_files: false
           files: |

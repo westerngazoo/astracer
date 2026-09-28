@@ -232,15 +232,14 @@ pub fn render_to_png_scene_with_hud(
     let width = width.max(1);
     let height = height.max(1);
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
+        ..Default::default()
     }))
-    .ok_or(RenderError::NoAdapter)?;
+    .map_err(|_| RenderError::NoAdapter)?;
     let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
             .map_err(|e| RenderError::Screenshot(e.to_string()))?;
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -312,8 +311,12 @@ pub fn render_to_png_scene_with_hud(
 
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::Maintain::Wait);
-    let data = slice.get_mapped_range();
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| RenderError::Screenshot(e.to_string()))?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| RenderError::Screenshot(e.to_string()))?;
 
     // Drop the row padding so the PNG rows are tightly packed.
     let mut rgba = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
@@ -400,18 +403,22 @@ impl App {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        // The GL backend needs the display connection to present (notably on
+        // Wayland); the others ignore it.
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(event_loop.owned_display_handle()),
+        ));
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| RenderError::Window(e.to_string()))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
+            ..Default::default()
         }))
-        .ok_or(RenderError::NoAdapter)?;
+        .map_err(|_| RenderError::NoAdapter)?;
         let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|e| RenderError::Window(e.to_string()))?;
 
         let mut config = surface
@@ -453,12 +460,14 @@ impl App {
     fn redraw(&mut self) {
         let Some(gfx) = &mut self.gfx else { return };
         let frame = match gfx.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 gfx.surface.configure(&gfx.device, &gfx.config);
                 return;
             }
-            Err(_) => return,
+            // Timed out, occluded or invalid: skip this frame.
+            _ => return,
         };
         let view = frame
             .texture
@@ -473,7 +482,7 @@ impl App {
             });
         gfx.renderer.render(&mut encoder, &view);
         gfx.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        gfx.queue.present(frame);
     }
 
     /// Window pixels per logical pixel: 2 on a Retina display. Cursor

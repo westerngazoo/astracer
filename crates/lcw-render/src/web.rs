@@ -118,9 +118,9 @@ impl WebViewer {
     ) -> Result<WebViewer, String> {
         let width = canvas.width().max(1);
         let height = canvas.height().max(1);
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
@@ -132,19 +132,20 @@ impl WebViewer {
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
+                ..Default::default()
             })
             .await
         {
-            Some(a) => a,
-            None => instance
+            Ok(a) => a,
+            Err(_) => instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::LowPower,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: true,
+                    ..Default::default()
                 })
                 .await
-                .ok_or_else(|| {
+                .map_err(|_| {
                     format!(
                         "no compatible GPU adapter for {backends:?} (this webview offers neither \
                          WebGPU nor WebGL2); the graph canvas stays empty, the rest of the UI \
@@ -158,15 +159,12 @@ impl WebViewer {
         // `request_device` fail outright on the GL backend; and a browser's
         // WebGPU implementation may also report limits below those defaults.
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("lcw web device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: adapter.limits(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("lcw web device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
             .await
             .map_err(|e| format!("request_device: {e}"))?;
 
@@ -271,8 +269,9 @@ impl WebViewer {
     /// Draw a frame.
     pub fn render(&mut self) {
         let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(_) => {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            _ => {
                 self.surface.configure(&self.device, &self.config);
                 return;
             }
@@ -288,7 +287,7 @@ impl WebViewer {
             });
         self.renderer.render(&mut encoder, &view);
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
     }
 
     /// Node index under the cursor, if any.

@@ -125,8 +125,8 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lcw pipeline layout"),
-            bind_group_layouts: &[&camera_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bgl)],
+            immediate_size: 0,
         });
 
         // Vertex buffer layouts.
@@ -158,7 +158,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_node"),
-                buffers: &[quad_layout.clone(), inst_layout.clone()],
+                buffers: &[Some(quad_layout.clone()), Some(inst_layout.clone())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -174,7 +174,7 @@ impl Renderer {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -184,7 +184,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_edge"),
-                buffers: std::slice::from_ref(&edge_layout),
+                buffers: &[Some(edge_layout.clone())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -203,7 +203,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -215,7 +215,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_edge"),
-                buffers: &[edge_layout],
+                buffers: &[Some(edge_layout)],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -231,7 +231,7 @@ impl Renderer {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -241,7 +241,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_node"),
-                buffers: &[quad_layout, inst_layout],
+                buffers: &[Some(quad_layout), Some(inst_layout)],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -257,7 +257,7 @@ impl Renderer {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -389,6 +389,7 @@ impl Renderer {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.06,
@@ -402,6 +403,7 @@ impl Renderer {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         pass.set_bind_group(0, &self.camera_bg, &[]);
@@ -521,6 +523,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -529,6 +532,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.pick_pipeline);
             pass.set_bind_group(0, &self.camera_bg, &[]);
@@ -561,8 +565,11 @@ impl Renderer {
 
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::Maintain::Wait);
-        let data = slice.get_mapped_range();
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let Ok(data) = slice.get_mapped_range() else {
+            staging.unmap();
+            return None;
+        };
         let id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         drop(data);
         staging.unmap();

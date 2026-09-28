@@ -92,15 +92,14 @@ fn build_adjacency(graph: &CodeGraph, n: usize) -> Adjacency {
 }
 
 fn request_device() -> Result<(wgpu::Device, wgpu::Queue), GpuLayoutError> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
+        ..Default::default()
     }))
-    .ok_or(GpuLayoutError::NoAdapter)?;
+    .map_err(|_| GpuLayoutError::NoAdapter)?;
 
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
         .map_err(|e| GpuLayoutError::Device(e.to_string()))
 }
 
@@ -232,8 +231,8 @@ pub fn layout_gpu(graph: &CodeGraph, params: &LayoutParams) -> Result<Layout, Gp
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("lcw layout pl"),
-        bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
     });
     let make_pipeline = |entry_point: &str| {
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -313,12 +312,16 @@ fn read_positions(
     slice.map_async(wgpu::MapMode::Read, move |res| {
         let _ = tx.send(res);
     });
-    device.poll(wgpu::Maintain::Wait);
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuLayoutError::Readback(e.to_string()))?;
     rx.recv()
         .map_err(|e| GpuLayoutError::Readback(e.to_string()))?
         .map_err(|e| GpuLayoutError::Readback(e.to_string()))?;
 
-    let data = slice.get_mapped_range();
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| GpuLayoutError::Readback(e.to_string()))?;
     let positions: Vec<Vec2> = bytemuck::cast_slice::<u8, Vec2>(&data)[..n].to_vec();
     drop(data);
     staging.unmap();

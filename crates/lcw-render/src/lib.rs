@@ -62,10 +62,11 @@ mod headless_tests {
     /// Try to obtain a GPU device; returns `None` when no adapter is available
     /// (e.g. headless CI), so the test degrades to a no-op instead of failing.
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
     }
 
     #[test]
@@ -120,7 +121,7 @@ mod headless_tests {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         renderer.render(&mut encoder, &view);
         queue.submit(std::iter::once(encoder.finish()));
-        let _ = device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
         // Picking the center should hit some node (a or b sit near the middle).
         let _ = renderer.pick(&device, &queue, 256, 256, 128, 128);

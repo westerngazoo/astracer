@@ -119,9 +119,17 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
             };
             // The caller's module scope == its node's `module_path` (defs and
             // calls reconstruct the same scope), so we needn't store it twice.
-            let caller_module = graph.node(caller).module_path.clone();
+            let caller_node = graph.node(caller);
+            let (name, module) = (
+                caller_node.qualified_name.clone(),
+                caller_node.module_path.clone(),
+            );
+            let scope = CallerScope {
+                name: &name,
+                module: &module,
+            };
             if rc.kind == CallKind::Spawn {
-                if let Some(target) = resolve_spawn(&graph, &by_short, rc, &caller_module) {
+                if let Some(target) = resolve_spawn(&graph, &by_short, rc, &scope) {
                     let call_site = with_file(rc.call_site, file);
                     graph.add_edge(caller, target, Edge::new(EdgeKind::Spawn, call_site));
                 }
@@ -132,7 +140,7 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
                 path: rc.path.clone(),
                 short: rc.short.clone(),
             };
-            let target = resolve_target(&mut graph, &by_short, &callee, &caller_module);
+            let target = resolve_target(&mut graph, &by_short, &callee, &scope);
             let edge_kind = if graph.node(target).kind == NodeKind::External {
                 EdgeKind::Unresolved
             } else {
@@ -663,35 +671,46 @@ fn resolve_spawn(
     graph: &CodeGraph,
     by_short: &HashMap<String, Vec<NodeId>>,
     rc: &RawCall,
-    caller_module: &str,
+    scope: &CallerScope,
 ) -> Option<NodeId> {
     if let Some(id) = graph.node_by_qualified(&rc.path) {
         return (graph.node(id).kind != NodeKind::External).then_some(id);
     }
     let qualifiers = path_qualifiers(&rc.path);
-    let caller_crate = caller_module.split("::").next().unwrap_or("");
+    let caller_crate = scope.module.split("::").next().unwrap_or("");
     let eligible: Vec<NodeId> = by_short
         .get(&rc.short)?
         .iter()
         .copied()
         .filter(|&id| {
             let n = graph.node(id);
-            if qualifiers.is_empty() {
+            if !rc.path.contains("::") {
+                // Passed by bare name, like a bare call: a free function only.
+                can_name(CallClass::Direct, n)
+                    && n.module_path.split("::").next() == Some(caller_crate)
+            } else if qualifiers.is_empty() {
                 n.module_path.split("::").next() == Some(caller_crate)
             } else {
                 has_qualifiers(&n.qualified_name, &qualifiers)
             }
         })
         .collect();
-    pick_nearest(graph, &eligible, caller_module)
+    pick_nearest(graph, &eligible, scope)
 }
 
 fn resolve_target(
     graph: &mut CodeGraph,
     by_short: &HashMap<String, Vec<NodeId>>,
     call: &Callee,
-    caller_module: &str,
+    scope: &CallerScope,
 ) -> NodeId {
+    // Macros are not functions, and no definition in the graph is a macro, so
+    // a macro call is always external — even when a function shares its name
+    // (`matches!` is not `fn matches`).
+    if call.kind == CallClass::Macro {
+        let key = call.path.clone();
+        return graph.intern_node(&key, || Node::external(key.clone()));
+    }
     // Exact qualified match wins (helps `Type::assoc` and scoped paths).
     if call.path.contains("::") {
         if let Some(id) = graph.node_by_qualified(&call.path) {
@@ -710,9 +729,12 @@ fn resolve_target(
         let eligible: Vec<NodeId> = cands
             .iter()
             .copied()
-            .filter(|&id| has_qualifiers(&graph.node(id).qualified_name, &qualifiers))
+            .filter(|&id| {
+                let n = graph.node(id);
+                can_name(call.kind, n) && has_qualifiers(&n.qualified_name, &qualifiers)
+            })
             .collect();
-        if let Some(id) = pick_nearest(graph, &eligible, caller_module) {
+        if let Some(id) = pick_nearest(graph, &eligible, scope) {
             return id;
         }
     }
@@ -743,21 +765,67 @@ fn has_qualifiers(qualified_name: &str, qualifiers: &[&str]) -> bool {
         .all(|q| qualified_name.split("::").any(|seg| seg == *q))
 }
 
-/// Among several candidate definitions, prefer the one closest to the caller:
-/// same module, then same crate (first path segment), then the first declared.
-fn pick_nearest(graph: &CodeGraph, cands: &[NodeId], caller_module: &str) -> Option<NodeId> {
+/// Whether a definition can be what a call of this syntactic class names.
+/// Rust's call syntax decides it, so a same-named definition of the wrong
+/// kind is not evidence at all:
+///
+/// * `x.f()` reaches only a method — a function taking `self`. (A free `join`
+///   is not what `path.join()` calls.)
+/// * A bare `f()` reaches only a free function: a method or an associated
+///   function needs a `Type::`, `Self::` or receiver in front of it. (`drop(x)`
+///   is `std::mem::drop`, not some type's `Drop::drop`.)
+/// * `Type::f()` may name either, and is checked by its qualifiers instead.
+/// * A macro is not a function; see [`resolve_target`].
+fn can_name(call: CallClass, def: &Node) -> bool {
+    match call {
+        CallClass::Method => def.flags.is_method,
+        CallClass::Direct => !def.flags.is_method && !is_associated(def),
+        CallClass::Associated => true,
+        CallClass::Macro => false,
+    }
+}
+
+/// Whether a definition sits directly in an `impl` or `trait` block. The
+/// module path records such a block by its type or trait name, and Rust's
+/// naming rules make those the only UpperCamelCase segments in a path
+/// (modules and functions are snake_case).
+fn is_associated(def: &Node) -> bool {
+    def.module_path
+        .rsplit("::")
+        .next()
+        .and_then(|owner| owner.chars().next())
+        .is_some_and(char::is_uppercase)
+}
+
+/// Where a call is made from.
+struct CallerScope<'a> {
+    /// Qualified name of the calling function. Items declared in its body
+    /// (`fn outer() { fn helper() {} helper(); }`) have this as their module
+    /// path.
+    name: &'a str,
+    /// The module the calling function sits in.
+    module: &'a str,
+}
+
+/// Among several candidate definitions, prefer the one closest to the caller,
+/// the way Rust's own name lookup does: declared in the caller's body, then
+/// in the same module, then in the same crate (first path segment), then the
+/// first declared.
+fn pick_nearest(graph: &CodeGraph, cands: &[NodeId], scope: &CallerScope) -> Option<NodeId> {
     match cands {
         [] => None,
         [only] => Some(*only),
         many => {
-            if let Some(id) = many
-                .iter()
-                .copied()
-                .find(|&id| graph.node(id).module_path == caller_module)
-            {
-                return Some(id);
+            for home in [scope.name, scope.module] {
+                if let Some(id) = many
+                    .iter()
+                    .copied()
+                    .find(|&id| graph.node(id).module_path == home)
+                {
+                    return Some(id);
+                }
             }
-            let caller_crate = caller_module.split("::").next().unwrap_or("");
+            let caller_crate = scope.module.split("::").next().unwrap_or("");
             if let Some(id) = many
                 .iter()
                 .copied()

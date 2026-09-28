@@ -431,6 +431,151 @@ mod tests {
     }
 
     #[test]
+    fn a_method_call_never_binds_to_a_free_function() {
+        let g = parse(
+            r#"
+            fn join(a: &str) -> String { a.into() }
+            struct Buf;
+            impl Buf { fn push(&mut self) {} }
+            fn run(p: std::path::PathBuf, mut b: Buf) {
+                p.join("x");
+                b.push();
+                join("y");
+            }
+            "#,
+        );
+        let out = edges_from(&g, "crate::run");
+        assert!(
+            out.contains(&("join".into(), EdgeKind::Unresolved)),
+            "`p.join()` is a method on someone else's type: {out:?}"
+        );
+        assert!(out.contains(&("crate::join".into(), EdgeKind::DirectCall)));
+        assert!(out.contains(&("crate::Buf::push".into(), EdgeKind::MethodCall)));
+    }
+
+    #[test]
+    fn a_macro_call_never_binds_to_a_function() {
+        let g = parse(
+            r#"
+            fn matches(x: u8) -> bool { x > 0 }
+            fn check(x: u8) -> bool { matches!(x, 1 | 2) || matches(x) }
+            "#,
+        );
+        let out = edges_from(&g, "crate::check");
+        assert_eq!(
+            out,
+            vec![
+                ("crate::matches".into(), EdgeKind::DirectCall),
+                ("matches".into(), EdgeKind::Unresolved),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_call_never_binds_to_a_method_or_an_associated_function() {
+        let g = parse(
+            r#"
+            struct Guard;
+            impl Drop for Guard { fn drop(&mut self) {} }
+            struct Cfg;
+            impl Cfg { fn build() -> Cfg { Cfg } }
+            fn run(g: Guard) {
+                drop(g);
+                build();
+                Cfg::build();
+            }
+            "#,
+        );
+        let out = edges_from(&g, "crate::run");
+        assert!(
+            out.contains(&("drop".into(), EdgeKind::Unresolved)),
+            "`drop(g)` is std::mem::drop: {out:?}"
+        );
+        assert!(
+            out.contains(&("build".into(), EdgeKind::Unresolved)),
+            "a bare `build()` cannot reach `Cfg::build`: {out:?}"
+        );
+        assert!(out.contains(&("crate::Cfg::build".into(), EdgeKind::AssociatedCall)));
+        assert!(
+            !out.iter().any(|(t, _)| t.ends_with("::drop")),
+            "no edge to Guard's drop: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_call_never_binds_to_a_method_of_a_primitive_impl() {
+        // `impl Double for u32` scopes its method under a lowercase `u32`, so
+        // only the method check (not the type-name one) can refuse it.
+        let g = parse(
+            r#"
+            trait Double { fn double(&self) -> u32; }
+            impl Double for u32 { fn double(&self) -> u32 { *self * 2 } }
+            fn run() -> u32 { double(3) + 3u32.double() }
+            "#,
+        );
+        let out = edges_from(&g, "crate::run");
+        assert!(
+            out.contains(&("double".into(), EdgeKind::Unresolved)),
+            "a bare `double(3)` is not a method call: {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|(t, k)| t.ends_with("::double") && *k == EdgeKind::DirectCall),
+            "{out:?}"
+        );
+        assert!(out.iter().any(|(_, k)| *k == EdgeKind::MethodCall));
+    }
+
+    #[test]
+    fn a_nested_fn_is_found_before_a_same_named_one_elsewhere() {
+        let g = parse(
+            r#"
+            struct Tree;
+            impl Tree {
+                fn flatten(&self) { fn walk() { walk(); } walk(); }
+            }
+            fn count() { fn walk() {} walk(); }
+            "#,
+        );
+        assert_eq!(
+            edges_from(&g, "crate::count"),
+            vec![("crate::count::walk".into(), EdgeKind::DirectCall)]
+        );
+        assert_eq!(
+            edges_from(&g, "crate::Tree::flatten"),
+            vec![("crate::Tree::flatten::walk".into(), EdgeKind::DirectCall)]
+        );
+        assert_eq!(
+            edges_from(&g, "crate::Tree::flatten::walk"),
+            vec![("crate::Tree::flatten::walk".into(), EdgeKind::DirectCall)],
+            "a nested fn's recursion stays in its own scope"
+        );
+    }
+
+    #[test]
+    fn a_bare_spawn_reference_never_starts_a_method() {
+        let g = parse(
+            r#"
+            struct Server;
+            impl Server {
+                fn serve(&self) {}
+                fn listen() {}
+                fn start() { std::thread::spawn(Self::listen); }
+            }
+            fn main() { std::thread::spawn(serve); }
+            "#,
+        );
+        assert!(
+            spawn_targets(&g, "crate::main").is_empty(),
+            "`serve` takes self; a bare name cannot pass it"
+        );
+        assert_eq!(
+            spawn_targets(&g, "crate::Server::start"),
+            vec!["crate::Server::listen"]
+        );
+    }
+
+    #[test]
     fn nested_and_same_line_spawns_get_distinct_nodes() {
         let g = parse(
             r#"

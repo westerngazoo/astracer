@@ -49,6 +49,35 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_call_never_binds_to_a_method() {
+        // The global `setTimeout(...)` is not the method `Timer.setTimeout`.
+        let g = parse(
+            r#"
+            class Timer {
+                setTimeout(): void {}
+            }
+            function main(t: Timer) {
+                setTimeout(tick, 10);
+                t.setTimeout();
+            }
+            "#,
+        );
+        let main = g.node_by_qualified("app::main").expect("main present");
+        let out: Vec<(String, EdgeKind)> = g
+            .edges_out(main)
+            .map(|(to, e)| (g.node(to).qualified_name.clone(), e.kind))
+            .collect();
+        assert!(
+            out.contains(&("setTimeout".to_string(), EdgeKind::Unresolved)),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&("app::Timer::setTimeout".to_string(), EdgeKind::MethodCall)),
+            "{out:?}"
+        );
+    }
+
+    #[test]
     fn extracts_functions_and_direct_calls() {
         let g = parse(
             r#"

@@ -353,6 +353,11 @@ fn resolve_target(
     caller_module: &str,
 ) -> NodeId {
     if let Some(cands) = by_short.get(&call.short) {
+        let cands: Vec<NodeId> = cands
+            .iter()
+            .copied()
+            .filter(|&id| can_name(call.kind, graph.node(id)))
+            .collect();
         match cands.as_slice() {
             [] => {}
             [only] => return *only,
@@ -370,6 +375,13 @@ fn resolve_target(
     }
     let key = call.short.clone();
     graph.intern_node(&key, || Node::external(key.clone()))
+}
+
+/// Whether a definition can be what a call of this syntactic class names. A
+/// bare `f()` never reaches a method: calling one needs a receiver (`x.M()`), so a method
+/// that merely shares the name is not evidence. `x.F()` stays open to both: it is just as often a package function, `pkg.F()`.
+fn can_name(call: CallClass, def: &Node) -> bool {
+    call != CallClass::Direct || !def.flags.is_method
 }
 
 // ---------------------------------------------------------------------------

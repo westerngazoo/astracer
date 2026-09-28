@@ -46,6 +46,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_call_never_binds_to_a_method() {
+        // The builtin `open("x")` is not the method `File.open`.
+        let g = parse(
+            "class File:\n    def open(self):\n        pass\n\ndef main():\n    f = open(\"x\")\n    File().open()\n",
+        );
+        let main = g.node_by_qualified("pkg::mod::main").expect("main present");
+        let out: Vec<(String, EdgeKind)> = g
+            .edges_out(main)
+            .map(|(to, e)| (g.node(to).qualified_name.clone(), e.kind))
+            .collect();
+        assert!(
+            out.contains(&("open".to_string(), EdgeKind::Unresolved)),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&("pkg::mod::File::open".to_string(), EdgeKind::MethodCall)),
+            "{out:?}"
+        );
+    }
+
+    #[test]
     fn extracts_functions_and_direct_calls() {
         let g = parse(
             "def helper(x):\n    return x + 1\n\ndef main():\n    a = helper(1)\n    b = helper(a)\n",

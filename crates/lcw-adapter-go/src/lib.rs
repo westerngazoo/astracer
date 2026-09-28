@@ -50,6 +50,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_call_never_binds_to_a_method() {
+        // The builtin `close(ch)` is not the method `conn.close`.
+        let g = parse(
+            "package sample\n\ntype conn struct{}\n\nfunc (c *conn) close() {}\n\nfunc run(ch chan int, c *conn) {\n\tclose(ch)\n\tc.close()\n}\n",
+        );
+        let run = g.node_by_qualified("sample::run").expect("run present");
+        let mut out: Vec<(String, EdgeKind)> = g
+            .edges_out(run)
+            .map(|(to, e)| (g.node(to).qualified_name.clone(), e.kind))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            out,
+            vec![
+                ("close".to_string(), EdgeKind::Unresolved),
+                ("sample::conn::close".to_string(), EdgeKind::MethodCall),
+            ]
+        );
+    }
+
+    #[test]
     fn extracts_functions_and_direct_calls() {
         let g = parse(
             "package sample\n\nfunc helper(x int) int { return x + 1 }\n\nfunc run() {\n\thelper(1)\n\thelper(2)\n}\n",

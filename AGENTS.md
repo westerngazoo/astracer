@@ -50,8 +50,14 @@ When adding or changing code, keep an eye on:
   qualified call (`Type::f`, `module::f`) must match its qualifier; otherwise
   it stays an `External` node. Inventing an edge is worse than missing one:
   a wrong edge makes `flow`/`calls` lie, a missing one is visible as "external".
-- Ambiguous short names resolve nearest-first: same module, then same crate,
-  then first declared.
+- Ambiguous short names resolve nearest-first: declared in the caller's own
+  body, then same module, then same crate, then first declared.
+- A call's syntax limits what it can name, and a same-named definition of
+  the wrong kind is not evidence. In Rust, `x.f()` binds only to a method (a
+  function taking `self`), a bare `f()` only to a free function (never a
+  method or a `Type::f`), and a macro never to a function. In every language
+  a bare `f()` never binds to a method; `x.f()` stays open where it may be a
+  package or module function (`pkg.F()`, `os.path.join()`).
 
 ## Coding conventions
 - Rust 2021, `cargo fmt` clean, `cargo clippy` warning-free.

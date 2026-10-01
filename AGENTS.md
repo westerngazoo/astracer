@@ -78,3 +78,43 @@ When adding or changing code, keep an eye on:
 - `bins/lcw-cli` - the standalone CLI.
 - `apps/desktop` - the Tauri v2 shell + Rust/WASM UI.
 - `docs/` - CI notes and the architecture review (`ARCHITECTURE_REVIEW.md`).
+
+## Delegated tasks
+Small, self-contained tasks are queued in [`docs/agent-tasks/`](docs/agent-tasks/)
+for any agent to pick up; the README there explains the loop. The short version:
+
+- One task, one branch (`cursor/T07-go-spawns`, `agent/T03-...`), one PR titled
+  `T07: <task title>`. The PR deletes the task's file, so the folder is the queue.
+- Do what the task's **Done when** asks and nothing else; if the task turns out
+  wrong or blocked, open a draft PR that says why instead of improvising.
+- Never merge your own PR. A reviewer re-runs every check, mutation-tests the new
+  tests, and merges or leaves review comments.
+- Never: hand-edit a lockfile (let `cargo` write it), add a dependency the task does
+  not name, skip/weaken/delete a test, touch Layer-1 resolution rules or
+  `CACHE_VERSION`, or push to `main`.
+
+Before opening a PR, run what applies and paste a one-line result for each.
+Always:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+If you touched `lcw-render`, `lcw-layout` or the CLI viewer:
+
+```sh
+cargo clippy -p lcw-cli -p lcw-render -p lcw-layout --features lcw-cli/viewer,lcw-render/native,lcw-layout/gpu --all-targets --locked -- -D warnings
+cargo test -p lcw-layout --features gpu --locked
+```
+
+If you touched `lcw-core`, `lcw-query`, `lcw-render` or `apps/desktop/frontend`:
+
+```sh
+cargo check --manifest-path apps/desktop/frontend/Cargo.toml --target wasm32-unknown-unknown --locked
+cargo clippy --manifest-path apps/desktop/frontend/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+```
+
+UI changes also run the browser tests in `apps/desktop/frontend/tests/` (each
+file's header says how).

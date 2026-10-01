@@ -1,0 +1,8 @@
+---
+description: Project rules for every agent in this repository
+alwaysApply: true
+---
+Read and follow `AGENTS.md` at the repository root before changing anything.
+Delegated work comes from `docs/agent-tasks/`: pick one task file, follow its
+**Done when** list exactly, and open a PR as `AGENTS.md` ("Delegated tasks")
+describes. Do not merge.

@@ -370,8 +370,20 @@ fn cargo(args: &[&str]) -> Result<(), String> {
     }
 }
 
+fn trunk_command() -> Command {
+    let mut cmd = Command::new("trunk");
+    // Trunk's `--no-color` is a clap flag. When `NO_COLOR=1` is in the
+    // environment, clap treats it as `--no-color=1`, which trunk rejects.
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    cmd.env_remove("NO_COLOR");
+    if no_color {
+        cmd.arg("--no-color");
+    }
+    cmd
+}
+
 fn trunk_build(out: &Path) -> Result<(), String> {
-    let status = Command::new("trunk")
+    let status = trunk_command()
         .args(["build", "--release", "--dist"])
         .arg(out)
         .current_dir(frontend_dir())

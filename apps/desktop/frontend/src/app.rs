@@ -819,6 +819,28 @@ pub fn App() -> impl IntoView {
             }
             let state = state.clone();
             let sem = semantic.get_untracked();
+            if !hosted {
+                if sem {
+                    error.set(Some(
+                        "Semantic analysis requires the Tauri desktop app (rust-analyzer cannot \
+                         run in the browser). Run `cargo tauri dev -- --features semantic` from \
+                         apps/desktop/src-tauri, or pre-bake a fixture with \
+                         `lcw-dev ui --semantic <repo>`."
+                            .into(),
+                    ));
+                    return;
+                }
+                if transport::looks_like_filesystem_path(&repo) {
+                    error.set(Some(
+                        format!(
+                            "Browser dev mode cannot analyze a repository path ({repo}). \
+                             Leave the path empty to reload fixture.json, or run \
+                             `lcw-dev ui <repo>` to refresh the fixture."
+                        ),
+                    ));
+                    return;
+                }
+            }
             busy.set(true);
             error.set(None);
             nav.reset();
@@ -1023,11 +1045,22 @@ pub fn App() -> impl IntoView {
                     prop:value=move || path.get()
                     on:input=move |ev| path.set(target_value(&ev))
                 />
-                <label class="mode" title="Use the rust-analyzer backend when available">
+                <label
+                    class="mode"
+                    class:disabled=move || !transport::semantic_available()
+                    title=move || {
+                        if transport::semantic_available() {
+                            "Use the rust-analyzer backend when available"
+                        } else {
+                            "Semantic analysis requires the Tauri desktop app (cargo tauri dev -- --features semantic)"
+                        }
+                    }
+                >
                     <input
                         type="checkbox"
                         prop:checked=move || semantic.get()
                         on:change=move |ev| semantic.set(target_checked(&ev))
+                        disabled=move || !transport::semantic_available()
                     />
                     "semantic"
                 </label>

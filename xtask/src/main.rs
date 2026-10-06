@@ -17,7 +17,7 @@
 //! ```text
 //! cargo install --path xtask
 //! lcw-dev doctor [--mode browser|native|all]
-//! lcw-dev ui   [REPO] [--port N] [--no-open]
+//! lcw-dev ui   [REPO] [--port N] [--no-open] [--semantic]
 //! lcw-dev view [REPO] [--module]
 //! ```
 //!
@@ -44,6 +44,7 @@ COMMANDS:
     update          Fast-forward this checkout to origin/main; reinstall
                     lcw-dev if the runner itself changed
     ui [REPO]       Browser dev mode: build the UI, analyze REPO, serve it
+    --semantic      ui only: analyze with rust-analyzer (needs semantic build)
     view [REPO]     Native viewer window (wgpu)
 
 OPTIONS:
@@ -108,6 +109,7 @@ struct Options {
     repo: Option<PathBuf>,
     port: Option<u16>,
     no_open: bool,
+    semantic: bool,
     module: bool,
     mode: Option<Mode>,
 }
@@ -127,6 +129,7 @@ impl Options {
                     out.mode = Some(Mode::parse(v)?);
                 }
                 "--no-open" => out.no_open = true,
+                "--semantic" => out.semantic = true,
                 "--module" => out.module = true,
                 flag if flag.starts_with('-') => return Err(format!("unknown flag: {flag}")),
                 positional => {
@@ -250,24 +253,34 @@ fn cmd_ui(opts: &Options) -> Result<(), String> {
 
     let out = browser_out();
     step("building the analyzer");
-    cargo(&["build", "-p", "lcw-cli", "--features", "viewer"])?;
+    let analyzer_features = if opts.semantic {
+        "viewer,semantic"
+    } else {
+        "viewer"
+    };
+    cargo(&["build", "-p", "lcw-cli", "--features", analyzer_features])?;
 
     step(&format!("building the wasm UI into {}", out.display()));
     trunk_build(&out)?;
 
-    step(&format!("analyzing {}", repo.display()));
+    step(&format!(
+        "analyzing {} ({})",
+        repo.display(),
+        if opts.semantic { "semantic" } else { "fast" }
+    ));
     let fixture = out.join("fixture.json");
-    run_tool(
-        &lcw_binary("debug"),
-        &[
-            "analyze".into(),
-            path_arg(&repo),
-            "--format".into(),
-            "view".into(),
-            "-o".into(),
-            path_arg(&fixture),
-        ],
-    )?;
+    let mut analyze_args = vec![
+        "analyze".into(),
+        path_arg(&repo),
+        "--format".into(),
+        "view".into(),
+        "-o".into(),
+        path_arg(&fixture),
+    ];
+    if opts.semantic {
+        analyze_args.push("--semantic".into());
+    }
+    run_tool(&lcw_binary("debug"), &analyze_args)?;
 
     let url = format!("http://127.0.0.1:{port}/");
     println!("\n    {url}");
@@ -446,10 +459,11 @@ mod tests {
     #[test]
     fn parses_flags_and_one_positional() {
         let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
-        let o = Options::parse(&a("/tmp/repo --port 9000 --no-open")).unwrap();
+        let o = Options::parse(&a("/tmp/repo --port 9000 --no-open --semantic")).unwrap();
         assert_eq!(o.repo, Some(PathBuf::from("/tmp/repo")));
         assert_eq!(o.port(), 9000);
         assert!(o.no_open);
+        assert!(o.semantic);
 
         let o = Options::parse(&[]).unwrap();
         assert_eq!(o.port(), 8765);

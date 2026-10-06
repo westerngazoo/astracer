@@ -91,6 +91,42 @@ pub fn has_tauri() -> bool {
 /// Default fixture URL for browser dev mode, relative to the served page.
 pub const DEFAULT_FIXTURE: &str = "fixture.json";
 
+/// Whether the UI can run rust-analyzer-backed analysis. Only the native Tauri
+/// host runs the engine; browser dev mode reloads a pre-baked fixture.
+pub fn semantic_available() -> bool {
+    has_tauri()
+}
+
+/// Whether `path` names a host filesystem location rather than a URL the page
+/// can fetch. Browser dev mode cannot read arbitrary paths — only HTTP(S)
+/// resources served alongside the wasm bundle (typically [`DEFAULT_FIXTURE`]).
+pub fn looks_like_filesystem_path(path: &str) -> bool {
+    let p = path.trim();
+    if p.is_empty() {
+        return false;
+    }
+    p.starts_with('/')
+        || p.starts_with('\\')
+        || p.starts_with("~/")
+        || (p.len() >= 2 && p.as_bytes().get(1) == Some(&b':'))
+}
+
+/// Resolve the fetch target for browser dev mode.
+pub fn fixture_fetch_url(path: &str) -> Result<String, String> {
+    let p = path.trim();
+    if p.is_empty() || p == DEFAULT_FIXTURE {
+        return Ok(DEFAULT_FIXTURE.to_string());
+    }
+    if looks_like_filesystem_path(p) {
+        return Err(format!(
+            "browser dev mode cannot analyze a repository path ({p}). \
+             Leave the path empty to reload fixture.json, or run `lcw-dev ui <repo>` \
+             to refresh the fixture."
+        ));
+    }
+    Ok(p.to_string())
+}
+
 /// Browser dev mode transport: `analyze(path)` fetches `path` (or
 /// [`DEFAULT_FIXTURE`] when empty) as a `GraphView` JSON, i.e. the output of
 /// `lcw analyze --format view`. No engine runs in the browser; this is a
@@ -98,16 +134,26 @@ pub const DEFAULT_FIXTURE: &str = "fixture.json";
 pub struct FixtureTransport;
 
 impl EngineTransport for FixtureTransport {
-    async fn analyze(&self, path: String, _semantic: bool) -> Result<GraphView, String> {
-        let url = if path.trim().is_empty() {
-            DEFAULT_FIXTURE.to_string()
-        } else {
-            path
-        };
+    async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String> {
+        if semantic {
+            return Err(
+                "semantic analysis requires the Tauri desktop app (rust-analyzer cannot run in \
+                 the browser). Run `cargo tauri dev -- --features semantic` from \
+                 apps/desktop/src-tauri, or pre-bake a fixture with `lcw-dev ui --semantic <repo>`."
+                    .into(),
+            );
+        }
+        let url = fixture_fetch_url(&path)?;
         let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
         let response = JsFuture::from(window.fetch_with_str(&url))
             .await
-            .map_err(js_error_to_string)?;
+            .map_err(|_| {
+                format!(
+                    "could not load {url}. Browser dev mode only serves files from the lcw-dev \
+                     ui server — leave the path empty to reload fixture.json, or run \
+                     `lcw-dev ui <repo>` to refresh the analysis."
+                )
+            })?;
         let response: web_sys::Response = response
             .dyn_into()
             .map_err(|_| "fetch did not return a Response".to_string())?;
@@ -151,4 +197,26 @@ fn js_error_to_string(value: JsValue) -> String {
     value
         .as_string()
         .unwrap_or_else(|| format!("engine error: {value:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_paths_are_detected() {
+        assert!(!looks_like_filesystem_path(""));
+        assert!(!looks_like_filesystem_path("fixture.json"));
+        assert!(looks_like_filesystem_path("/Users/me/repo"));
+        assert!(looks_like_filesystem_path("C:\\repo"));
+        assert!(looks_like_filesystem_path("~/projects/livewalk"));
+    }
+
+    #[test]
+    fn fixture_url_defaults_and_rejects_host_paths() {
+        assert_eq!(fixture_fetch_url("").unwrap(), DEFAULT_FIXTURE);
+        assert_eq!(fixture_fetch_url("fixture.json").unwrap(), DEFAULT_FIXTURE);
+        assert_eq!(fixture_fetch_url("other.json").unwrap(), "other.json");
+        assert!(fixture_fetch_url("/tmp/repo").is_err());
+    }
 }

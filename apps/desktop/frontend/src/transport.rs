@@ -193,7 +193,10 @@ pub fn on_progress(mut handler: impl FnMut(Progress) + 'static) {
 }
 
 /// Arguments for the `read_source_snippet` command.
+///
+/// Tauri v2 maps Rust `snake_case` command parameters to `camelCase` IPC keys.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ReadSourceArgs {
     file: String,
     start_line: u32,

@@ -1663,6 +1663,8 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
             let flags = (!card.flags.is_empty())
                 .then(|| view! { <div class="flags">{card.flags.join(" · ")}</div> });
             let badge = entry_badge(card.entry);
+            let inputs = calls_view(&card.inputs, "←", &go);
+            let outputs = calls_view(&card.outputs, "→", &go);
             let m = card.metrics;
             let (fan_in, fan_out) = (card.fan_in, card.fan_out);
             let (n_in, n_out) = (card.inputs.len(), card.outputs.len());
@@ -1687,7 +1689,7 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                         </div>
                     </div>
                     <div class="qname">{card.qualified_name.clone()}</div>
-                    <div class="meta" title=full_location>{meta}{badge}</div>
+                    <div class="meta" title=full_location.clone()>{meta}{badge}</div>
                     {flags}
                     <div class="detail-tabs">
                         <button
@@ -1700,10 +1702,7 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                         >"Code"</button>
                     </div>
 
-                    {move || if tab.get() == DetailTab::Details {
-                        let inputs = calls_view(&card.inputs, "←", &go);
-                        let outputs = calls_view(&card.outputs, "→", &go);
-                        view! {
+                    <div class="detail-details" style:display=move || if tab.get() == DetailTab::Details { "block" } else { "none" }>
                     <ul class="stats compact">
                         <li><span>"complexity"</span><b>{m.cyclomatic}</b></li>
                         <li><span>"fan-in / out"</span><b>{format!("{fan_in} / {fan_out}")}</b></li>
@@ -1784,10 +1783,10 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                             }
                         })
                     }}
-                        }.into_any()
-                    } else {
-                        source_code_view(nav, &full_location).into_any()
-                    }}
+                    </div>
+                    <div class="detail-code" style:display=move || if tab.get() == DetailTab::Code { "block" } else { "none" }>
+                        {move || source_code_view(nav, &full_location)}
+                    </div>
                 </div>
             }
         })

@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use lcw_config::{AdapterMode, Config};
-use lcw_core::{GroupBox, ReportSnapshot};
+use lcw_core::{GroupBox, ReportSnapshot, SourceSnippet};
 use lcw_engine::{Engine, Progress as EngineProgress};
 use lcw_layout::LayoutParams;
 use serde::Serialize;
@@ -117,11 +117,50 @@ fn emit_progress(window: &Window, progress: EngineProgress) {
     emit(window, phase, message);
 }
 
+/// Read a source snippet for the detail pane's Code tab.
+///
+/// `start_line`/`end_line` are the node's span (1-based, inclusive). A few
+/// context lines are included and the result is capped so the webview stays
+/// responsive.
+#[tauri::command]
+fn read_source_snippet(file: String, start_line: u32, end_line: u32) -> Result<SourceSnippet, String> {
+    const CONTEXT: u32 = 5;
+    const MAX_LINES: u32 = 80;
+    lcw_core::read_snippet(&file, start_line, end_line, CONTEXT, MAX_LINES).ok_or_else(|| {
+        if file.is_empty() {
+            "no source file for this node".into()
+        } else {
+            format!("could not read {file}")
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_source_snippet_command_reads_file() {
+        let dir = std::env::temp_dir().join("lcw_tauri_snippet");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cmd.rs");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "fn main() {{}}").unwrap();
+        }
+        let p = path.to_string_lossy().into_owned();
+        let snip = read_source_snippet(p, 1, 1).unwrap();
+        assert_eq!(snip.lines.len(), 1);
+        assert_eq!(snip.lines[0].text, "fn main() {}");
+    }
+}
+
 /// Build and run the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![analyze_repo])
+        .invoke_handler(tauri::generate_handler![analyze_repo, read_source_snippet])
         .run(tauri::generate_context!())
         .expect("error while running Live Code Walk");
 }

@@ -14,7 +14,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use lcw_core::{CodeGraph, Diagnostic, EdgeKind, GroupBox, NodeId, NodeKind, Suggestion, Summary};
+use lcw_core::{
+    CodeGraph, Diagnostic, EdgeKind, GroupBox, NodeId, NodeKind, SourceSnippet, Suggestion, Summary,
+};
 use lcw_query::{
     branches, call_tree, connection, edge_kind_str, entry_points, kind_str, node_card, outline,
     primary_entry, reach_count, run_roots, CallRef, CallTreeNode, CallTreeOptions, Connection,
@@ -468,6 +470,23 @@ fn tree_item(graph: &CodeGraph, n: &CallTreeNode) -> TreeItem {
     }
 }
 
+/// Source code shown in the detail pane's Code tab.
+#[derive(Clone, Debug, PartialEq)]
+enum SourcePane {
+    Idle,
+    Loading,
+    Ready(SourceSnippet),
+    Error(String),
+    External,
+}
+
+/// Detail pane tab: metrics/flow vs source code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetailTab {
+    Details,
+    Code,
+}
+
 /// Reactive navigation state. All `Copy` signals, so it can be handed to
 /// every component and closure freely.
 #[derive(Clone, Copy)]
@@ -484,6 +503,9 @@ struct Nav {
     tree: RwSignal<Option<TreeItem>>,
     /// Previously selected nodes, for "back".
     history: RwSignal<Vec<usize>>,
+    /// Source snippet for the Code tab.
+    source: RwSignal<SourcePane>,
+    detail_tab: RwSignal<DetailTab>,
 }
 
 impl Nav {
@@ -497,6 +519,8 @@ impl Nav {
             flow: RwSignal::new(FlowKind::Idle),
             tree: RwSignal::new(None),
             history: RwSignal::new(Vec::new()),
+            source: RwSignal::new(SourcePane::Idle),
+            detail_tab: RwSignal::new(DetailTab::Details),
         }
     }
 
@@ -509,6 +533,8 @@ impl Nav {
         self.flow.set(FlowKind::Idle);
         self.tree.set(None);
         self.history.set(Vec::new());
+        self.source.set(SourcePane::Idle);
+        self.detail_tab.set(DetailTab::Details);
     }
 }
 
@@ -551,6 +577,29 @@ type RunRowsFn = Rc<dyn Fn(&[RootRow], &OpenPaths) -> Vec<RunRow>>;
 /// (`{move || ...}` blocks) to be `Send`, and `Actions` is not, so views hold
 /// this thread-local-storage handle and fetch the closures when they run.
 type ActionsHandle = StoredValue<Actions, LocalStorage>;
+
+/// Fetch source for the Code tab (Tauri only). Ignores stale responses when
+/// the user has already moved to another node.
+fn load_node_source(nav: Nav, idx: usize, card: &NodeCard) {
+    if card.file.is_empty() {
+        nav.source.set(SourcePane::External);
+        return;
+    }
+    nav.source.set(SourcePane::Loading);
+    let file = card.file.clone();
+    let start = card.line;
+    let end = card.end_line;
+    spawn_local(async move {
+        let result = transport::read_source_snippet(file, start, end).await;
+        if nav.selected.get_untracked() != Some(idx) {
+            return;
+        }
+        nav.source.set(match result {
+            Ok(snip) => SourcePane::Ready(snip),
+            Err(e) => SourcePane::Error(e),
+        });
+    });
+}
 
 /// Select a node: query its card, call tree and (if an anchor is set) the
 /// flow path, then recolor the scene and optionally move the camera.
@@ -618,10 +667,11 @@ fn select_node(
         }
     }
     nav.selected.set(Some(idx));
-    nav.card.set(Some(card));
+    nav.card.set(Some(card.clone()));
     nav.tree.set(Some(tree));
     nav.chain.set(chain.clone());
     nav.flow.set(flow);
+    load_node_source(nav, idx, &card);
     // The detail pane keeps its scroll position, so after clicking something
     // far down (a callee, a call-tree row) the new node's header would be
     // above the fold. Bring it back into view.
@@ -647,6 +697,8 @@ fn clear_selection(state: &Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) {
     nav.tree.set(None);
     nav.chain.set(Vec::new());
     nav.flow.set(FlowKind::Idle);
+    nav.source.set(SourcePane::Idle);
+    nav.detail_tab.set(DetailTab::Details);
     {
         let mut s = state.borrow_mut();
         s.selected = None;
@@ -1611,18 +1663,18 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
             let flags = (!card.flags.is_empty())
                 .then(|| view! { <div class="flags">{card.flags.join(" · ")}</div> });
             let badge = entry_badge(card.entry);
-            let inputs = calls_view(&card.inputs, "←", &go);
-            let outputs = calls_view(&card.outputs, "→", &go);
             let m = card.metrics;
             let (fan_in, fan_out) = (card.fan_in, card.fan_out);
             let (n_in, n_out) = (card.inputs.len(), card.outputs.len());
             let full_location = card.location();
             let meta = format!("{} · {}", kind_str(card.kind), compact_location(&full_location));
 
-            let trace = a.trace.clone();
             let back = a.back.clone();
             let locate = a.locate.clone();
             let clear = a.clear.clone();
+            let tab = nav.detail_tab;
+            let on_details = move |_| tab.set(DetailTab::Details);
+            let on_code = move |_| tab.set(DetailTab::Code);
 
             view! {
                 <div class="card detail">
@@ -1637,6 +1689,21 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                     <div class="qname">{card.qualified_name.clone()}</div>
                     <div class="meta" title=full_location>{meta}{badge}</div>
                     {flags}
+                    <div class="detail-tabs">
+                        <button
+                            class=move || if tab.get() == DetailTab::Details { "tab active" } else { "tab" }
+                            on:click=on_details
+                        >"Details"</button>
+                        <button
+                            class=move || if tab.get() == DetailTab::Code { "tab active" } else { "tab" }
+                            on:click=on_code
+                        >"Code"</button>
+                    </div>
+
+                    {move || if tab.get() == DetailTab::Details {
+                        let inputs = calls_view(&card.inputs, "←", &go);
+                        let outputs = calls_view(&card.outputs, "→", &go);
+                        view! {
                     <ul class="stats compact">
                         <li><span>"complexity"</span><b>{m.cyclomatic}</b></li>
                         <li><span>"fan-in / out"</span><b>{format!("{fan_in} / {fan_out}")}</b></li>
@@ -1649,7 +1716,7 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                     <div class="flow">
                         <div class="flow-head">
                             <h4>"Flow"</h4>
-                            <button class="small" on:click=move |_| trace() title="Use this node as the flow source; then pick a target">"trace from here"</button>
+                            <button class="small" on:click=move |_| actions.with_value(|x| x.trace.clone())() title="Use this node as the flow source; then pick a target">"trace from here"</button>
                             {move || nav.anchor.get().map(|_| {
                                 let clear_flow = actions.with_value(|x| x.clear_flow.clone());
                                 view! { <button class="small" on:click=move |_| clear_flow() title="Forget the flow source">"clear"</button> }
@@ -1717,9 +1784,58 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                             }
                         })
                     }}
+                        }.into_any()
+                    } else {
+                        source_code_view(nav, &full_location).into_any()
+                    }}
                 </div>
             }
         })
+    }
+}
+
+/// The Code tab: monospace snippet with line numbers and the node's span highlighted.
+fn source_code_view(nav: Nav, location: &str) -> AnyView {
+    match nav.source.get() {
+        SourcePane::Idle | SourcePane::Loading => {
+            view! { <p class="hint code-status">"Loading source…"</p> }.into_any()
+        }
+        SourcePane::External => {
+            view! { <p class="hint code-status">"No source file — this node is external or unresolved."</p> }.into_any()
+        }
+        SourcePane::Error(msg) => {
+            view! { <p class="hint warn code-status">{msg}</p> }.into_any()
+        }
+        SourcePane::Ready(snip) => {
+            let header = format!(
+                "{}:{}-{}",
+                compact_location(location),
+                snip.highlight_start,
+                snip.highlight_end
+            );
+            let rows: Vec<AnyView> = snip
+                .lines
+                .iter()
+                .map(|line| {
+                    let hl = line.number >= snip.highlight_start && line.number <= snip.highlight_end;
+                    let cls = if hl { "code-line hl" } else { "code-line" };
+                    view! {
+                        <div class=cls>
+                            <span class="ln">{line.number}</span>
+                            <span class="src">{line.text.clone()}</span>
+                        </div>
+                    }
+                    .into_any()
+                })
+                .collect();
+            view! {
+                <div class="code-pane">
+                    <div class="code-head" title=snip.file.clone()>{header}</div>
+                    <pre class="code-block">{rows}</pre>
+                </div>
+            }
+            .into_any()
+        }
     }
 }
 

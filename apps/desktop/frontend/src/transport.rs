@@ -12,6 +12,7 @@
 //! * A future `VsCodeTransport` would implement the same trait over
 //!   `acquireVsCodeApi().postMessage` + `window.addEventListener("message")`.
 
+use lcw_core::SourceSnippet;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -189,6 +190,38 @@ pub fn on_progress(mut handler: impl FnMut(Progress) + 'static) {
         let _ = tauri_listen("analyze-progress", &closure).await;
         closure.forget();
     });
+}
+
+/// Arguments for the `read_source_snippet` command.
+#[derive(Serialize)]
+struct ReadSourceArgs {
+    file: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+/// Read source lines for a node. Only available in the Tauri desktop shell.
+pub async fn read_source_snippet(
+    file: String,
+    start_line: u32,
+    end_line: u32,
+) -> Result<SourceSnippet, String> {
+    if !has_tauri() {
+        return Err(
+            "source viewing requires the Tauri desktop app (browser dev mode cannot read arbitrary files)"
+                .into(),
+        );
+    }
+    let args = serde_wasm_bindgen::to_value(&ReadSourceArgs {
+        file,
+        start_line,
+        end_line,
+    })
+    .map_err(|e| format!("serializing args: {e}"))?;
+    let value = tauri_invoke("read_source_snippet", args)
+        .await
+        .map_err(js_error_to_string)?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding snippet: {e}"))
 }
 
 /// Tauri rejects a command with the `Err` string; surface it verbatim, falling

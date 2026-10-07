@@ -674,6 +674,87 @@
         color: #e6b673;
       }
 
+      .detail-tabs {
+        display: flex;
+        gap: 4px;
+        margin: 10px 0 8px;
+      }
+
+      .detail-tabs .tab {
+        flex: 1;
+        padding: 5px 8px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .detail-tabs .tab.active {
+        color: var(--accent-2);
+        border-color: rgba(76, 140, 242, 0.5);
+        background: rgba(76, 140, 242, 0.12);
+      }
+
+      .code-pane {
+        margin-top: 4px;
+      }
+
+      .code-head {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 6px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .code-block {
+        margin: 0;
+        padding: 8px 0;
+        max-height: 420px;
+        overflow: auto;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid var(--border);
+        font-family: var(--mono);
+        font-size: 11.5px;
+        line-height: 1.45;
+      }
+
+      .code-line {
+        display: flex;
+        gap: 10px;
+        padding: 0 10px;
+        white-space: pre;
+      }
+
+      .code-line.hl {
+        background: rgba(76, 140, 242, 0.14);
+      }
+
+      .code-line .ln {
+        flex-shrink: 0;
+        width: 3.5em;
+        text-align: right;
+        color: var(--muted);
+        user-select: none;
+      }
+
+      .code-line .src {
+        flex: 1;
+        min-width: 0;
+        color: var(--text);
+      }
+
+      .code-status {
+        margin-top: 8px;
+      }
+
       /* ---- report cards ---------------------------------------------------- */
 
       ul.list {

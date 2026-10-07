@@ -64,20 +64,6 @@ pub fn format_text(graph: &CodeGraph, fp: &FlowPaths) -> String {
     out
 }
 
-/// Read lines `[start, end]` (1-based, inclusive) from `file`, best-effort.
-fn read_snippet(file: &str, start: u32, end: u32) -> Option<String> {
-    if file.is_empty() {
-        return None;
-    }
-    let text = std::fs::read_to_string(file).ok()?;
-    let lines: Vec<&str> = text.lines().collect();
-    let start = (start.max(1) as usize).min(lines.len());
-    if start == 0 || start > lines.len() {
-        return None;
-    }
-    let end = (end.max(start as u32) as usize).min(lines.len());
-    Some(lines[start - 1..end].join("\n"))
-}
 
 /// Serialize a traced flow to JSON — a scoped, LLM-friendly slice: the endpoints
 /// plus each shortest path as an ordered list of nodes with `file:line` (and,
@@ -97,7 +83,13 @@ pub fn to_json(graph: &CodeGraph, fp: &FlowPaths, snippets: bool) -> serde_json:
             "line": n.span.start_line,
         });
         if snippets {
-            if let Some(code) = read_snippet(&file, n.span.start_line, n.span.end_line) {
+            if let Some(snip) = lcw_core::read_snippet(&file, n.span.start_line, n.span.end_line, 0, 10_000) {
+                let code = snip
+                    .lines
+                    .iter()
+                    .map(|l| l.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 obj["code"] = serde_json::Value::String(code);
             }
         }

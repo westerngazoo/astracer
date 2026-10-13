@@ -30,6 +30,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 # The engine and the shared domain types. The UI depends *only* on the engine
 # facade (Principle I), never on individual analysis layers.

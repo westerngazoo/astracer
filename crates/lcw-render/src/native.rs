@@ -167,7 +167,7 @@ pub fn run(
     crate::groups::draw_groups(&mut scene, groups, true);
     let infos = build_node_infos(graph);
     let labels: Vec<String> = infos.iter().map(|i| i.title.clone()).collect();
-    run_app("Live Code Walk", scene, labels, infos, Some(graph.clone()))
+    run_app("Live Code Walk", scene, labels, infos, Some(graph.clone()), groups.to_vec())
 }
 
 /// Open a window on a prebuilt [`SceneData`] with per-node pick `labels`
@@ -175,7 +175,7 @@ pub fn run(
 /// aggregated scene rather than one function node per graph node. Blocks until
 /// the window is closed.
 pub fn run_scene(scene: SceneData, labels: Vec<String>) -> Result<(), RenderError> {
-    run_app("Live Code Walk", scene, labels, Vec::new(), None)
+    run_app("Live Code Walk", scene, labels, Vec::new(), None, Vec::new())
 }
 
 fn run_app(
@@ -184,11 +184,12 @@ fn run_app(
     labels: Vec<String>,
     infos: Vec<NodeInfo>,
     graph: Option<CodeGraph>,
+    groups: Vec<lcw_core::GroupBox>,
 ) -> Result<(), RenderError> {
     let event_loop = EventLoop::new().map_err(|e| RenderError::Window(e.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(title, scene, labels, infos, graph);
+    let mut app = App::new(title, scene, labels, infos, graph, groups);
     event_loop
         .run_app(&mut app)
         .map_err(|e| RenderError::Window(e.to_string()))
@@ -368,6 +369,9 @@ struct App {
     /// Selection, flow source and how they connect: the same state machine the
     /// web UI runs (see [`crate::interact`]), which is what the tests cover.
     sel: Selection,
+    /// Crate boxes for grouped layouts; used to zoom when the background of a
+    /// box is clicked (same as the wasm UI).
+    groups: Vec<lcw_core::GroupBox>,
 }
 
 impl App {
@@ -377,6 +381,7 @@ impl App {
         labels: Vec<String>,
         infos: Vec<NodeInfo>,
         graph: Option<CodeGraph>,
+        groups: Vec<lcw_core::GroupBox>,
     ) -> Self {
         App {
             title: title.to_string(),
@@ -384,6 +389,7 @@ impl App {
             labels,
             infos,
             graph,
+            groups,
             camera: Camera2D::default(),
             gfx: None,
             cursor: Vec2::ZERO,
@@ -504,7 +510,11 @@ impl App {
         match interact::pick_node(&self.scene, world.into(), slop) {
             Some(idx) => self.select(idx),
             None => {
-                if self.sel.miss() {
+                if let Some(gi) = interact::pick_group(&self.groups, world.into()) {
+                    let b = &self.groups[gi];
+                    self.camera.fit(b.min.into(), b.max.into());
+                    self.request_redraw();
+                } else if self.sel.miss() {
                     self.refresh_selection();
                 }
             }

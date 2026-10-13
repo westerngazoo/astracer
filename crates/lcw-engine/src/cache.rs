@@ -128,12 +128,17 @@ pub fn hash_text(text: &str) -> u64 {
 /// Resolve the cache file for `root` given the `[cache]` config.
 ///
 /// * An explicit `dir` is used verbatim (relative to `root` if not absolute).
-/// * Otherwise a per-repository directory under the user's cache home is used,
-///   so the cache never pollutes the analyzed tree.
+///   **Opt-in only:** relative paths create directories inside the analyzed
+///   repository; prefer leaving `dir` empty so artifacts stay under the cache
+///   home (see [`cache_home`]).
+/// * When `dir` is empty, a per-repository directory under the user's cache
+///   home is used (`…/livewalk/{hash-of-canonical-root}/fragments.json`), so
+///   analysis never writes into the source tree by default.
 ///
 /// Returns `None` only if no cache home can be determined and no explicit dir
 /// was given (in practice always `Some`, since we fall back to the temp dir).
 pub fn cache_file(root: &Path, dir: &str) -> Option<PathBuf> {
+    let dir = dir.trim();
     if !dir.is_empty() {
         let base = PathBuf::from(dir);
         let base = if base.is_absolute() {
@@ -152,9 +157,18 @@ pub fn cache_file(root: &Path, dir: &str) -> Option<PathBuf> {
     )
 }
 
-/// The user's cache home: `$XDG_CACHE_HOME`, then `$HOME/.cache`, then
-/// `%LOCALAPPDATA%` (Windows), finally the OS temp dir.
-fn cache_home() -> Option<PathBuf> {
+/// Environment variable that overrides the cache home (when `[cache].dir` is
+/// empty). Useful for tests and for pinning all Livewalk caches to one folder.
+pub const CACHE_HOME_ENV: &str = "LIVEWALK_CACHE_HOME";
+
+/// The user's cache home: [`CACHE_HOME_ENV`], then `$XDG_CACHE_HOME`, then
+/// `$HOME/.cache`, then `%LOCALAPPDATA%` (Windows), finally the OS temp dir.
+pub fn cache_home() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var(CACHE_HOME_ENV) {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
     for var in ["XDG_CACHE_HOME", "HOME", "LOCALAPPDATA"] {
         if let Ok(v) = std::env::var(var) {
             if !v.is_empty() {
@@ -202,5 +216,30 @@ mod tests {
         let f = cache_file(Path::new("/repo"), ".livewalk-cache").unwrap();
         assert!(f.ends_with("fragments.json"));
         assert!(f.starts_with("/repo/.livewalk-cache"));
+    }
+
+    #[test]
+    fn default_dir_lives_under_cache_home_not_repo() {
+        let repo = Path::new("/tmp/some-analyzed-project");
+        let f = cache_file(repo, "").unwrap();
+        let home = cache_home().expect("cache home");
+        assert!(
+            f.starts_with(home.join("livewalk")),
+            "expected {:?} under {:?}/livewalk",
+            f,
+            home
+        );
+        assert!(
+            !f.starts_with(repo),
+            "default cache must not live inside the analyzed tree"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_dir_uses_cache_home() {
+        let repo = Path::new("/tmp/another-repo");
+        let f = cache_file(repo, "  \t  ").unwrap();
+        let home = cache_home().expect("cache home");
+        assert!(f.starts_with(home.join("livewalk")));
     }
 }

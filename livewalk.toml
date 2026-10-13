@@ -75,7 +75,9 @@ no_network = true
 # file's parsed fragment is cached by content hash, so re-analysis only
 # re-parses the files that actually changed.
 enabled = true
-# Cache location. Empty = a per-repo directory under the user's cache home,
-# so the cache never pollutes the analyzed tree. Relative paths resolve against
-# the repo root; absolute paths are used as-is.
+# Cache location. Empty = a per-repo directory under the user's cache home
+# ($XDG_CACHE_HOME or ~/.cache/livewalk/{hash}/fragments.json), so analysis
+# never writes into the source tree. Override the home with LIVEWALK_CACHE_HOME.
+# Relative paths resolve against the repo root (opt-in, pollutes the tree);
+# absolute paths are used as-is.
 dir = ""

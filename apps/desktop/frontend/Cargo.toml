@@ -36,6 +36,7 @@ features = [
     "HtmlElement",
     "HtmlCanvasElement",
     "HtmlInputElement",
+    "HtmlSelectElement",
     "CanvasRenderingContext2d",
     "DomRect",
     "Event",
@@ -44,6 +45,8 @@ features = [
     "Response",
     "WheelEvent",
     "console",
+    "Navigator",
+    "Clipboard",
 ]
 
 # Smaller, faster wasm in release (Trunk builds `--release`).

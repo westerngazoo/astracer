@@ -259,9 +259,10 @@ pub struct CacheConfig {
     /// other adapter the engine transparently falls back to a full parse.
     pub enabled: bool,
     /// Explicit cache directory. When empty (the default), the engine uses a
-    /// per-repository directory under the user's cache home, so the cache never
-    /// pollutes the analyzed tree. A relative path is resolved against the repo
-    /// root; an absolute path is used as-is.
+    /// per-repository directory under the user's cache home (`livewalk/{hash}/`
+    /// under `$LIVEWALK_CACHE_HOME`, `$XDG_CACHE_HOME`, or `~/.cache`), so
+    /// analysis never writes into the source tree. A relative path is resolved
+    /// against the repo root (opt-in); an absolute path is used as-is.
     pub dir: String,
 }
 

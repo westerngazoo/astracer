@@ -15,7 +15,7 @@
 //!
 //! Pure functions over plain data can be tested; an event loop cannot.
 
-use lcw_core::{CodeGraph, NodeId};
+use lcw_core::{CodeGraph, GroupBox, NodeId};
 use lcw_query::Connection;
 
 use crate::scene::SceneData;
@@ -65,6 +65,25 @@ pub fn pick_node(scene: &SceneData, world: [f32; 2], slop_world: f32) -> Option<
         let dist = (dx * dx + dy * dy).sqrt();
         if dist <= node.radius + slop_world && dist < best_dist {
             best_dist = dist;
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// The crate (group) box a click at `world` landed in. When several boxes
+/// contain the point, the smallest area wins so nested boxes would prefer the
+/// inner one (grouped layouts keep boxes disjoint).
+pub fn pick_group(boxes: &[GroupBox], world: [f32; 2]) -> Option<usize> {
+    let mut best = None;
+    let mut best_area = f32::INFINITY;
+    for (i, b) in boxes.iter().enumerate() {
+        if !b.contains(world) {
+            continue;
+        }
+        let area = (b.max[0] - b.min[0]) * (b.max[1] - b.min[1]);
+        if area < best_area {
+            best_area = area;
             best = Some(i);
         }
     }
@@ -240,6 +259,29 @@ mod tests {
         assert_eq!(pick_slop_world(1.0, 1.0), PICK_SLOP_PX);
         assert_eq!(pick_slop_world(4.0, 1.0), PICK_SLOP_PX / 4.0);
         assert_eq!(pick_slop_world(2.0, 2.0), PICK_SLOP_PX);
+    }
+
+    #[test]
+    fn pick_group_prefers_the_smallest_containing_box() {
+        let boxes = [
+            GroupBox {
+                name: "big".into(),
+                min: [0.0, 0.0],
+                max: [100.0, 100.0],
+                members: 1,
+                external: false,
+            },
+            GroupBox {
+                name: "small".into(),
+                min: [10.0, 10.0],
+                max: [30.0, 30.0],
+                members: 1,
+                external: false,
+            },
+        ];
+        assert_eq!(pick_group(&boxes, [50.0, 50.0]), Some(0));
+        assert_eq!(pick_group(&boxes, [20.0, 20.0]), Some(1));
+        assert_eq!(pick_group(&boxes, [-1.0, 0.0]), None);
     }
 
     #[test]

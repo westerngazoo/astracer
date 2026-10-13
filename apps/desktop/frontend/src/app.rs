@@ -33,10 +33,12 @@ use leptos::html::Canvas;
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent, WheelEvent};
 
-use crate::transport::{self, EngineTransport, FixtureTransport, TauriTransport};
+use crate::transport::{
+    self, EngineTransport, ExplainContext, ExplainMetrics, FixtureTransport, TauriTransport,
+};
 
 /// Bounded call tree shown under the selected node.
 const TREE_DEPTH: u32 = 3;
@@ -50,6 +52,12 @@ const FOCUS_ZOOM: f32 = 1.5;
 const ENTRIES_PER_KIND: usize = 12;
 /// Callers/callees listed in the detail pane before "… n more".
 const CALLS_SHOWN: usize = 30;
+/// Canvas click resolved to a node or a crate box background.
+enum PickResult {
+    Node(usize),
+    Group(usize),
+}
+
 /// Inset (px) used when fitting the graph into the minimap.
 const MINIMAP_PADDING: f32 = 8.0;
 
@@ -480,6 +488,33 @@ enum SourcePane {
     External,
 }
 
+/// LLM explanation shown below the source snippet.
+#[derive(Clone, Debug, PartialEq)]
+enum ExplanationPane {
+    Idle,
+    Loading,
+    Ready(String),
+    Error(String),
+}
+
+/// Which backend powers the Explain button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExplainProvider {
+    Ollama,
+    Gemini,
+    Copy,
+}
+
+impl ExplainProvider {
+    fn api_name(self) -> Option<&'static str> {
+        match self {
+            ExplainProvider::Ollama => Some("ollama"),
+            ExplainProvider::Gemini => Some("gemini"),
+            ExplainProvider::Copy => None,
+        }
+    }
+}
+
 /// Detail pane tab: metrics/flow vs source code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailTab {
@@ -505,6 +540,9 @@ struct Nav {
     history: RwSignal<Vec<usize>>,
     /// Source snippet for the Code tab.
     source: RwSignal<SourcePane>,
+    /// LLM explanation below the source snippet.
+    explanation: RwSignal<ExplanationPane>,
+    explain_provider: RwSignal<ExplainProvider>,
     detail_tab: RwSignal<DetailTab>,
 }
 
@@ -520,6 +558,8 @@ impl Nav {
             tree: RwSignal::new(None),
             history: RwSignal::new(Vec::new()),
             source: RwSignal::new(SourcePane::Idle),
+            explanation: RwSignal::new(ExplanationPane::Idle),
+            explain_provider: RwSignal::new(ExplainProvider::Ollama),
             detail_tab: RwSignal::new(DetailTab::Details),
         }
     }
@@ -534,6 +574,7 @@ impl Nav {
         self.tree.set(None);
         self.history.set(Vec::new());
         self.source.set(SourcePane::Idle);
+        self.explanation.set(ExplanationPane::Idle);
         self.detail_tab.set(DetailTab::Details);
     }
 }
@@ -586,6 +627,7 @@ fn load_node_source(nav: Nav, idx: usize, card: &NodeCard) {
         return;
     }
     nav.source.set(SourcePane::Loading);
+    nav.explanation.set(ExplanationPane::Idle);
     let file = card.file.clone();
     let start = card.line;
     let end = card.end_line;
@@ -698,6 +740,7 @@ fn clear_selection(state: &Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) {
     nav.chain.set(Vec::new());
     nav.flow.set(FlowKind::Idle);
     nav.source.set(SourcePane::Idle);
+    nav.explanation.set(ExplanationPane::Idle);
     nav.detail_tab.set(DetailTab::Details);
     {
         let mut s = state.borrow_mut();
@@ -1785,7 +1828,7 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                     }}
                     </div>
                     <div class="detail-code" style:display=move || if tab.get() == DetailTab::Code { "block" } else { "none" }>
-                        {move || source_code_view(nav, &full_location)}
+                        {move || source_code_view(nav, &card, &full_location)}
                     </div>
                 </div>
             }
@@ -1793,8 +1836,119 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
     }
 }
 
+/// Assemble the JSON context sent to the LLM explainer.
+fn build_explain_context(card: &NodeCard, snip: &SourceSnippet, tree: Option<&TreeItem>) -> ExplainContext {
+    let source = snip
+        .lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let callers = card
+        .inputs
+        .iter()
+        .take(5)
+        .map(|c| c.qualified_name.clone())
+        .collect();
+    let callees = card
+        .outputs
+        .iter()
+        .take(5)
+        .map(|c| c.qualified_name.clone())
+        .collect();
+    let call_tree_summary = tree.and_then(|t| {
+        if t.children.is_empty() {
+            None
+        } else {
+            let names: Vec<String> = t.children.iter().map(|c| c.name.clone()).collect();
+            Some(format!("→ {}", names.join(", ")))
+        }
+    });
+    let m = card.metrics;
+    ExplainContext {
+        qualified_name: card.qualified_name.clone(),
+        kind: kind_str(card.kind).to_string(),
+        file: card.file.clone(),
+        start_line: card.line,
+        end_line: card.end_line,
+        metrics: ExplainMetrics {
+            cyclomatic: m.cyclomatic,
+            lines_of_code: m.lines_of_code,
+            parameters: m.parameters,
+            max_nesting: m.max_nesting,
+            allocations: m.allocations,
+        },
+        fan_in: card.fan_in,
+        fan_out: card.fan_out,
+        callers,
+        callees,
+        source,
+        call_tree_summary,
+    }
+}
+
+/// Markdown block copied for Claude (frontend-only, no API call).
+fn format_explain_markdown(card: &NodeCard, snip: &SourceSnippet, tree: Option<&TreeItem>) -> String {
+    let m = card.metrics;
+    let mut md = format!(
+        "# Function: `{}`\n\n\
+         **Kind:** {}  \n\
+         **Location:** {}:{}-{}  \n\
+         **Fan-in / fan-out:** {} / {}  \n\
+         **Metrics:** cyclomatic={}, LOC={}, params={}, nesting={}, allocations={}\n",
+        card.qualified_name,
+        kind_str(card.kind),
+        card.file,
+        card.line,
+        card.end_line,
+        card.fan_in,
+        card.fan_out,
+        m.cyclomatic,
+        m.lines_of_code,
+        m.parameters,
+        m.max_nesting,
+        m.allocations,
+    );
+    if !card.inputs.is_empty() {
+        md.push_str("\n## Callers (top 5)\n");
+        for c in card.inputs.iter().take(5) {
+            md.push_str(&format!("- `{}`\n", c.qualified_name));
+        }
+    }
+    if !card.outputs.is_empty() {
+        md.push_str("\n## Callees (top 5)\n");
+        for c in card.outputs.iter().take(5) {
+            md.push_str(&format!("- `{}`\n", c.qualified_name));
+        }
+    }
+    if let Some(t) = tree {
+        if !t.children.is_empty() {
+            md.push_str("\n## Call tree (one level)\n");
+            for c in &t.children {
+                md.push_str(&format!("- `{}`\n", c.name));
+            }
+        }
+    }
+    md.push_str("\n## Source\n\n```rust\n");
+    for line in &snip.lines {
+        md.push_str(&line.text);
+        md.push('\n');
+    }
+    md.push_str("```\n");
+    md
+}
+
+async fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let clipboard = window.navigator().clipboard();
+    JsFuture::from(clipboard.write_text(text))
+        .await
+        .map_err(|e| format!("clipboard write failed: {e:?}"))?;
+    Ok(())
+}
+
 /// The Code tab: monospace snippet with line numbers and the node's span highlighted.
-fn source_code_view(nav: Nav, location: &str) -> AnyView {
+fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
     match nav.source.get() {
         SourcePane::Idle | SourcePane::Loading => {
             view! { <p class="hint code-status">"Loading source…"</p> }.into_any()
@@ -1827,10 +1981,116 @@ fn source_code_view(nav: Nav, location: &str) -> AnyView {
                     .into_any()
                 })
                 .collect();
+            let provider = nav.explain_provider;
+            let on_provider = move |ev: web_sys::Event| {
+                let value = ev
+                    .target()
+                    .and_then(|t| t.dyn_into::<web_sys::HtmlSelectElement>().ok())
+                    .map(|el| el.value())
+                    .unwrap_or_default();
+                let p = match value.as_str() {
+                    "gemini" => ExplainProvider::Gemini,
+                    "copy" => ExplainProvider::Copy,
+                    _ => ExplainProvider::Ollama,
+                };
+                provider.set(p);
+            };
+            let snip_for_explain = snip.clone();
+            let card_for_explain = card.clone();
+            let on_explain = move |_| {
+                let prov = nav.explain_provider.get_untracked();
+                let tree = nav.tree.get_untracked();
+                let idx = nav.selected.get_untracked();
+                if prov == ExplainProvider::Copy {
+                    let md = format_explain_markdown(&card_for_explain, &snip_for_explain, tree.as_ref());
+                    spawn_local(async move {
+                        match copy_to_clipboard(&md).await {
+                            Ok(()) => nav.explanation.set(ExplanationPane::Ready(
+                                "Copied markdown context to clipboard — paste into Claude.".into(),
+                            )),
+                            Err(e) => nav.explanation.set(ExplanationPane::Error(e)),
+                        }
+                    });
+                    return;
+                }
+                let ctx = build_explain_context(&card_for_explain, &snip_for_explain, tree.as_ref());
+                let api = prov.api_name().unwrap().to_string();
+                nav.explanation.set(ExplanationPane::Loading);
+                spawn_local(async move {
+                    let result = if transport::has_tauri() {
+                        TauriTransport.explain_function(ctx, api).await
+                    } else {
+                        FixtureTransport.explain_function(ctx, api).await
+                    };
+                    if nav.selected.get_untracked() != idx {
+                        return;
+                    }
+                    nav.explanation.set(match result {
+                        Ok(text) => ExplanationPane::Ready(text),
+                        Err(e) => ExplanationPane::Error(e),
+                    });
+                });
+            };
+            let explain_label = move || {
+                if nav.explanation.get() == ExplanationPane::Loading {
+                    "Explaining…"
+                } else if nav.explain_provider.get() == ExplainProvider::Copy {
+                    "Copy"
+                } else {
+                    "Explain"
+                }
+            };
             view! {
                 <div class="code-pane">
-                    <div class="code-head" title=snip.file.clone()>{header}</div>
+                    <div class="code-head-row">
+                        <div class="code-head" title=snip.file.clone()>{header}</div>
+                        <div class="explain-bar">
+                            <select
+                                class="explain-provider"
+                                on:change=on_provider
+                                prop:value=move || match nav.explain_provider.get() {
+                                    ExplainProvider::Ollama => "ollama",
+                                    ExplainProvider::Gemini => "gemini",
+                                    ExplainProvider::Copy => "copy",
+                                }
+                            >
+                                <option value="ollama">"Ollama"</option>
+                                <option value="gemini">"Gemini"</option>
+                                <option value="copy">"Copy for Claude"</option>
+                            </select>
+                            <button
+                                class="small explain-btn"
+                                on:click=on_explain
+                                disabled=move || nav.explanation.get() == ExplanationPane::Loading
+                                title="Explain this function with the selected provider"
+                            >
+                                {explain_label}
+                            </button>
+                        </div>
+                    </div>
                     <pre class="code-block">{rows}</pre>
+                    {explanation_view(nav)}
+                </div>
+            }
+            .into_any()
+        }
+    }
+}
+
+fn explanation_view(nav: Nav) -> AnyView {
+    match nav.explanation.get() {
+        ExplanationPane::Idle => view! {}.into_any(),
+        ExplanationPane::Loading => {
+            view! { <p class="hint code-status explain-status">"Generating explanation…"</p> }.into_any()
+        }
+        ExplanationPane::Error(msg) => {
+            view! { <p class="hint warn code-status explain-status">{msg}</p> }.into_any()
+        }
+        ExplanationPane::Ready(text) => {
+            view! {
+                <div class="explanation-pane">
+                    <h4>"Explanation"</h4>
+                    <pre class="explanation-text">{text}</pre>
                 </div>
             }
             .into_any()
@@ -2081,7 +2341,7 @@ fn wire_pointer_events(
     {
         let state = state.clone();
         let cb = Closure::wrap(Box::new(move |ev: MouseEvent| {
-            let hit = {
+            let pick = {
                 let mut s = state.borrow_mut();
                 let is_click = s.drag.is_some() && !s.moved;
                 // Pick where the press landed: that is where the user aimed.
@@ -2097,13 +2357,20 @@ fn wire_pointer_events(
                     (Some(viewer), Some(scene)) => {
                         let world = viewer.screen_to_world(x as f32, y as f32);
                         let slop = interact::pick_slop_world(viewer.camera().zoom, 1.0);
-                        interact::pick_node(scene, world, slop)
+                        if let Some(idx) = interact::pick_node(scene, world, slop) {
+                            Some(PickResult::Node(idx))
+                        } else if s.boxes_on {
+                            interact::pick_group(&s.groups, world).map(PickResult::Group)
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
                 }
             };
-            match hit {
-                Some(idx) => select_node(&state, nav, labels, idx, false, true),
+            match pick {
+                Some(PickResult::Node(idx)) => select_node(&state, nav, labels, idx, false, true),
+                Some(PickResult::Group(gi)) => focus_group(&state, labels, gi),
                 // With a flow source set, a background click is almost always a
                 // near miss on the target: keep the source and the selection.
                 None if nav.anchor.get_untracked().is_some() => {}
@@ -2177,6 +2444,20 @@ fn refresh_view(state: &Shared, labels: RwSignal<Vec<LabelBox>>) {
 
 /// Rebuild the display scene from the toggles (bundling / search / selection),
 /// swap it into the viewer *without* moving the camera, then refresh overlays.
+/// Frame the camera on one crate box (canvas click on the box background).
+fn focus_group(state: &Shared, labels: RwSignal<Vec<LabelBox>>, index: usize) {
+    {
+        let mut s = state.borrow_mut();
+        let Some(b) = s.groups.get(index) else {
+            return;
+        };
+        if let Some(viewer) = s.viewer.as_mut() {
+            viewer.fit(b.min, b.max);
+        }
+    }
+    refresh_view(state, labels);
+}
+
 fn rebuild_and_refresh(state: &Shared, labels: RwSignal<Vec<LabelBox>>) {
     let scene = {
         let s = state.borrow();

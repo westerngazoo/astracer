@@ -38,12 +38,48 @@ pub struct Progress {
     pub message: String,
 }
 
+/// Metrics forwarded to the LLM explainer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainMetrics {
+    pub cyclomatic: u32,
+    pub lines_of_code: u32,
+    pub parameters: u32,
+    pub max_nesting: u32,
+    pub allocations: u32,
+}
+
+/// Context assembled from a node card + source snippet for function explanation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainContext {
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub metrics: ExplainMetrics,
+    pub fan_in: usize,
+    pub fan_out: usize,
+    pub callers: Vec<String>,
+    pub callees: Vec<String>,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_tree_summary: Option<String>,
+}
+
 /// Request/response boundary between the UI and the analysis engine.
 #[allow(async_fn_in_trait)] // single-host, never used behind `dyn`.
 pub trait EngineTransport {
     /// Analyze the repository at `path`. `semantic` requests the precise
     /// (rust-analyzer) backend where available.
     async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String>;
+
+    /// Ask an LLM to explain a function. `provider` is `ollama` or `gemini`.
+    async fn explain_function(
+        &self,
+        context: ExplainContext,
+        provider: String,
+    ) -> Result<String, String>;
 }
 
 #[wasm_bindgen]
@@ -69,6 +105,14 @@ struct AnalyzeArgs {
 /// The Tauri host transport.
 pub struct TauriTransport;
 
+/// Arguments for the `explain_function` command.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExplainArgs {
+    context: ExplainContext,
+    provider: String,
+}
+
 impl EngineTransport for TauriTransport {
     async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String> {
         let args = serde_wasm_bindgen::to_value(&AnalyzeArgs { path, semantic })
@@ -77,6 +121,21 @@ impl EngineTransport for TauriTransport {
             .await
             .map_err(js_error_to_string)?;
         serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding result: {e}"))
+    }
+
+    async fn explain_function(
+        &self,
+        context: ExplainContext,
+        provider: String,
+    ) -> Result<String, String> {
+        let args = serde_wasm_bindgen::to_value(&ExplainArgs { context, provider })
+            .map_err(|e| format!("serializing args: {e}"))?;
+        let value = tauri_invoke("explain_function", args)
+            .await
+            .map_err(js_error_to_string)?;
+        value
+            .as_string()
+            .ok_or_else(|| format!("unexpected explain result: {value:?}"))
     }
 }
 
@@ -135,6 +194,17 @@ pub fn fixture_fetch_url(path: &str) -> Result<String, String> {
 pub struct FixtureTransport;
 
 impl EngineTransport for FixtureTransport {
+    async fn explain_function(
+        &self,
+        _context: ExplainContext,
+        _provider: String,
+    ) -> Result<String, String> {
+        Err(
+            "LLM explanation requires the Tauri desktop app (Ollama/Gemini cannot run in the browser)"
+                .into(),
+        )
+    }
+
     async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String> {
         if semantic {
             return Err(

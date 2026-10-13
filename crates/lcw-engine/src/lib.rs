@@ -403,9 +403,13 @@ mod tests {
         fs::write(src.join("a.rs"), "fn a() { b(); }").unwrap();
         fs::write(src.join("b.rs"), "fn b() {}").unwrap();
 
+        // Absolute cache dir outside the fake repo (mirrors default isolation, no env vars).
+        let cache_dir = std::env::temp_dir().join(format!(
+            "lcw-inc-cache-{}-{nanos}",
+            std::process::id()
+        ));
         let mut cfg = Config::default();
-        // Self-contained cache dir so the test never touches the real cache home.
-        cfg.cache.dir = root.join(".cache").to_string_lossy().into_owned();
+        cfg.cache.dir = cache_dir.to_string_lossy().into_owned();
         let engine = Engine::new(cfg);
 
         // Cold run: everything parsed.
@@ -427,6 +431,85 @@ mod tests {
         assert!(r3.graph.node_count() > n1, "new fn c() should appear");
 
         let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    /// [`cache::CACHE_HOME_ENV`] is process-global; serialize tests that set it.
+    static CACHE_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Pin [`cache::CACHE_HOME_ENV`] for one test, restoring the prior value on drop.
+    struct CacheHomeGuard {
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl CacheHomeGuard {
+        fn set(path: &Path) -> Self {
+            let old = std::env::var_os(cache::CACHE_HOME_ENV);
+            std::env::set_var(cache::CACHE_HOME_ENV, path);
+            CacheHomeGuard { old }
+        }
+    }
+
+    impl Drop for CacheHomeGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var(cache::CACHE_HOME_ENV, v),
+                None => std::env::remove_var(cache::CACHE_HOME_ENV),
+            }
+        }
+    }
+
+    #[test]
+    fn analyze_does_not_create_artifacts_in_repo_root() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lcw-isolate-{}-{nanos}",
+            std::process::id()
+        ));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
+
+        let cache_home = std::env::temp_dir().join(format!(
+            "lcw-isolate-cache-{}-{nanos}",
+            std::process::id()
+        ));
+        let _cache_env = CacheHomeGuard::set(&cache_home);
+
+        let engine = Engine::new(Config::default());
+        engine.analyze(&root).expect("analyze");
+        engine.analyze(&root).expect("second analyze (warm cache)");
+
+        let mut entries: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsStr::new("src")],
+            "repo root must not gain cache or other analysis artifacts"
+        );
+
+        let cache_path = cache::cache_file(&root, "").expect("cache path");
+        assert!(
+            cache_path.starts_with(&cache_home),
+            "cache file {:?} should live under {:?}",
+            cache_path,
+            cache_home
+        );
+        assert!(cache_path.is_file(), "fragment cache should be persisted");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache_home);
     }
 
     #[test]

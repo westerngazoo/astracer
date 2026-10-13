@@ -798,5 +798,5 @@ no_network = true
 
 [cache]
 enabled = true     # incremental: re-parse only changed files between runs
-dir = ""           # empty = per-repo dir under the user cache home
+dir = ""           # empty = ~/.cache/livewalk/{hash}/ (never inside the repo)
 "#;

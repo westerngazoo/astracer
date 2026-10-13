@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+mod llm;
+
 use lcw_config::{AdapterMode, Config};
 use lcw_core::{GroupBox, ReportSnapshot, SourceSnippet};
 use lcw_engine::{Engine, Progress as EngineProgress};
@@ -122,6 +124,20 @@ fn emit_progress(window: &Window, progress: EngineProgress) {
 /// `start_line`/`end_line` are the node's span (1-based, inclusive). A few
 /// context lines are included and the result is capped so the webview stays
 /// responsive.
+/// Ask an LLM to explain a function from the assembled [`llm::ExplainContext`].
+///
+/// `provider` is `ollama` or `gemini`. Runs on the blocking pool so the webview
+/// stays responsive during the (up to 60s) HTTP call.
+#[tauri::command]
+async fn explain_function(
+    context: llm::ExplainContext,
+    provider: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || llm::explain_function(context, &provider))
+        .await
+        .map_err(|e| format!("explanation task panicked: {e}"))?
+}
+
 #[tauri::command]
 fn read_source_snippet(file: String, start_line: u32, end_line: u32) -> Result<SourceSnippet, String> {
     const CONTEXT: u32 = 5;
@@ -160,7 +176,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![analyze_repo, read_source_snippet])
+        .invoke_handler(tauri::generate_handler![analyze_repo, read_source_snippet, explain_function])
         .run(tauri::generate_context!())
         .expect("error while running Live Code Walk");
 }

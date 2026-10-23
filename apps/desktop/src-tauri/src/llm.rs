@@ -4,38 +4,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-
-/// Metrics forwarded from the node card.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExplainMetrics {
-    pub cyclomatic: u32,
-    pub lines_of_code: u32,
-    pub parameters: u32,
-    pub max_nesting: u32,
-    pub allocations: u32,
-}
-
-/// Everything the model needs to explain one function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExplainContext {
-    pub qualified_name: String,
-    pub kind: String,
-    pub file: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub metrics: ExplainMetrics,
-    pub fan_in: usize,
-    pub fan_out: usize,
-    /// Top caller qualified names (up to 5).
-    pub callers: Vec<String>,
-    /// Top callee qualified names (up to 5).
-    pub callees: Vec<String>,
-    pub source: String,
-    /// Optional one-level call-tree summary.
-    #[serde(default)]
-    pub call_tree_summary: Option<String>,
-}
+pub use lcw_desktop_api::ExplainContext;
 
 const SYSTEM_PROMPT: &str = "You are a code-reading assistant for a call-graph explorer. \
 Explain what the given function does in plain language. \
@@ -174,6 +143,7 @@ fn explain_gemini(prompt: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lcw_desktop_api::ExplainMetrics;
 
     fn sample_context() -> ExplainContext {
         ExplainContext {

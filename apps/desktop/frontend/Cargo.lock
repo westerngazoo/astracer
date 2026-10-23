@@ -1004,6 +1004,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcw-desktop-api"
+version = "0.1.0"
+dependencies = [
+ "lcw-core",
+ "serde",
+]
+
+[[package]]
 name = "lcw-query"
 version = "0.1.0"
 dependencies = [
@@ -1208,6 +1216,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "lcw-core",
+ "lcw-desktop-api",
  "lcw-query",
  "lcw-render",
  "leptos",

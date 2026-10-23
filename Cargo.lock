@@ -1569,6 +1569,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcw-desktop-api"
+version = "0.1.0"
+dependencies = [
+ "lcw-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lcw-engine"
 version = "0.1.0"
 dependencies = [

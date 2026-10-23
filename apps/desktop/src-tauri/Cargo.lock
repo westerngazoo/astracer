@@ -2224,6 +2224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcw-desktop-api"
+version = "0.1.0"
+dependencies = [
+ "lcw-core",
+ "serde",
+]
+
+[[package]]
 name = "lcw-engine"
 version = "0.1.0"
 dependencies = [
@@ -2362,6 +2370,7 @@ version = "0.1.0"
 dependencies = [
  "lcw-config",
  "lcw-core",
+ "lcw-desktop-api",
  "lcw-engine",
  "lcw-layout",
  "reqwest 0.12.28",

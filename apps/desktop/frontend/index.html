@@ -907,6 +907,50 @@
         border-color: var(--accent-2);
       }
 
+      .diagnostics-card .lens-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+
+      .lens-chip {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 2px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .lens-chip.on {
+        color: var(--accent-2);
+        border-color: var(--accent-2);
+      }
+
+      .diag .lens-badge {
+        flex-shrink: 0;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+      }
+
+      .diag-jump {
+        cursor: pointer;
+      }
+
+      .diag-jump:hover {
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 4px;
+      }
+
       .error {
         background: rgba(229, 83, 75, 0.12);
         border: 1px solid var(--danger);

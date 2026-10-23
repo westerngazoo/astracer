@@ -14,36 +14,14 @@ use std::path::PathBuf;
 mod llm;
 
 use lcw_config::{AdapterMode, Config};
-use lcw_core::{GroupBox, ReportSnapshot, SourceSnippet};
+use lcw_core::SourceSnippet;
+use lcw_desktop_api::{GraphView, Progress};
 use lcw_engine::{Engine, Progress as EngineProgress};
 use lcw_layout::LayoutParams;
-use serde::Serialize;
 use tauri::{Emitter, Window};
 
 /// Event channel the frontend subscribes to for streaming progress.
 const PROGRESS_EVENT: &str = "analyze-progress";
-
-/// A fully laid-out analysis, ready for the wasm renderer.
-///
-/// The graph travels as an owned [`ReportSnapshot`] (round-trippable via serde)
-/// and `positions` carries one `[x, y]` per node, indexed by node id — so the
-/// frontend can rebuild the `CodeGraph` and feed both to `lcw-render` with no
-/// extra bookkeeping.
-#[derive(Debug, Serialize)]
-pub struct GraphView {
-    pub report: ReportSnapshot,
-    pub positions: Vec<[f32; 2]>,
-    /// One box per crate around its functions (the layout is grouped).
-    pub groups: Vec<GroupBox>,
-}
-
-/// A single progress update emitted while an analysis runs.
-#[derive(Debug, Clone, Serialize)]
-struct Progress {
-    /// Stable phase id: `config` | `parse` | `layout` | `done`.
-    phase: String,
-    message: String,
-}
 
 fn emit(window: &Window, phase: &str, message: impl Into<String>) {
     let progress = Progress {
@@ -130,7 +108,7 @@ fn emit_progress(window: &Window, progress: EngineProgress) {
 /// stays responsive during the (up to 60s) HTTP call.
 #[tauri::command]
 async fn explain_function(
-    context: llm::ExplainContext,
+    context: lcw_desktop_api::ExplainContext,
     provider: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || llm::explain_function(context, &provider))

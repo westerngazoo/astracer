@@ -13,59 +13,13 @@
 //!   `acquireVsCodeApi().postMessage` + `window.addEventListener("message")`.
 
 use lcw_core::SourceSnippet;
-use serde::{Deserialize, Serialize};
+use lcw_desktop_api::{GraphView, Progress, ReadSourceSnippetArgs};
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-/// A laid-out analysis result received from the backend. Mirrors the backend's
-/// `GraphView`; both sides share `lcw_core::ReportSnapshot`, so the shape can't
-/// drift.
-#[derive(Debug, Deserialize)]
-pub struct GraphView {
-    pub report: lcw_core::ReportSnapshot,
-    pub positions: Vec<[f32; 2]>,
-    /// One box per crate. Defaults to none, so a `fixture.json` written before
-    /// the layout was grouped still loads.
-    #[serde(default)]
-    pub groups: Vec<lcw_core::GroupBox>,
-}
-
-/// A streaming progress update emitted by the backend during analysis.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Progress {
-    pub phase: String,
-    pub message: String,
-}
-
-/// Metrics forwarded to the LLM explainer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExplainMetrics {
-    pub cyclomatic: u32,
-    pub lines_of_code: u32,
-    pub parameters: u32,
-    pub max_nesting: u32,
-    pub allocations: u32,
-}
-
-/// Context assembled from a node card + source snippet for function explanation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExplainContext {
-    pub qualified_name: String,
-    pub kind: String,
-    pub file: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub metrics: ExplainMetrics,
-    pub fan_in: usize,
-    pub fan_out: usize,
-    pub callers: Vec<String>,
-    pub callees: Vec<String>,
-    pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub call_tree_summary: Option<String>,
-}
+pub use lcw_desktop_api::{ExplainContext, ExplainMetrics};
 
 /// Request/response boundary between the UI and the analysis engine.
 #[allow(async_fn_in_trait)] // single-host, never used behind `dyn`.
@@ -73,6 +27,14 @@ pub trait EngineTransport {
     /// Analyze the repository at `path`. `semantic` requests the precise
     /// (rust-analyzer) backend where available.
     async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String>;
+
+    /// Read source lines for a node (Tauri host only).
+    async fn read_source_snippet(
+        &self,
+        file: String,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<SourceSnippet, String>;
 
     /// Ask an LLM to explain a function. `provider` is `ollama` or `gemini`.
     async fn explain_function(
@@ -121,6 +83,24 @@ impl EngineTransport for TauriTransport {
             .await
             .map_err(js_error_to_string)?;
         serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding result: {e}"))
+    }
+
+    async fn read_source_snippet(
+        &self,
+        file: String,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<SourceSnippet, String> {
+        let args = serde_wasm_bindgen::to_value(&ReadSourceSnippetArgs {
+            file,
+            start_line,
+            end_line,
+        })
+        .map_err(|e| format!("serializing args: {e}"))?;
+        let value = tauri_invoke("read_source_snippet", args)
+            .await
+            .map_err(js_error_to_string)?;
+        serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding snippet: {e}"))
     }
 
     async fn explain_function(
@@ -194,6 +174,18 @@ pub fn fixture_fetch_url(path: &str) -> Result<String, String> {
 pub struct FixtureTransport;
 
 impl EngineTransport for FixtureTransport {
+    async fn read_source_snippet(
+        &self,
+        _file: String,
+        _start_line: u32,
+        _end_line: u32,
+    ) -> Result<SourceSnippet, String> {
+        Err(
+            "source viewing requires the Tauri desktop app (browser dev mode cannot read arbitrary files)"
+                .into(),
+        )
+    }
+
     async fn explain_function(
         &self,
         _context: ExplainContext,
@@ -238,6 +230,23 @@ impl EngineTransport for FixtureTransport {
     }
 }
 
+/// Host-aware entry point for source reads (delegates to [`EngineTransport`]).
+pub async fn read_source_snippet(
+    file: String,
+    start_line: u32,
+    end_line: u32,
+) -> Result<SourceSnippet, String> {
+    if has_tauri() {
+        TauriTransport
+            .read_source_snippet(file, start_line, end_line)
+            .await
+    } else {
+        FixtureTransport
+            .read_source_snippet(file, start_line, end_line)
+            .await
+    }
+}
+
 /// Subscribe to backend progress events. The handler runs for the lifetime of
 /// the app (the closure is intentionally leaked, matching the listener's
 /// lifetime). A no-op outside the Tauri shell.
@@ -260,41 +269,6 @@ pub fn on_progress(mut handler: impl FnMut(Progress) + 'static) {
         let _ = tauri_listen("analyze-progress", &closure).await;
         closure.forget();
     });
-}
-
-/// Arguments for the `read_source_snippet` command.
-///
-/// Tauri v2 maps Rust `snake_case` command parameters to `camelCase` IPC keys.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReadSourceArgs {
-    file: String,
-    start_line: u32,
-    end_line: u32,
-}
-
-/// Read source lines for a node. Only available in the Tauri desktop shell.
-pub async fn read_source_snippet(
-    file: String,
-    start_line: u32,
-    end_line: u32,
-) -> Result<SourceSnippet, String> {
-    if !has_tauri() {
-        return Err(
-            "source viewing requires the Tauri desktop app (browser dev mode cannot read arbitrary files)"
-                .into(),
-        );
-    }
-    let args = serde_wasm_bindgen::to_value(&ReadSourceArgs {
-        file,
-        start_line,
-        end_line,
-    })
-    .map_err(|e| format!("serializing args: {e}"))?;
-    let value = tauri_invoke("read_source_snippet", args)
-        .await
-        .map_err(js_error_to_string)?;
-    serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding snippet: {e}"))
 }
 
 /// Tauri rejects a command with the `Err` string; surface it verbatim, falling

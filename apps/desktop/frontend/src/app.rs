@@ -865,6 +865,7 @@ pub fn App() -> impl IntoView {
     let vertical = RwSignal::new(String::new());
     let suggestions = RwSignal::new(Vec::<Suggestion>::new());
     let diagnostics = RwSignal::new(Vec::<Diagnostic>::new());
+    let diag_lens = RwSignal::new(Option::<String>::None);
 
     // Explorer + navigation state.
     let explorer = RwSignal::new(ExplorerData::default());
@@ -1247,7 +1248,11 @@ pub fn App() -> impl IntoView {
                     <DetailPane nav=nav actions=actions />
                     <Overview summary=summary vertical=vertical />
                     <Suggestions suggestions=suggestions />
-                    <Diagnostics diagnostics=diagnostics />
+                    <Diagnostics
+                        diagnostics=diagnostics
+                        lens_filter=diag_lens
+                        actions=actions
+                    />
                     <Legend />
                 </aside>
             </div>
@@ -2164,27 +2169,82 @@ fn Suggestions(suggestions: RwSignal<Vec<Suggestion>>) -> impl IntoView {
 }
 
 #[component]
-fn Diagnostics(diagnostics: RwSignal<Vec<Diagnostic>>) -> impl IntoView {
+fn Diagnostics(
+    diagnostics: RwSignal<Vec<Diagnostic>>,
+    lens_filter: RwSignal<Option<String>>,
+    actions: ActionsHandle,
+) -> impl IntoView {
     move || {
         let items = diagnostics.get();
         (!items.is_empty()).then(|| {
+            let lenses: Vec<String> = {
+                let mut v: Vec<String> = items.iter().map(|d| d.lens.clone()).collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            let active = lens_filter.get();
+            let filtered: Vec<&Diagnostic> = items
+                .iter()
+                .filter(|d| active.as_ref().map_or(true, |l| &d.lens == l))
+                .collect();
             let total = items.len();
-            let rows = items
+            let shown = filtered.len();
+            let lens_chips = lenses.len() > 1;
+            let chips = lenses.into_iter().map(|lens| {
+                let active_here = active.as_ref() == Some(&lens);
+                let class = if active_here { "lens-chip on" } else { "lens-chip" };
+                view! {
+                    <button
+                        type="button"
+                        class=class
+                        on:click=move |_| {
+                            lens_filter.update(|f| {
+                                if f.as_ref() == Some(&lens) {
+                                    *f = None;
+                                } else {
+                                    *f = Some(lens.clone());
+                                }
+                            });
+                        }
+                    >
+                        {lens.clone()}
+                    </button>
+                }
+            }).collect::<Vec<_>>();
+            let rows = filtered
                 .iter()
                 .take(14)
                 .map(|d| {
                     let sev = d.severity.to_string();
+                    let lens = d.lens.clone();
+                    let node_idx = d.node.map(|id| id.0 as usize);
+                    let jumpable = node_idx.is_some();
+                    let mut class = format!("diag sev-{sev}");
+                    if jumpable {
+                        class.push_str(" diag-jump");
+                    }
                     view! {
-                        <li class=format!("diag sev-{sev}")>
+                        <li
+                            class=class
+                            title=if jumpable { "Jump to node on canvas" } else { "" }
+                            on:click=move |_| {
+                                if let Some(idx) = node_idx {
+                                    actions.with_value(|a| a.go.clone())(idx, true);
+                                }
+                            }
+                        >
                             <span class="sev">{sev.clone()}</span>
+                            <span class="lens-badge">{lens}</span>
                             {d.message.clone()}
                         </li>
                     }
                 })
                 .collect::<Vec<_>>();
             view! {
-                <div class="card">
-                    <h3>{format!("Diagnostics ({total})")}</h3>
+                <div class="card diagnostics-card">
+                    <h3>{format!("Diagnostics ({shown}/{total})")}</h3>
+                    {lens_chips.then(|| view! { <div class="lens-filters">{chips}</div> })}
                     <ul class="list">{rows}</ul>
                 </div>
             }
@@ -2446,13 +2506,13 @@ fn refresh_view(state: &Shared, labels: RwSignal<Vec<LabelBox>>) {
 /// swap it into the viewer *without* moving the camera, then refresh overlays.
 /// Frame the camera on one crate box (canvas click on the box background).
 fn focus_group(state: &Shared, labels: RwSignal<Vec<LabelBox>>, index: usize) {
-    {
-        let mut s = state.borrow_mut();
-        let Some(b) = s.groups.get(index) else {
-            return;
-        };
-        if let Some(viewer) = s.viewer.as_mut() {
-            viewer.fit(b.min, b.max);
+    let bounds = {
+        let s = state.borrow();
+        s.groups.get(index).map(|b| (b.min, b.max))
+    };
+    if let Some((min, max)) = bounds {
+        if let Some(viewer) = state.borrow_mut().viewer.as_mut() {
+            viewer.fit(min, max);
         }
     }
     refresh_view(state, labels);

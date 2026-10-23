@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lcw-desktop-api",
     "crates/lcw-core",
     "crates/lcw-config",
     "crates/lcw-telemetry",

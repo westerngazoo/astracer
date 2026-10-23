@@ -1,0 +1,18 @@
+[package]
+name = "lcw-desktop-api"
+description = "Live Code Walk: shared serde DTOs for the desktop Tauri ↔ wasm IPC boundary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

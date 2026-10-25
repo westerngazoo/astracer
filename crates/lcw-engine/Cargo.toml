@@ -27,6 +27,7 @@ lcw-adapter-go = { path = "../lcw-adapter-go" }
 lcw-adapter-ra = { path = "../lcw-adapter-ra", optional = true }
 lcw-analysis = { path = "../lcw-analysis" }
 lcw-suggest = { path = "../lcw-suggest" }
+lcw-graph-store = { path = "../lcw-graph-store" }
 thiserror = "2.0.20"
 ignore = "0.4.30"
 serde = { version = "1.0.229", features = ["derive"] }

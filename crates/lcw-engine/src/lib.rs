@@ -12,7 +12,7 @@
 //! Front ends (CLI, Tauri UI) depend only on this crate, never on the
 //! individual layers (Principle I).
 
-mod cache;
+pub mod cache;
 mod discover;
 
 use std::collections::HashSet;
@@ -212,6 +212,7 @@ impl Engine {
         lcw_telemetry::count("engine.graph_bytes", graph.estimated_bytes() as u64);
 
         let report = self.finish_report(graph, progress);
+        self.persist_graph_store(root, &report.graph);
         Ok((report, stats))
     }
 
@@ -340,6 +341,25 @@ impl Engine {
             suggestions: report.suggestions.len(),
         });
         report
+    }
+
+    /// Best-effort write of the Layer-1 graph to `graph.sqlite` under the cache dir.
+    fn persist_graph_store(&self, root: &Path, graph: &CodeGraph) {
+        if !self.config.graph_store.enabled {
+            return;
+        }
+        let Some(path) = cache::graph_db_file(root, &self.config.cache.dir) else {
+            return;
+        };
+        let snapshot = graph.snapshot();
+        if let Err(e) = lcw_graph_store::write(&path, &snapshot) {
+            lcw_telemetry::warn!(
+                target: "lcw::engine",
+                error = %e,
+                path = %path.display(),
+                "failed to persist graph store (analysis still correct)"
+            );
+        }
     }
 }
 
@@ -507,6 +527,55 @@ mod tests {
             cache_home
         );
         assert!(cache_path.is_file(), "fragment cache should be persisted");
+
+        let graph_path = cache::graph_db_file(&root, "").expect("graph db path");
+        assert!(
+            graph_path.starts_with(&cache_home),
+            "graph store {:?} should live under {:?}",
+            graph_path,
+            cache_home
+        );
+        assert!(graph_path.is_file(), "graph.sqlite should be persisted");
+        let summary = lcw_graph_store::summary(&graph_path).expect("graph summary");
+        assert!(summary.nodes >= 2, "expected at least a and b");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache_home);
+    }
+
+    #[test]
+    fn graph_store_roundtrip_matches_memory_graph() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lcw-graph-rt-{}-{nanos}",
+            std::process::id()
+        ));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
+
+        let cache_home = std::env::temp_dir().join(format!(
+            "lcw-graph-rt-cache-{}-{nanos}",
+            std::process::id()
+        ));
+        let _cache_env = CacheHomeGuard::set(&cache_home);
+
+        let report = Engine::new(Config::default())
+            .analyze(&root)
+            .expect("analyze");
+        let graph_path = cache::graph_db_file(&root, "").expect("path");
+        let loaded = lcw_graph_store::read(&graph_path).expect("read store");
+        let from_disk = CodeGraph::from_snapshot(loaded);
+        assert_eq!(from_disk.node_count(), report.graph.node_count());
+        assert_eq!(from_disk.edge_count(), report.graph.edge_count());
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&cache_home);

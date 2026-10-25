@@ -27,6 +27,9 @@ const CACHE_VERSION: u32 = 2;
 /// File name of the cache document inside the cache directory.
 const CACHE_FILE: &str = "fragments.json";
 
+/// Embedded graph database file name (see `lcw-graph-store`).
+pub const GRAPH_DB_FILE: &str = "graph.sqlite";
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Entry {
     hash: u64,
@@ -137,7 +140,8 @@ pub fn hash_text(text: &str) -> u64 {
 ///
 /// Returns `None` only if no cache home can be determined and no explicit dir
 /// was given (in practice always `Some`, since we fall back to the temp dir).
-pub fn cache_file(root: &Path, dir: &str) -> Option<PathBuf> {
+/// Per-repository cache directory (fragments + graph store share this folder).
+pub fn repo_cache_dir(root: &Path, dir: &str) -> Option<PathBuf> {
     let dir = dir.trim();
     if !dir.is_empty() {
         let base = PathBuf::from(dir);
@@ -146,15 +150,20 @@ pub fn cache_file(root: &Path, dir: &str) -> Option<PathBuf> {
         } else {
             root.join(base)
         };
-        return Some(base.join(CACHE_FILE));
+        return Some(base);
     }
     let home = cache_home()?;
     let key = hash_path(root);
-    Some(
-        home.join("livewalk")
-            .join(format!("{key:016x}"))
-            .join(CACHE_FILE),
-    )
+    Some(home.join("livewalk").join(format!("{key:016x}")))
+}
+
+pub fn cache_file(root: &Path, dir: &str) -> Option<PathBuf> {
+    repo_cache_dir(root, dir).map(|d| d.join(CACHE_FILE))
+}
+
+/// Path to the embedded graph SQLite file for `root` (same dir as [`cache_file`]).
+pub fn graph_db_file(root: &Path, dir: &str) -> Option<PathBuf> {
+    repo_cache_dir(root, dir).map(|d| d.join(GRAPH_DB_FILE))
 }
 
 /// Environment variable that overrides the cache home (when `[cache].dir` is

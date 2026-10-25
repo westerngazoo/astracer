@@ -41,6 +41,7 @@ pub struct Config {
     pub suggestions: SuggestionsConfig,
     pub telemetry: TelemetryConfig,
     pub cache: CacheConfig,
+    pub graph_store: GraphStoreConfig,
 }
 
 /// `[project]` — identity and the industry vertical (Manifesto section 5).
@@ -275,6 +276,22 @@ impl Default for CacheConfig {
     }
 }
 
+/// `[graph_store]` — persistent call-graph snapshot (SQLite under the cache dir).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphStoreConfig {
+    /// After each successful repository analysis, write `graph.sqlite` next to
+    /// `fragments.json` (uses the same `[cache].dir` resolution). In-memory
+    /// [`CodeGraph`] queries are unchanged; this is durable storage for tooling.
+    pub enabled: bool,
+}
+
+impl Default for GraphStoreConfig {
+    fn default() -> Self {
+        GraphStoreConfig { enabled: true }
+    }
+}
+
 /// `[telemetry]` — observability controls (Principle III).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -391,6 +408,7 @@ mod tests {
         assert!(cfg.telemetry.no_network);
         assert_eq!(cfg.project.vertical, VerticalChoice::Auto);
         assert_eq!(cfg.lenses.architecture, vec!["clean".to_string()]);
+        assert!(cfg.graph_store.enabled);
     }
 
     #[test]

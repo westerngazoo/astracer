@@ -47,6 +47,8 @@ enum Command {
     Calls(CallsArgs),
     /// Write a default `livewalk.toml` to the current directory.
     Init(InitArgs),
+    /// Show the on-disk graph store for a repository (if present).
+    Graph(GraphArgs),
     /// Open the interactive graph viewer (native window).
     #[cfg(feature = "viewer")]
     View(AnalyzeArgs),
@@ -75,6 +77,10 @@ struct AnalyzeArgs {
     /// How many entries to show in summary top-lists.
     #[arg(long, default_value_t = 10)]
     top: usize,
+
+    /// Print cache / graph-store paths after analysis.
+    #[arg(short, long)]
+    verbose: bool,
 
     /// Which graph the viewer renders: every function boxed by crate, the
     /// free call graph, or the aggregated module view. Only affects `view`.
@@ -336,6 +342,16 @@ struct InitArgs {
     force: bool,
 }
 
+#[derive(Debug, Args)]
+struct GraphArgs {
+    /// Path to the repository (defaults to the current directory).
+    path: Option<PathBuf>,
+
+    /// Explicit config file. Otherwise `livewalk.toml` is searched for.
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let log = cli.log.as_deref();
@@ -347,6 +363,7 @@ fn main() -> Result<()> {
         Command::Entries(args) => run_entries(args, log),
         Command::Calls(args) => run_calls(args, log),
         Command::Init(args) => run_init(args),
+        Command::Graph(args) => run_graph_info(args),
         #[cfg(feature = "viewer")]
         Command::View(args) => run_view(args, log),
         #[cfg(feature = "viewer")]
@@ -505,6 +522,9 @@ fn call_layout(g: &lcw_core::CodeGraph, kind: ViewKind) -> lcw_layout::Layout {
 
 fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
+    let search_dir = config_search_dir(&path);
+    let cfg =
+        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
     let report = analyze_path(&path, args.config.as_deref(), false, log_override)?;
 
     let rendered = match args.format {
@@ -534,7 +554,45 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
         }
         None => println!("{rendered}"),
     }
+    if args.verbose {
+        emit_store_paths(&path, &cfg);
+    }
     Ok(())
+}
+
+fn run_graph_info(args: GraphArgs) -> Result<()> {
+    let path = args.path.unwrap_or_else(|| PathBuf::from("."));
+    let search_dir = config_search_dir(&path);
+    let cfg =
+        Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
+    let db_path = lcw_engine::cache::graph_db_file(&path, &cfg.cache.dir)
+        .context("resolving graph store path")?;
+    if !db_path.is_file() {
+        anyhow::bail!(
+            "no graph store at {} — run `lcw analyze` on this repository first",
+            db_path.display()
+        );
+    }
+    let sum = lcw_graph_store::summary(&db_path).context("reading graph store")?;
+    println!("graph store: {}", db_path.display());
+    println!("  enabled: {}", cfg.graph_store.enabled);
+    println!("  nodes:   {}", sum.nodes);
+    println!("  edges:   {}", sum.edges);
+    println!("  files:   {}", sum.files);
+    Ok(())
+}
+
+fn emit_store_paths(repo: &Path, cfg: &Config) {
+    if let Some(p) = lcw_engine::cache::cache_file(repo, &cfg.cache.dir) {
+        eprintln!("fragment cache: {}", p.display());
+    }
+    if cfg.graph_store.enabled {
+        if let Some(p) = lcw_engine::cache::graph_db_file(repo, &cfg.cache.dir) {
+            eprintln!("graph store:    {}", p.display());
+        }
+    } else {
+        eprintln!("graph store:    (disabled via [graph_store].enabled = false)");
+    }
 }
 
 fn run_explain(args: ExplainArgs, log_override: Option<&str>) -> Result<()> {
@@ -799,4 +857,7 @@ no_network = true
 [cache]
 enabled = true     # incremental: re-parse only changed files between runs
 dir = ""           # empty = ~/.cache/livewalk/{hash}/ (never inside the repo)
+
+[graph_store]
+enabled = true     # persist graph.sqlite next to fragments.json after analyze
 "#;

@@ -81,3 +81,8 @@ enabled = true
 # Relative paths resolve against the repo root (opt-in, pollutes the tree);
 # absolute paths are used as-is.
 dir = ""
+
+[graph_store]
+# After each successful `lcw analyze` / desktop analyze, write the Layer-1 call
+# graph to graph.sqlite in the same cache directory as fragments.json.
+enabled = true

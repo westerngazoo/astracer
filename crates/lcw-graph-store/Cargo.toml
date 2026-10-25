@@ -1,0 +1,18 @@
+[package]
+name = "lcw-graph-store"
+description = "Live Code Walk: embedded SQLite persistence for call-graph snapshots."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"

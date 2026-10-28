@@ -154,6 +154,9 @@ cargo install tauri-cli --version "^2"
 
 ## Develop
 
+From the repository root, `./scripts/livewalk-dev.sh` (or `dev`) sets up PATH,
+builds `lcw` when needed, ensures the wasm target, and runs `cargo tauri dev`.
+
 From `apps/desktop/src-tauri`:
 
 ```bash

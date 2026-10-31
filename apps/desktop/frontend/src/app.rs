@@ -631,6 +631,19 @@ type RunRowsFn = Rc<dyn Fn(&[RootRow], &OpenPaths) -> Vec<RunRow>>;
 /// this thread-local-storage handle and fetch the closures when they run.
 type ActionsHandle = StoredValue<Actions, LocalStorage>;
 
+/// Inclusive end line for source snippets when the graph span is missing or partial.
+fn node_snippet_end(card: &NodeCard) -> u32 {
+    if card.end_line >= card.line && card.end_line > 0 {
+        card.end_line
+    } else if card.metrics.lines_of_code > 0 {
+        card.line
+            .saturating_add(card.metrics.lines_of_code)
+            .saturating_sub(1)
+    } else {
+        card.line
+    }
+}
+
 /// Fetch source for the Code tab (Tauri only). Ignores stale responses when
 /// the user has already moved to another node.
 fn load_node_source(nav: Nav, idx: usize, card: &NodeCard) {
@@ -642,7 +655,7 @@ fn load_node_source(nav: Nav, idx: usize, card: &NodeCard) {
     nav.explanation.set(ExplanationPane::Idle);
     let file = card.file.clone();
     let start = card.line;
-    let end = card.end_line;
+    let end = node_snippet_end(card);
     spawn_local(async move {
         let result = transport::read_source_snippet(file, start, end).await;
         if nav.selected.get_untracked() != Some(idx) {
@@ -870,6 +883,7 @@ pub fn App() -> impl IntoView {
 
     let path = RwSignal::new(String::new());
     let semantic = RwSignal::new(false);
+    let use_cache = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let status = RwSignal::new(String::from("Idle — enter a repository path and analyze."));
     let error = RwSignal::new(Option::<String>::None);
@@ -927,7 +941,15 @@ pub fn App() -> impl IntoView {
             }
             let state = state.clone();
             let sem = semantic.get_untracked();
+            let cache = use_cache.get_untracked();
             if !hosted {
+                if cache {
+                    error.set(Some(
+                        "Cached load requires the Tauri desktop app (browser dev mode uses fixture.json)."
+                            .into(),
+                    ));
+                    return;
+                }
                 if sem {
                     error.set(Some(
                         "Semantic analysis requires the Tauri desktop app (rust-analyzer cannot \
@@ -954,7 +976,11 @@ pub fn App() -> impl IntoView {
             nav.reset();
             status.set(
                 if hosted {
-                    "Starting analysis…"
+                    if cache {
+                        "Loading cached graph…"
+                    } else {
+                        "Starting analysis…"
+                    }
                 } else {
                     "Browser dev mode: loading fixture…"
                 }
@@ -964,9 +990,9 @@ pub fn App() -> impl IntoView {
                 // Tauri hosts the engine; a plain browser gets a fixture (see
                 // `transport::FixtureTransport`). Same trait, same UI code.
                 let result = if hosted {
-                    TauriTransport.analyze(repo, sem).await
+                    TauriTransport.analyze(repo, sem, cache).await
                 } else {
-                    FixtureTransport.analyze(repo, sem).await
+                    FixtureTransport.analyze(repo, sem, cache).await
                 };
                 match result {
                     Ok(view) => {
@@ -1167,13 +1193,44 @@ pub fn App() -> impl IntoView {
                     <input
                         type="checkbox"
                         prop:checked=move || semantic.get()
-                        on:change=move |ev| semantic.set(target_checked(&ev))
-                        disabled=move || !transport::semantic_available()
+                        on:change=move |ev| {
+                            let on = target_checked(&ev);
+                            semantic.set(on);
+                            if on {
+                                use_cache.set(false);
+                            }
+                        }
+                        disabled=move || !transport::semantic_available() || use_cache.get()
                     />
                     "semantic"
                 </label>
+                <label
+                    class="mode"
+                    class:disabled=move || !transport::has_tauri()
+                    title="Load graph.sqlite from a prior analyze (no parse; may be stale)"
+                >
+                    <input
+                        type="checkbox"
+                        prop:checked=move || use_cache.get()
+                        on:change=move |ev| {
+                            let on = target_checked(&ev);
+                            use_cache.set(on);
+                            if on {
+                                semantic.set(false);
+                            }
+                        }
+                        disabled=move || !transport::has_tauri() || semantic.get()
+                    />
+                    "cached"
+                </label>
                 <button class="primary" on:click=on_analyze disabled=move || busy.get()>
-                    {move || if busy.get() { "Analyzing…" } else { "Analyze" }}
+                    {move || if busy.get() {
+                        if use_cache.get() { "Loading…" } else { "Analyzing…" }
+                    } else if use_cache.get() {
+                        "Open cached"
+                    } else {
+                        "Analyze"
+                    }}
                 </button>
                 <button on:click=on_main disabled=move || !has_graph() title="Jump to the program entry">"Entry"</button>
                 <button on:click=on_fit disabled=move || !has_graph()>"Fit"</button>
@@ -2247,7 +2304,7 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                             </button>
                         </div>
                     </div>
-                    <pre class="code-block">{rows}</pre>
+                    <div class="code-block">{rows}</div>
                     {explanation_view(nav)}
                 </div>
             }

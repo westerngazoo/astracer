@@ -25,8 +25,9 @@ pub use lcw_desktop_api::{ExplainContext, ExplainMetrics};
 #[allow(async_fn_in_trait)] // single-host, never used behind `dyn`.
 pub trait EngineTransport {
     /// Analyze the repository at `path`. `semantic` requests the precise
-    /// (rust-analyzer) backend where available.
-    async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String>;
+    /// (rust-analyzer) backend where available. `use_cache` loads `graph.sqlite`
+    /// instead of parsing (Tauri host only).
+    async fn analyze(&self, path: String, semantic: bool, use_cache: bool) -> Result<GraphView, String>;
 
     /// Read source lines for a node (Tauri host only).
     async fn read_source_snippet(
@@ -62,6 +63,7 @@ extern "C" {
 struct AnalyzeArgs {
     path: String,
     semantic: bool,
+    use_cache: bool,
 }
 
 /// The Tauri host transport.
@@ -76,9 +78,13 @@ struct ExplainArgs {
 }
 
 impl EngineTransport for TauriTransport {
-    async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String> {
-        let args = serde_wasm_bindgen::to_value(&AnalyzeArgs { path, semantic })
-            .map_err(|e| format!("serializing args: {e}"))?;
+    async fn analyze(&self, path: String, semantic: bool, use_cache: bool) -> Result<GraphView, String> {
+        let args = serde_wasm_bindgen::to_value(&AnalyzeArgs {
+            path,
+            semantic,
+            use_cache,
+        })
+        .map_err(|e| format!("serializing args: {e}"))?;
         let value = tauri_invoke("analyze_repo", args)
             .await
             .map_err(js_error_to_string)?;
@@ -197,7 +203,13 @@ impl EngineTransport for FixtureTransport {
         )
     }
 
-    async fn analyze(&self, path: String, semantic: bool) -> Result<GraphView, String> {
+    async fn analyze(&self, path: String, semantic: bool, use_cache: bool) -> Result<GraphView, String> {
+        if use_cache {
+            return Err(
+                "cached load requires the Tauri desktop app (run a prior `lcw analyze` first)"
+                    .into(),
+            );
+        }
         if semantic {
             return Err(
                 "semantic analysis requires the Tauri desktop app (rust-analyzer cannot run in \

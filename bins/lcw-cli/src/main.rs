@@ -49,6 +49,8 @@ enum Command {
     Init(InitArgs),
     /// Show the on-disk graph store for a repository (if present).
     Graph(GraphArgs),
+    /// Load a cached graph from graph.sqlite (no parse). Requires a prior analyze.
+    Load(LoadArgs),
     /// Open the interactive graph viewer (native window).
     #[cfg(feature = "viewer")]
     View(AnalyzeArgs),
@@ -81,6 +83,10 @@ struct AnalyzeArgs {
     /// Print cache / graph-store paths after analysis.
     #[arg(short, long)]
     verbose: bool,
+
+    /// Load graph.sqlite instead of re-parsing (requires a prior `lcw analyze`).
+    #[arg(long)]
+    cached: bool,
 
     /// Which graph the viewer renders: every function boxed by crate, the
     /// free call graph, or the aggregated module view. Only affects `view`.
@@ -352,6 +358,21 @@ struct GraphArgs {
     config: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct LoadArgs {
+    /// Path to the repository (defaults to the current directory).
+    path: Option<PathBuf>,
+
+    /// Explicit config file. Otherwise `livewalk.toml` is searched for.
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
+    /// Open the native graph viewer after loading.
+    #[cfg(feature = "viewer")]
+    #[arg(long)]
+    view: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let log = cli.log.as_deref();
@@ -364,6 +385,7 @@ fn main() -> Result<()> {
         Command::Calls(args) => run_calls(args, log),
         Command::Init(args) => run_init(args),
         Command::Graph(args) => run_graph_info(args),
+        Command::Load(args) => run_load(args, log),
         #[cfg(feature = "viewer")]
         Command::View(args) => run_view(args, log),
         #[cfg(feature = "viewer")]
@@ -378,6 +400,7 @@ fn analyze_path(
     path: &Path,
     config: Option<&Path>,
     semantic: bool,
+    cached: bool,
     log_override: Option<&str>,
 ) -> Result<AnalysisReport> {
     let search_dir = config_search_dir(path);
@@ -388,9 +411,19 @@ fn analyze_path(
     // Telemetry: CLI stays quiet by default so stdout output isn't polluted.
     lcw_telemetry::init(log_override.unwrap_or("warn"));
 
-    Engine::new(config)
-        .analyze(path)
-        .with_context(|| format!("analyzing {}", path.display()))
+    let engine = Engine::new(config);
+    if cached {
+        eprintln!(
+            "note: cached graph may be stale if sources changed since the last `lcw analyze`"
+        );
+        engine
+            .load_from_store(path)
+            .with_context(|| format!("loading cached graph for {}", path.display()))
+    } else {
+        engine
+            .analyze(path)
+            .with_context(|| format!("analyzing {}", path.display()))
+    }
 }
 
 fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisReport> {
@@ -398,6 +431,7 @@ fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisR
         &repo.path,
         repo.config.as_deref(),
         repo.semantic,
+        false,
         log_override,
     )
 }
@@ -405,7 +439,7 @@ fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisR
 #[cfg(feature = "viewer")]
 fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let report = analyze_path(&path, args.config.as_deref(), false, log_override)?;
+    let report = analyze_path(&path, args.config.as_deref(), false, false, log_override)?;
 
     match args.view_kind {
         ViewKind::Module => {
@@ -488,6 +522,7 @@ fn run_view(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
         &path,
         args.config.as_deref(),
         false,
+        args.cached,
         Some(log_override.unwrap_or("info")),
     )?;
 
@@ -525,7 +560,7 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     let search_dir = config_search_dir(&path);
     let cfg =
         Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    let report = analyze_path(&path, args.config.as_deref(), false, log_override)?;
+    let report = analyze_path(&path, args.config.as_deref(), false, args.cached, log_override)?;
 
     let rendered = match args.format {
         Format::Summary => export::format_summary(&report, args.top),
@@ -556,6 +591,23 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     }
     if args.verbose {
         emit_store_paths(&path, &cfg);
+    }
+    Ok(())
+}
+
+fn run_load(args: LoadArgs, log_override: Option<&str>) -> Result<()> {
+    let path = args.path.unwrap_or_else(|| PathBuf::from("."));
+    let report = analyze_path(&path, args.config.as_deref(), false, true, log_override)?;
+    let s = report.summary();
+    println!(
+        "loaded cached graph: {} nodes, {} edges, {} files",
+        s.nodes, s.edges, s.files
+    );
+    #[cfg(feature = "viewer")]
+    if args.view {
+        let layout = call_layout(&report.graph, ViewKind::Crates);
+        lcw_render::native::run(&report.graph, &layout.positions, &layout.groups)
+            .context("running the viewer")?;
     }
     Ok(())
 }

@@ -38,6 +38,12 @@ pub enum EngineError {
     Adapter(#[from] AdapterError),
     #[error("no source files found under {0}")]
     NoFiles(PathBuf),
+    #[error("[graph_store] is disabled in configuration")]
+    GraphStoreDisabled,
+    #[error("no cached graph at {path} — run `lcw analyze` on this repository first")]
+    NoCachedGraph { path: PathBuf },
+    #[error("graph store error: {0}")]
+    GraphStore(#[from] lcw_graph_store::StoreError),
 }
 
 /// Streaming analysis progress (Manifesto Principle III + plan: streaming API
@@ -150,6 +156,27 @@ impl Engine {
     /// Analyze a repository rooted at `root`.
     pub fn analyze(&self, root: &Path) -> Result<AnalysisReport, EngineError> {
         self.analyze_with_progress(root, &mut |_| {})
+    }
+
+    /// Load the Layer-1 graph from `graph.sqlite` without discovering or parsing
+    /// sources. Diagnostics, metrics, and suggestions are **not** recomputed
+    /// (graph walking and layout only). Returns [`EngineError::GraphStoreDisabled`]
+    /// when `[graph_store].enabled = false`, or [`EngineError::NoCachedGraph`]
+    /// when the file is missing.
+    pub fn load_from_store(&self, root: &Path) -> Result<AnalysisReport, EngineError> {
+        if !self.config.graph_store.enabled {
+            return Err(EngineError::GraphStoreDisabled);
+        }
+        let path = cache::graph_db_file(root, &self.config.cache.dir)
+            .ok_or_else(|| EngineError::Config("could not resolve graph store path".into()))?;
+        if !path.is_file() {
+            return Err(EngineError::NoCachedGraph { path });
+        }
+        let snapshot = lcw_graph_store::load_graph(&path)?;
+        let graph = CodeGraph::from_snapshot(snapshot);
+        lcw_telemetry::count("engine.nodes", graph.node_count() as u64);
+        lcw_telemetry::count("engine.edges", graph.edge_count() as u64);
+        Ok(AnalysisReport::new(graph))
     }
 
     /// Analyze `root`, streaming [`Progress`] events through `progress` as each
@@ -538,6 +565,78 @@ mod tests {
         assert!(graph_path.is_file(), "graph.sqlite should be persisted");
         let summary = lcw_graph_store::summary(&graph_path).expect("graph summary");
         assert!(summary.nodes >= 2, "expected at least a and b");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache_home);
+    }
+
+    #[test]
+    fn load_from_store_after_analyze() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lcw-load-store-{}-{nanos}",
+            std::process::id()
+        ));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
+
+        let cache_home = std::env::temp_dir().join(format!(
+            "lcw-load-store-cache-{}-{nanos}",
+            std::process::id()
+        ));
+        let _cache_env = CacheHomeGuard::set(&cache_home);
+
+        let engine = Engine::new(Config::default());
+        let full = engine.analyze(&root).expect("analyze");
+        let loaded = engine.load_from_store(&root).expect("load_from_store");
+        assert_eq!(loaded.graph.node_count(), full.graph.node_count());
+        assert_eq!(loaded.graph.edge_count(), full.graph.edge_count());
+        assert!(
+            loaded.diagnostics.is_empty(),
+            "cached load skips Layer 2/3 for MVP"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache_home);
+    }
+
+    #[test]
+    fn load_from_store_errors_when_missing() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lcw-load-miss-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let cache_home = std::env::temp_dir().join(format!(
+            "lcw-load-miss-cache-{}-{nanos}",
+            std::process::id()
+        ));
+        let _cache_env = CacheHomeGuard::set(&cache_home);
+
+        let engine = Engine::new(Config::default());
+        assert!(matches!(
+            engine.load_from_store(&root),
+            Err(EngineError::NoCachedGraph { .. })
+        ));
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&cache_home);

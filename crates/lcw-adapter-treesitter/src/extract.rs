@@ -231,7 +231,7 @@ fn make_function_node(
         qualified_name: qualified.to_string(),
         module_path: module_path.to_string(),
         kind,
-        span: span_of(func, FileId(0)),
+        span: span_of_definition(func, FileId(0)),
         flags,
         stats,
     }
@@ -999,6 +999,30 @@ fn span_of(node: TsNode, file: FileId) -> SourceSpan {
         s.column as u32,
         e.row as u32 + 1,
         e.column as u32,
+    )
+}
+
+/// Span for a function/method definition, including attributes and doc comments
+/// immediately above the `fn` (tree-sitter keeps those as preceding siblings).
+fn span_of_definition(func: TsNode, file: FileId) -> SourceSpan {
+    let mut start = func.start_position();
+    let mut sib = func.prev_sibling();
+    while let Some(s) = sib {
+        match s.kind() {
+            "attribute_item" | "inner_attribute_item" | "line_comment" | "block_comment" => {
+                start = s.start_position();
+            }
+            _ => break,
+        }
+        sib = s.prev_sibling();
+    }
+    let end = func.end_position();
+    SourceSpan::new(
+        file,
+        start.row as u32 + 1,
+        start.column as u32,
+        end.row as u32 + 1,
+        end.column as u32,
     )
 }
 

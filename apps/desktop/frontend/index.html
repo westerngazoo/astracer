@@ -348,6 +348,9 @@
       .side {
         width: var(--side-w);
         flex-shrink: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
         padding: 14px;
         overflow-y: auto;
         background: var(--panel);
@@ -362,6 +365,30 @@
         border-radius: 10px;
         padding: 12px 14px;
         margin-bottom: 14px;
+      }
+
+      .card.detail {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        margin-bottom: 14px;
+      }
+
+      .card.detail .detail-head,
+      .card.detail .qname,
+      .card.detail .meta,
+      .card.detail .flags,
+      .card.detail .detail-tabs {
+        flex-shrink: 0;
+      }
+
+      .detail-details,
+      .detail-flow-pane,
+      .detail-code {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
       }
 
       .card h3 {
@@ -800,6 +827,7 @@
 
       .code-pane {
         margin-top: 4px;
+        min-height: 0;
       }
 
       .code-head-row {
@@ -856,8 +884,6 @@
       .explanation-text {
         margin: 0;
         padding: 10px;
-        max-height: 280px;
-        overflow: auto;
         border-radius: 8px;
         background: rgba(0, 0, 0, 0.25);
         border: 1px solid var(--border);
@@ -875,8 +901,6 @@
       .code-block {
         margin: 0;
         padding: 8px 0;
-        max-height: 420px;
-        overflow: auto;
         border-radius: 8px;
         background: rgba(0, 0, 0, 0.35);
         border: 1px solid var(--border);

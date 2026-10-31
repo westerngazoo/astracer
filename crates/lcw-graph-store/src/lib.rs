@@ -112,6 +112,11 @@ pub fn write(path: &Path, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
 }
 
 /// Load a full snapshot from `path`.
+pub fn load_graph(path: &Path) -> Result<GraphSnapshot, StoreError> {
+    read(path)
+}
+
+/// Load a full snapshot from `path`.
 pub fn read(path: &Path) -> Result<GraphSnapshot, StoreError> {
     let conn = Connection::open(path)?;
     check_version(&conn)?;
@@ -387,6 +392,8 @@ mod tests {
         let path = temp_db();
         write(&path, &snap).unwrap();
         let back = read(&path).unwrap();
+        let also = load_graph(&path).unwrap();
+        assert_eq!(also.nodes.len(), back.nodes.len());
         let g2 = CodeGraph::from_snapshot(back);
         assert_eq!(g2.node_count(), 2);
         assert_eq!(g2.edge_count(), 1);

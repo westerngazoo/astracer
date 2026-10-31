@@ -42,26 +42,42 @@ async fn analyze_repo(
     window: Window,
     path: String,
     semantic: bool,
+    use_cache: bool,
 ) -> Result<GraphView, String> {
     // Analysis is CPU-bound (parsing + O(n^2) layout), so run it on the blocking
     // pool to keep the webview responsive and progress events flowing.
-    tauri::async_runtime::spawn_blocking(move || analyze_blocking(window, PathBuf::from(path), semantic))
-        .await
-        .map_err(|e| format!("analysis task panicked: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        analyze_blocking(window, PathBuf::from(path), semantic, use_cache)
+    })
+    .await
+    .map_err(|e| format!("analysis task panicked: {e}"))?
 }
 
-fn analyze_blocking(window: Window, root: PathBuf, semantic: bool) -> Result<GraphView, String> {
+fn analyze_blocking(
+    window: Window,
+    root: PathBuf,
+    semantic: bool,
+    use_cache: bool,
+) -> Result<GraphView, String> {
     emit(&window, "config", "loading configuration");
     let mut config = Config::resolve(None, &root).map_err(|e| e.to_string())?;
-    if semantic {
+    if semantic && !use_cache {
         config.adapter.mode = AdapterMode::Semantic;
     }
 
     let engine = Engine::new(config);
-    // Forward the engine's streaming progress straight to the webview.
-    let report = engine
-        .analyze_with_progress(&root, &mut |p| emit_progress(&window, p))
-        .map_err(|e| e.to_string())?;
+    let report = if use_cache {
+        emit(
+            &window,
+            "load",
+            "loading cached graph (no parse; may be stale if sources changed)",
+        );
+        engine.load_from_store(&root).map_err(|e| e.to_string())?
+    } else {
+        engine
+            .analyze_with_progress(&root, &mut |p| emit_progress(&window, p))
+            .map_err(|e| e.to_string())?
+    };
 
     emit(
         &window,
@@ -119,7 +135,7 @@ async fn explain_function(
 #[tauri::command]
 fn read_source_snippet(file: String, start_line: u32, end_line: u32) -> Result<SourceSnippet, String> {
     const CONTEXT: u32 = 5;
-    const MAX_LINES: u32 = 80;
+    const MAX_LINES: u32 = 500;
     lcw_core::read_snippet(&file, start_line, end_line, CONTEXT, MAX_LINES).ok_or_else(|| {
         if file.is_empty() {
             "no source file for this node".into()

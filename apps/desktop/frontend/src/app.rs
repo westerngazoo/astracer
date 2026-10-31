@@ -36,6 +36,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent, WheelEvent};
 
+use crate::flow_diagram::{self, CallTreeLayout, FlowTreeNode};
 use crate::transport::{
     self, EngineTransport, ExplainContext, ExplainMetrics, FixtureTransport, TauriTransport,
 };
@@ -478,6 +479,16 @@ fn tree_item(graph: &CodeGraph, n: &CallTreeNode) -> TreeItem {
     }
 }
 
+fn tree_to_flow(item: &TreeItem) -> FlowTreeNode {
+    FlowTreeNode {
+        graph_index: item.node,
+        name: item.name.clone(),
+        repeat: item.repeat,
+        external: item.external,
+        children: item.children.iter().map(tree_to_flow).collect(),
+    }
+}
+
 /// Source code shown in the detail pane's Code tab.
 #[derive(Clone, Debug, PartialEq)]
 enum SourcePane {
@@ -519,6 +530,7 @@ impl ExplainProvider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailTab {
     Details,
+    Flow,
     Code,
 }
 
@@ -1207,6 +1219,7 @@ pub fn App() -> impl IntoView {
                     nav=nav
                     actions=actions
                 />
+                <div class="splitter split-explorer" role="separator" aria-label="Resize explorer"></div>
                 <div class="stage">
                     <canvas node_ref=canvas_ref class="graph" width="1000" height="700"></canvas>
                     <div class="labels">
@@ -1243,6 +1256,7 @@ pub fn App() -> impl IntoView {
                         title="Overview — click or drag to recenter"
                     ></canvas>
                 </div>
+                <div class="splitter split-side" role="separator" aria-label="Resize detail panel"></div>
                 <aside class="side">
                     {move || error.get().map(|e| view! { <div class="error">{e}</div> })}
                     <DetailPane nav=nav actions=actions />
@@ -1702,6 +1716,157 @@ fn tree_view(item: &TreeItem, go: &Rc<dyn Fn(usize, bool)>) -> AnyView {
     .into_any()
 }
 
+fn flow_diagram_svg(layout: &CallTreeLayout, go: Rc<dyn Fn(usize, bool)>) -> AnyView {
+    use flow_diagram::{FLOW_NODE_W, NODE_H};
+    let w = layout.width;
+    let h = layout.height;
+    let edges: Vec<AnyView> = layout
+        .edges
+        .iter()
+        .map(|&(a, b)| {
+            let (pa, pb) = (&layout.nodes[a], &layout.nodes[b]);
+            let y1 = pa.y + NODE_H;
+            let y2 = pb.y;
+            let mid = (y1 + y2) * 0.5;
+            view! {
+                <path
+                    class="flow-edge"
+                    d=format!("M {} {} C {} {} {} {} {} {}", pa.x, y1, pa.x, mid, pb.x, mid, pb.x, y2)
+                    fill="none"
+                />
+            }
+            .into_any()
+        })
+        .collect();
+    let nodes: Vec<AnyView> = layout
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let idx = n.graph_index;
+            let go_click = go.clone();
+            let class = if n.external {
+                "flow-node ext"
+            } else if n.repeat {
+                "flow-node repeat"
+            } else if i == 0 {
+                "flow-node root"
+            } else {
+                "flow-node"
+            };
+            let x = n.x;
+            let y = n.y;
+            let title = n.name.clone();
+            view! {
+                <g
+                    class=class
+                    transform=format!("translate({},{})", x - FLOW_NODE_W * 0.5, y)
+                    on:click=move |_| go_click(idx, true)
+                >
+                    <rect class="flow-rect" width=FLOW_NODE_W height=NODE_H rx="5" />
+                    <text class="flow-label" x=FLOW_NODE_W * 0.5 y=NODE_H * 0.62 text-anchor="middle">{n.name.clone()}</text>
+                    <title>{title}</title>
+                </g>
+            }
+            .into_any()
+        })
+        .collect();
+    view! {
+        <svg class="flow-svg" viewBox=format!("0 0 {} {}", w, h) width="100%" height=h>
+            {edges}
+            {nodes}
+        </svg>
+    }
+    .into_any()
+}
+
+#[component]
+fn FlowTab(nav: Nav, actions: ActionsHandle, root_name: String) -> impl IntoView {
+    view! {
+        <div class="detail-flow">
+            <div class="flow-trace">
+                <div class="flow-head">
+                    <h4>"Trace"</h4>
+                    <button
+                        class="small"
+                        on:click=move |_| actions.with_value(|x| x.trace.clone())()
+                        title="Use this node as the flow source; then pick a target"
+                    >"trace from here"</button>
+                    {move || nav.anchor.get().map(|_| view! {
+                        <button
+                            class="small"
+                            on:click=move |_| actions.with_value(|x| x.clear_flow.clone())()
+                            title="Forget the flow source"
+                        >"clear"</button>
+                    })}
+                </div>
+                {move || {
+                    let anchor = nav.anchor.get();
+                    let chain = nav.chain.get();
+                    let go = actions.with_value(|x| x.go.clone());
+                    match anchor {
+                        None => view! { <p class="hint">"Set a source, then pick a target to see the shortest call path."</p> }.into_any(),
+                        Some(a) if nav.selected.get() == Some(a) => view! {
+                            <p class="hint">{format!("source: {} — pick a target.", nav.anchor_name.get())}</p>
+                        }.into_any(),
+                        Some(_) if chain.is_empty() => view! {
+                            <p class="hint warn">{format!("no call path to/from {}.", nav.anchor_name.get())}</p>
+                        }.into_any(),
+                        Some(_) => {
+                            let items: Vec<AnyView> = chain
+                                .iter()
+                                .enumerate()
+                                .map(|(i, h)| {
+                                    let go_h = go.clone();
+                                    let idx = h.node;
+                                    view! {
+                                        <span>
+                                            {(i > 0).then(|| view! { <span class="sep">" → "</span> })}
+                                            <span class="hop" on:click=move |_| go_h(idx, true)>{h.name.clone()}</span>
+                                        </span>
+                                    }.into_any()
+                                })
+                                .collect();
+                            view! { <div class="chain">{items}</div> }.into_any()
+                        }
+                    }
+                }}
+            </div>
+            <h4>"Call flow"</h4>
+            {move || {
+                let go = actions.with_value(|x| x.go.clone());
+                match nav.tree.get() {
+                    None => view! { <p class="hint">"Select a node to see its call flow."</p> }.into_any(),
+                    Some(t) if t.children.is_empty() && t.truncated == 0 => view! {
+                        <p class="hint">{format!("Leaf: no callees in the analyzed graph (depth {TREE_DEPTH}, width {TREE_WIDTH}).")}</p>
+                    }.into_any(),
+                    Some(t) => {
+                        let truncated = t.truncated;
+                        let flow_root = FlowTreeNode {
+                            graph_index: t.node,
+                            name: root_name.clone(),
+                            repeat: false,
+                            external: t.external,
+                            children: t.children.iter().map(tree_to_flow).collect(),
+                        };
+                        let layout = flow_diagram::layout_call_tree(&flow_root);
+                        let svg = flow_diagram_svg(&layout, go);
+                        let more = (truncated > 0)
+                            .then(|| view! { <p class="hint more-trunc">{format!("… {truncated} more callee(s) not shown")}</p> });
+                        view! {
+                            <div class="flow-diagram-wrap">
+                                <p class="hint diagram-cap">"Callees from this function (bounded tree)."</p>
+                                {svg}
+                                {more}
+                            </div>
+                        }.into_any()
+                    }
+                }
+            }}
+        </div>
+    }
+}
+
 #[component]
 fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
     move || {
@@ -1724,7 +1889,9 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
             let clear = a.clear.clone();
             let tab = nav.detail_tab;
             let on_details = move |_| tab.set(DetailTab::Details);
+            let on_flow = move |_| tab.set(DetailTab::Flow);
             let on_code = move |_| tab.set(DetailTab::Code);
+            let qname = card.qualified_name.clone();
 
             view! {
                 <div class="card detail">
@@ -1744,6 +1911,10 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                             class=move || if tab.get() == DetailTab::Details { "tab active" } else { "tab" }
                             on:click=on_details
                         >"Details"</button>
+                        <button
+                            class=move || if tab.get() == DetailTab::Flow { "tab active" } else { "tab" }
+                            on:click=on_flow
+                        >"Flow"</button>
                         <button
                             class=move || if tab.get() == DetailTab::Code { "tab active" } else { "tab" }
                             on:click=on_code
@@ -1831,6 +2002,9 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                             }
                         })
                     }}
+                    </div>
+                    <div class="detail-flow-pane" style:display=move || if tab.get() == DetailTab::Flow { "block" } else { "none" }>
+                        <FlowTab nav=nav actions=actions root_name=qname />
                     </div>
                     <div class="detail-code" style:display=move || if tab.get() == DetailTab::Code { "block" } else { "none" }>
                         {move || source_code_view(nav, &card, &full_location)}
@@ -2462,23 +2636,28 @@ fn wire_pointer_events(
     }
 }
 
+/// Match canvas backing store to the stage after a layout change.
+fn sync_canvas_layout(state: &Shared, labels: RwSignal<Vec<LabelBox>>) {
+    {
+        let mut s = state.borrow_mut();
+        if let Some(canvas) = s.canvas.clone() {
+            resize_canvas(&canvas);
+            let (w, h) = (canvas.width(), canvas.height());
+            if let Some(viewer) = s.viewer.as_mut() {
+                viewer.resize(w, h);
+            }
+        }
+    }
+    refresh_view(state, labels);
+}
+
 /// Keep the canvas + camera in sync with window resizes.
 fn wire_resize(state: Shared, labels: RwSignal<Vec<LabelBox>>) {
     let Some(window) = web_sys::window() else {
         return;
     };
     let cb = Closure::wrap(Box::new(move |_ev: web_sys::Event| {
-        {
-            let mut s = state.borrow_mut();
-            if let Some(canvas) = s.canvas.clone() {
-                resize_canvas(&canvas);
-                let (w, h) = (canvas.width(), canvas.height());
-                if let Some(viewer) = s.viewer.as_mut() {
-                    viewer.resize(w, h);
-                }
-            }
-        }
-        refresh_view(&state, labels);
+        sync_canvas_layout(&state, labels);
     }) as Box<dyn FnMut(web_sys::Event)>);
     let _ = window.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref());
     cb.forget();

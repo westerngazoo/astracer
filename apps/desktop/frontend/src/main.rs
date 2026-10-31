@@ -1,6 +1,7 @@
 //! Live Code Walk frontend entry point (Leptos CSR, WASM).
 
 mod app;
+mod flow_diagram;
 mod transport;
 
 use app::App;

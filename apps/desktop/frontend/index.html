@@ -24,6 +24,8 @@
         --closure: rgb(158, 115, 230);
         --external: rgb(115, 115, 128);
         --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+        --explorer-w: 320px;
+        --side-w: 380px;
       }
 
       * {
@@ -148,8 +150,51 @@
         min-height: 0;
       }
 
+      .body.panel-resizing {
+        cursor: col-resize;
+        user-select: none;
+      }
+
+      .body.panel-resizing .stage canvas.graph {
+        pointer-events: none;
+      }
+
+      .splitter {
+        flex-shrink: 0;
+        width: 5px;
+        margin: 0 -1px;
+        position: relative;
+        z-index: 3;
+        cursor: col-resize;
+        touch-action: none;
+        background: transparent;
+        transition: background 0.12s ease;
+      }
+
+      .splitter::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        width: 1px;
+        transform: translateX(-50%);
+        background: var(--border);
+        pointer-events: none;
+      }
+
+      .splitter:hover,
+      .body.panel-resizing .splitter.active {
+        background: rgba(76, 140, 242, 0.12);
+      }
+
+      .splitter:hover::after,
+      .body.panel-resizing .splitter.active::after {
+        background: rgba(76, 140, 242, 0.55);
+      }
+
       .explorer {
-        width: 320px;
+        width: var(--explorer-w);
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
@@ -301,7 +346,7 @@
       }
 
       .side {
-        width: 380px;
+        width: var(--side-w);
         flex-shrink: 0;
         padding: 14px;
         overflow-y: auto;
@@ -699,6 +744,60 @@
         background: rgba(76, 140, 242, 0.12);
       }
 
+      .detail-flow-pane {
+        margin-top: 4px;
+      }
+
+      .flow-diagram-wrap {
+        overflow-x: auto;
+        margin-top: 6px;
+        padding-bottom: 8px;
+      }
+
+      .flow-svg {
+        display: block;
+        min-height: 80px;
+      }
+
+      .flow-edge {
+        stroke: rgba(76, 140, 242, 0.45);
+        stroke-width: 1.5;
+      }
+
+      .flow-node {
+        cursor: pointer;
+      }
+
+      .flow-rect {
+        fill: var(--panel-2);
+        stroke: var(--border);
+        stroke-width: 1;
+      }
+
+      .flow-node.root .flow-rect {
+        stroke: rgba(76, 140, 242, 0.65);
+        fill: rgba(76, 140, 242, 0.1);
+      }
+
+      .flow-node.ext .flow-rect {
+        stroke: var(--external);
+      }
+
+      .flow-node.repeat .flow-label {
+        color: var(--muted);
+      }
+
+      .flow-label {
+        font-family: var(--mono);
+        font-size: 10px;
+        fill: var(--text);
+        pointer-events: none;
+      }
+
+      .diagram-cap {
+        margin-bottom: 4px;
+      }
+
       .code-pane {
         margin-top: 4px;
       }
@@ -1023,6 +1122,101 @@
         text-overflow: ellipsis;
       }
     </style>
+    <script>
+      (function () {
+        var LS_EX = "livewalk-panel-explorer-w";
+        var LS_SIDE = "livewalk-panel-side-w";
+        var MIN_EX = 200;
+        var MAX_EX = 560;
+        var DEF_EX = 320;
+        var MIN_SIDE = 260;
+        var MAX_SIDE = 640;
+        var DEF_SIDE = 380;
+
+        function clamp(v, lo, hi) {
+          return Math.min(hi, Math.max(lo, v));
+        }
+
+        function read(key, def, lo, hi) {
+          var raw = localStorage.getItem(key);
+          var n = raw ? parseFloat(raw) : def;
+          return clamp(Number.isFinite(n) ? n : def, lo, hi);
+        }
+
+        function setVar(name, px) {
+          document.documentElement.style.setProperty(name, px + "px");
+        }
+
+        function loadSaved() {
+          setVar("--explorer-w", read(LS_EX, DEF_EX, MIN_EX, MAX_EX));
+          setVar("--side-w", read(LS_SIDE, DEF_SIDE, MIN_SIDE, MAX_SIDE));
+        }
+
+        function notifyLayout() {
+          window.dispatchEvent(new Event("resize"));
+        }
+
+        function panelWidth(sel, fallback) {
+          var el = document.querySelector(sel);
+          return el && el.clientWidth ? el.clientWidth : fallback;
+        }
+
+        function startDrag(splitter, kind) {
+          splitter.addEventListener("mousedown", function (ev) {
+            ev.preventDefault();
+            var body = document.querySelector(".body");
+            if (!body) return;
+            var startX = ev.clientX;
+            var startEx = panelWidth(".explorer", DEF_EX);
+            var startSide = panelWidth(".side", DEF_SIDE);
+            body.classList.add("panel-resizing");
+            splitter.classList.add("active");
+
+            function onMove(ev) {
+              var dx = ev.clientX - startX;
+              if (kind === "explorer") {
+                setVar("--explorer-w", clamp(startEx + dx, MIN_EX, MAX_EX));
+              } else {
+                setVar("--side-w", clamp(startSide - dx, MIN_SIDE, MAX_SIDE));
+              }
+              notifyLayout();
+            }
+
+            function onUp() {
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+              body.classList.remove("panel-resizing");
+              splitter.classList.remove("active");
+              localStorage.setItem(LS_EX, String(panelWidth(".explorer", DEF_EX)));
+              localStorage.setItem(LS_SIDE, String(panelWidth(".side", DEF_SIDE)));
+              notifyLayout();
+            }
+
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+          });
+        }
+
+        function wireSplitters() {
+          var ex = document.querySelector(".split-explorer");
+          var side = document.querySelector(".split-side");
+          if (!ex || !side || ex.dataset.wired) return false;
+          ex.dataset.wired = "1";
+          side.dataset.wired = "1";
+          startDrag(ex, "explorer");
+          startDrag(side, "side");
+          return true;
+        }
+
+        loadSaved();
+        if (!wireSplitters()) {
+          var obs = new MutationObserver(function () {
+            if (wireSplitters()) obs.disconnect();
+          });
+          obs.observe(document.documentElement, { childList: true, subtree: true });
+        }
+      })();
+    </script>
   </head>
   <body></body>
 </html>

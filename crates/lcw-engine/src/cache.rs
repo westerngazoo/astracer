@@ -166,6 +166,16 @@ pub fn graph_db_file(root: &Path, dir: &str) -> Option<PathBuf> {
     repo_cache_dir(root, dir).map(|d| d.join(GRAPH_DB_FILE))
 }
 
+/// Create the per-repo cache directory if needed. Analysis does not require a
+/// pre-existing cache; this is called before writes so `fragments.json` and
+/// `graph.sqlite` can land in a fresh `livewalk/{hash}/` folder.
+pub fn ensure_repo_cache_dir(root: &Path, dir: &str) -> std::io::Result<()> {
+    if let Some(p) = repo_cache_dir(root, dir) {
+        std::fs::create_dir_all(&p)?;
+    }
+    Ok(())
+}
+
 /// Environment variable that overrides the cache home (when `[cache].dir` is
 /// empty). Useful for tests and for pinning all Livewalk caches to one folder.
 pub const CACHE_HOME_ENV: &str = "LIVEWALK_CACHE_HOME";
@@ -250,5 +260,26 @@ mod tests {
         let f = cache_file(repo, "  \t  ").unwrap();
         let home = cache_home().expect("cache home");
         assert!(f.starts_with(home.join("livewalk")));
+    }
+
+    #[test]
+    fn ensure_repo_cache_dir_creates_missing_directory() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "lcw-ensure-cache-{}-{nanos}",
+            std::process::id()
+        ));
+        let repo = base.join("repo");
+        let cache_dir = base.join("cache-root");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(!cache_dir.exists(), "precondition: cache dir must not exist yet");
+        ensure_repo_cache_dir(&repo, &cache_dir.to_string_lossy()).expect("create cache dir");
+        assert!(cache_dir.is_dir());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

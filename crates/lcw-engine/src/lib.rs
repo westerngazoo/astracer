@@ -214,6 +214,16 @@ impl Engine {
     ) -> Result<(AnalysisReport, IncrementalStats), EngineError> {
         let _perf = lcw_telemetry::PerfGuard::new("engine.analyze");
 
+        if self.config.cache.enabled || self.config.graph_store.enabled {
+            if let Err(e) = cache::ensure_repo_cache_dir(root, &self.config.cache.dir) {
+                lcw_telemetry::warn!(
+                    target: "lcw::engine",
+                    error = %e,
+                    "failed to create cache directory (analysis still correct)"
+                );
+            }
+        }
+
         progress(Progress::Discovering);
         let files = discover_files(root, &self.config, self.adapter.extensions())?;
         lcw_telemetry::count("engine.files_discovered", files.len() as u64);

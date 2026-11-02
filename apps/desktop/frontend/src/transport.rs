@@ -13,7 +13,7 @@
 //!   `acquireVsCodeApi().postMessage` + `window.addEventListener("message")`.
 
 use lcw_core::SourceSnippet;
-use lcw_desktop_api::{GraphView, Progress, ReadSourceSnippetArgs};
+use lcw_desktop_api::{AnalyzeArgs, GraphView, Progress, ReadSourceSnippetArgs};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -55,15 +55,6 @@ extern "C" {
         event: &str,
         handler: &Closure<dyn FnMut(JsValue)>,
     ) -> Result<JsValue, JsValue>;
-}
-
-/// Arguments for the `analyze_repo` command (keys map 1:1 to the Rust command
-/// parameters; Tauri handles the JS<->Rust bridging).
-#[derive(Serialize)]
-struct AnalyzeArgs {
-    path: String,
-    semantic: bool,
-    use_cache: bool,
 }
 
 /// The Tauri host transport.

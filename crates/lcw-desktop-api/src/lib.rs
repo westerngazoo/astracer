@@ -50,6 +50,15 @@ pub struct ExplainContext {
     pub call_tree_summary: Option<String>,
 }
 
+/// Arguments for the `analyze_repo` Tauri command (camelCase on the wire).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeArgs {
+    pub path: String,
+    pub semantic: bool,
+    pub use_cache: bool,
+}
+
 /// Arguments for the `read_source_snippet` Tauri command (camelCase on the wire).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +120,19 @@ mod tests {
         assert!(json.contains("startLine"));
         let back: ExplainContext = serde_json::from_str(&json).unwrap();
         assert_eq!(ctx, back);
+    }
+
+    #[test]
+    fn analyze_args_camel_case() {
+        let args = AnalyzeArgs {
+            path: "/tmp/repo".into(),
+            semantic: true,
+            use_cache: false,
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        assert!(json.contains("useCache"));
+        let back: AnalyzeArgs = serde_json::from_str(&json).unwrap();
+        assert_eq!(args, back);
     }
 
     #[test]

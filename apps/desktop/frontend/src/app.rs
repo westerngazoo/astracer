@@ -1055,8 +1055,16 @@ pub fn App() -> impl IntoView {
                         }
                     }
                     Err(e) => {
-                        status.set("Analysis failed.".into());
-                        error.set(Some(e));
+                        if cache {
+                            status.set("Cached load failed.".into());
+                            error.set(Some(format!(
+                                "Could not load a saved graph ({e}). Uncheck \"cached\" and run \
+                                 Analyze first, or fix the path / livewalk.toml [graph_store] setting."
+                            )));
+                        } else {
+                            status.set("Analysis failed.".into());
+                            error.set(Some(format!("Analysis failed: {e}")));
+                        }
                     }
                 }
                 busy.set(false);

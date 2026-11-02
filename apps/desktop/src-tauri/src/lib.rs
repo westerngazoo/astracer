@@ -16,7 +16,7 @@ mod llm;
 use lcw_config::{AdapterMode, Config};
 use lcw_core::SourceSnippet;
 use lcw_desktop_api::{GraphView, Progress};
-use lcw_engine::{Engine, Progress as EngineProgress};
+use lcw_engine::{Engine, EngineError, Progress as EngineProgress};
 use lcw_layout::LayoutParams;
 use tauri::{Emitter, Window};
 
@@ -47,7 +47,7 @@ async fn analyze_repo(
     // Analysis is CPU-bound (parsing + O(n^2) layout), so run it on the blocking
     // pool to keep the webview responsive and progress events flowing.
     tauri::async_runtime::spawn_blocking(move || {
-        analyze_blocking(window, PathBuf::from(path), semantic, use_cache)
+        analyze_blocking(window, path, semantic, use_cache)
     })
     .await
     .map_err(|e| format!("analysis task panicked: {e}"))?
@@ -55,10 +55,19 @@ async fn analyze_repo(
 
 fn analyze_blocking(
     window: Window,
-    root: PathBuf,
+    path: String,
     semantic: bool,
     use_cache: bool,
 ) -> Result<GraphView, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("repository path is empty".into());
+    }
+    let root = PathBuf::from(trimmed);
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("repository path not found or not accessible: {e}"))?;
+
     emit(&window, "config", "loading configuration");
     let mut config = Config::resolve(None, &root).map_err(|e| e.to_string())?;
     if semantic && !use_cache {
@@ -67,16 +76,9 @@ fn analyze_blocking(
 
     let engine = Engine::new(config);
     let report = if use_cache {
-        emit(
-            &window,
-            "load",
-            "loading cached graph (no parse; may be stale if sources changed)",
-        );
-        engine.load_from_store(&root).map_err(|e| e.to_string())?
+        load_cached_or_analyze(&window, &engine, &root)?
     } else {
-        engine
-            .analyze_with_progress(&root, &mut |p| emit_progress(&window, p))
-            .map_err(|e| e.to_string())?
+        run_full_analyze(&window, &engine, &root)?
     };
 
     emit(
@@ -94,6 +96,54 @@ fn analyze_blocking(
         positions: laid.positions,
         groups: laid.groups,
     })
+}
+
+/// Try `graph.sqlite` first; if there is no saved graph yet (common when
+/// "cached" is checked before the first successful analyze), fall back to a
+/// full parse instead of failing with `NoCachedGraph`.
+fn load_cached_or_analyze(
+    window: &Window,
+    engine: &Engine,
+    root: &std::path::Path,
+) -> Result<lcw_core::AnalysisReport, String> {
+    emit(
+        window,
+        "load",
+        "loading cached graph (no parse; may be stale if sources changed)",
+    );
+    match engine.load_from_store(root) {
+        Ok(report) => Ok(report),
+        Err(EngineError::NoCachedGraph { path }) => {
+            emit(
+                window,
+                "analyze",
+                format!(
+                    "no saved graph at {} — running full analysis (saved graph appears after this finishes)",
+                    path.display()
+                ),
+            );
+            run_full_analyze(window, engine, root)
+        }
+        Err(EngineError::GraphStoreDisabled) => {
+            emit(
+                window,
+                "analyze",
+                "graph store disabled in livewalk.toml — running full analysis",
+            );
+            run_full_analyze(window, engine, root)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn run_full_analyze(
+    window: &Window,
+    engine: &Engine,
+    root: &std::path::Path,
+) -> Result<lcw_core::AnalysisReport, String> {
+    engine
+        .analyze_with_progress(root, &mut |p| emit_progress(window, p))
+        .map_err(|e| e.to_string())
 }
 
 /// Translate an engine progress event into a UI progress event.

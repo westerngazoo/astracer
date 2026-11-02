@@ -46,7 +46,10 @@ build_lcw_cli() {
 }
 
 ensure_lcw_cli() {
+  local engine_lib="${LIVEWALK_ROOT}/crates/lcw-engine/src/lib.rs"
   if [[ "${REBUILD_CLI}" == "1" ]] || [[ ! -x "${LCW_BIN}" ]]; then
+    build_lcw_cli
+  elif [[ -f "${engine_lib}" && "${engine_lib}" -nt "${LCW_BIN}" ]]; then
     build_lcw_cli
   fi
 }

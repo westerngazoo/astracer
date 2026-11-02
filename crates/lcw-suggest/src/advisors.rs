@@ -3,9 +3,12 @@
 //! optimization [`Target`]s they serve. Priorities here are *base* weights; the
 //! orchestrator rescales them by the config's per-target priorities.
 
-use lcw_core::{AnalysisReport, MetricKind, Suggestion, Target, Vertical};
+use lcw_core::{AnalysisReport, MetricKind, NodeId, Suggestion, Target, Vertical};
 
 use crate::Advisor;
+
+/// Per-node suggestions cap so the UI stays scannable.
+const PER_NODE_CAP: usize = 8;
 
 /// Number of diagnostics with a given code.
 fn count(report: &AnalysisReport, code: &str) -> usize {
@@ -26,6 +29,52 @@ fn cap(base: usize, ceiling: u8) -> u8 {
     base.min(ceiling as usize) as u8
 }
 
+/// One suggestion per attached diagnostic (up to [`PER_NODE_CAP`]), using the
+/// diagnostic message as the title and `fix` as the recommended action.
+fn per_node_suggestions(
+    report: &AnalysisReport,
+    code: &str,
+    fix: &str,
+    targets: &[Target],
+    priority: u8,
+) -> Vec<Suggestion> {
+    report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == code && d.node.is_some())
+        .take(PER_NODE_CAP)
+        .map(|d| {
+            Suggestion::new(d.message.clone(), fix)
+                .at(d.node.unwrap_or(NodeId(0)))
+                .with_targets(targets.iter().copied())
+                .with_codes([code])
+                .with_priority(priority)
+        })
+        .collect()
+}
+
+fn overflow_summary(
+    total: usize,
+    code: &str,
+    label: &str,
+    fix: &str,
+    targets: &[Target],
+    priority: u8,
+) -> Option<Suggestion> {
+    if total <= PER_NODE_CAP {
+        return None;
+    }
+    Some(
+        Suggestion::new(
+            format!("… and {} more {label}", total.saturating_sub(PER_NODE_CAP)),
+            fix,
+        )
+        .with_targets(targets.iter().copied())
+        .with_codes([code])
+        .with_priority(priority.saturating_sub(5)),
+    )
+}
+
 /// Refactor high-complexity functions.
 pub struct ComplexityAdvisor;
 impl Advisor for ComplexityAdvisor {
@@ -33,17 +82,20 @@ impl Advisor for ComplexityAdvisor {
         "complexity"
     }
     fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
-        let n = count(report, "high_complexity");
+        let code = "high_complexity";
+        let n = count(report, code);
         if n == 0 {
             return Vec::new();
         }
-        vec![Suggestion::new(
-            format!("Reduce cyclomatic complexity in {n} function(s)"),
-            "High-complexity functions are hard to test and reason about; extract helpers, \
-             flatten branching and replace nested conditionals with early returns.",
-        )
-        .with_targets([Target::Maintainability, Target::Robustness])
-        .with_priority(cap(60 + n * 3, 90))]
+        const FIX: &str = "Extract helpers, flatten branching, and replace nested conditionals \
+                           with early returns.";
+        let targets = [Target::Maintainability, Target::Robustness];
+        let priority = cap(60 + n * 3, 90);
+        let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
+        if let Some(more) = overflow_summary(n, code, "high-complexity function(s)", FIX, &targets, priority) {
+            out.push(more);
+        }
+        out
     }
 }
 
@@ -62,9 +114,11 @@ impl Advisor for CyclesAdvisor {
         vec![Suggestion::new(
             format!("Break dependency cycles ({pct:.0}% of functions are entangled)"),
             "Cyclic call structures block modular reasoning and incremental compilation; \
-             introduce trait boundaries / dependency inversion to cut the cycles.",
+             introduce trait boundaries / dependency inversion to cut the cycles. Use Diagnostics \
+             (cycles lens) to find participating nodes.",
         )
         .with_targets([Target::Maintainability, Target::Scalability])
+        .with_codes(["cycle"])
         .with_priority(cap(60 + pct as usize, 90))]
     }
 }
@@ -76,17 +130,20 @@ impl Advisor for HazardsAdvisor {
         "hazards"
     }
     fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
-        let n = count(report, "unsafe_usage");
+        let code = "unsafe_usage";
+        let n = count(report, code);
         if n == 0 {
             return Vec::new();
         }
-        vec![Suggestion::new(
-            format!("Audit and encapsulate `unsafe` in {n} function(s)"),
-            "Confine `unsafe` behind safe abstractions with documented invariants, and cover \
-             them with tests/miri to protect memory and thread safety.",
-        )
-        .with_targets([Target::Robustness])
-        .with_priority(cap(65 + n * 2, 88))]
+        const FIX: &str = "Confine `unsafe` behind safe abstractions with documented invariants, \
+                           and cover them with tests or Miri.";
+        let targets = [Target::Robustness];
+        let priority = cap(65 + n * 2, 88);
+        let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
+        if let Some(more) = overflow_summary(n, code, "`unsafe` function(s)", FIX, &targets, priority) {
+            out.push(more);
+        }
+        out
     }
 }
 
@@ -97,17 +154,20 @@ impl Advisor for AllocationAdvisor {
         "allocations"
     }
     fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
-        let n = count(report, "heap_pressure");
+        let code = "heap_pressure";
+        let n = count(report, code);
         if n == 0 {
             return Vec::new();
         }
-        vec![Suggestion::new(
-            format!("Reduce heap allocations in {n} hot function(s)"),
-            "Prefer borrowing, pre-sized buffers and arena/stack reuse over per-call allocation \
-             to cut allocator pressure and tail latency.",
-        )
-        .with_targets([Target::Performance, Target::Latency])
-        .with_priority(cap(60 + n * 2, 85))]
+        const FIX: &str = "Prefer borrowing, pre-sized buffers, and arena/stack reuse over \
+                           per-call allocation to cut allocator pressure and tail latency.";
+        let targets = [Target::Performance, Target::Latency];
+        let priority = cap(60 + n * 2, 85);
+        let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
+        if let Some(more) = overflow_summary(n, code, "allocation-heavy function(s)", FIX, &targets, priority) {
+            out.push(more);
+        }
+        out
     }
 }
 
@@ -122,13 +182,27 @@ impl Advisor for LayeringAdvisor {
         if n == 0 {
             return Vec::new();
         }
-        vec![Suggestion::new(
-            format!("Restore architecture boundaries ({n} layering violation(s))"),
-            "Inner layers should not depend on outer ones; invert the offending dependencies \
-             (ports/adapters) so the domain stays framework-agnostic.",
-        )
-        .with_targets([Target::Maintainability, Target::Scalability])
-        .with_priority(cap(62 + n * 2, 88))]
+        const FIX: &str = "Inner layers should not depend on outer ones; invert the offending \
+                           dependencies (ports/adapters) so the domain stays framework-agnostic.";
+        let targets = [Target::Maintainability, Target::Scalability];
+        let priority = cap(62 + n * 2, 88);
+        let mut out = Vec::new();
+        for code in ["layering_violation", "mvc_violation"] {
+            out.extend(per_node_suggestions(report, code, FIX, &targets, priority));
+        }
+        out.truncate(PER_NODE_CAP);
+        if n > PER_NODE_CAP {
+            out.push(
+                Suggestion::new(
+                    format!("… and {} more layering violation(s)", n.saturating_sub(PER_NODE_CAP)),
+                    FIX,
+                )
+                .with_targets(targets)
+                .with_codes(["layering_violation", "mvc_violation"])
+                .with_priority(priority.saturating_sub(5)),
+            );
+        }
+        out
     }
 }
 
@@ -139,17 +213,20 @@ impl Advisor for PurityAdvisor {
         "purity"
     }
     fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
-        let n = count(report, "impure_hotspot");
+        let code = "impure_hotspot";
+        let n = count(report, code);
         if n == 0 {
             return Vec::new();
         }
-        vec![Suggestion::new(
-            format!("Isolate side effects in {n} widely-used function(s)"),
-            "Push I/O and mutation to the edges (functional core / imperative shell) so the \
-             high-fan-in core becomes pure and easy to test.",
-        )
-        .with_targets([Target::Robustness, Target::Maintainability])
-        .with_priority(cap(55 + n * 2, 80))]
+        const FIX: &str = "Push I/O and mutation to the edges (functional core / imperative shell) \
+                           so the high-fan-in core becomes pure and easy to test.";
+        let targets = [Target::Robustness, Target::Maintainability];
+        let priority = cap(55 + n * 2, 80);
+        let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
+        if let Some(more) = overflow_summary(n, code, "impure hotspot(s)", FIX, &targets, priority) {
+            out.push(more);
+        }
+        out
     }
 }
 

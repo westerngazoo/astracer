@@ -120,8 +120,8 @@ fn sort_and_cap(suggestions: &mut Vec<Suggestion>, config: &Config) {
 mod tests {
     use super::*;
     use lcw_core::{
-        CodeGraph, Diagnostic, Metric, MetricKind, Node, NodeFlags, NodeKind, NodeStats, Severity,
-        SourceSpan, Target, Vertical,
+        CodeGraph, Diagnostic, Metric, MetricKind, Node, NodeFlags, NodeId, NodeKind, NodeStats,
+        Severity, SourceSpan, Target, Vertical,
     };
 
     fn backend_graph() -> CodeGraph {
@@ -164,7 +164,7 @@ mod tests {
             "high_complexity",
             Severity::Medium,
             "x",
-        ));
+        ).at(NodeId(0)));
         report
             .metrics
             .push(Metric::project(MetricKind::Cyclicity, 0.25));
@@ -175,7 +175,7 @@ mod tests {
         assert!(report
             .suggestions
             .iter()
-            .any(|s| s.title.contains("cyclomatic")));
+            .any(|s| s.codes.contains(&"high_complexity".to_string()) || s.title.contains("complexity")));
         assert!(report
             .suggestions
             .iter()
@@ -198,8 +198,8 @@ mod tests {
             "hazards",
             "unsafe_usage",
             Severity::Medium,
-            "x",
-        ));
+            "unsafe in foo",
+        ).at(NodeId(0)));
 
         let mut config = Config::default();
         config.suggestions.robustness = 0.0; // zero out robustness weight

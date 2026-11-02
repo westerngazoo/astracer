@@ -12,6 +12,9 @@ pub struct GraphView {
     /// One box per crate. Older fixtures omit this field.
     #[serde(default)]
     pub groups: Vec<GroupBox>,
+    /// Canonical repository root from the last analyze (for resolving relative paths).
+    #[serde(default)]
+    pub repo_root: String,
 }
 
 /// Streaming progress emitted on the `analyze-progress` event channel.
@@ -66,6 +69,12 @@ pub struct ReadSourceSnippetArgs {
     pub file: String,
     pub start_line: u32,
     pub end_line: u32,
+    /// When `file` is repo-relative, join with this root before reading.
+    #[serde(default)]
+    pub repo_root: String,
+    /// Return the whole file (up to [`lcw_core::SNIPPET_WHOLE_FILE_MAX`] lines).
+    #[serde(default)]
+    pub whole_file: bool,
 }
 
 #[cfg(test)]
@@ -86,6 +95,7 @@ mod tests {
             },
             positions: vec![[1.0, 2.0], [3.0, 4.0]],
             groups: Vec::new(),
+            repo_root: String::new(),
         };
         let json = serde_json::to_string(&view).unwrap();
         let back: GraphView = serde_json::from_str(&json).unwrap();
@@ -141,6 +151,8 @@ mod tests {
             file: "lib.rs".into(),
             start_line: 5,
             end_line: 20,
+            repo_root: "/tmp/repo".into(),
+            whole_file: false,
         };
         let json = serde_json::to_string(&args).unwrap();
         assert!(json.contains("startLine"));

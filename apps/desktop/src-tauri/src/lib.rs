@@ -15,7 +15,7 @@ mod llm;
 
 use lcw_config::{AdapterMode, Config};
 use lcw_core::SourceSnippet;
-use lcw_desktop_api::{GraphView, Progress};
+use lcw_desktop_api::{GraphView, Progress, ReadSourceSnippetArgs};
 use lcw_engine::{Engine, EngineError, Progress as EngineProgress};
 use lcw_layout::LayoutParams;
 use tauri::{Emitter, Window};
@@ -95,6 +95,7 @@ fn analyze_blocking(
         report: report.snapshot(),
         positions: laid.positions,
         groups: laid.groups,
+        repo_root: root.to_string_lossy().into_owned(),
     })
 }
 
@@ -168,6 +169,28 @@ fn emit_progress(window: &Window, progress: EngineProgress) {
 /// `start_line`/`end_line` are the node's span (1-based, inclusive). A few
 /// context lines are included and the result is capped so the webview stays
 /// responsive.
+#[tauri::command]
+fn read_source_snippet(args: ReadSourceSnippetArgs) -> Result<SourceSnippet, String> {
+    const CONTEXT: u32 = 5;
+    const MAX_LINES: u32 = 500;
+    let resolved = lcw_core::resolve_source_path(&args.repo_root, &args.file);
+    let path = resolved.to_string_lossy().into_owned();
+    let (start, end) = if args.whole_file {
+        (1, u32::MAX)
+    } else {
+        (args.start_line, args.end_line)
+    };
+    lcw_core::read_snippet(&path, start, end, CONTEXT, MAX_LINES).ok_or_else(|| {
+        if args.file.is_empty() {
+            "no source file for this node".into()
+        } else if path.is_empty() {
+            "no source file for this node".into()
+        } else {
+            format!("could not read {path} (from {})", args.file)
+        }
+    })
+}
+
 /// Ask an LLM to explain a function from the assembled [`llm::ExplainContext`].
 ///
 /// `provider` is `ollama` or `gemini`. Runs on the blocking pool so the webview
@@ -180,19 +203,6 @@ async fn explain_function(
     tauri::async_runtime::spawn_blocking(move || llm::explain_function(context, &provider))
         .await
         .map_err(|e| format!("explanation task panicked: {e}"))?
-}
-
-#[tauri::command]
-fn read_source_snippet(file: String, start_line: u32, end_line: u32) -> Result<SourceSnippet, String> {
-    const CONTEXT: u32 = 5;
-    const MAX_LINES: u32 = 500;
-    lcw_core::read_snippet(&file, start_line, end_line, CONTEXT, MAX_LINES).ok_or_else(|| {
-        if file.is_empty() {
-            "no source file for this node".into()
-        } else {
-            format!("could not read {file}")
-        }
-    })
 }
 
 #[cfg(test)]
@@ -210,7 +220,14 @@ mod tests {
             writeln!(f, "fn main() {{}}").unwrap();
         }
         let p = path.to_string_lossy().into_owned();
-        let snip = read_source_snippet(p, 1, 1).unwrap();
+        let snip = read_source_snippet(ReadSourceSnippetArgs {
+            file: p,
+            start_line: 1,
+            end_line: 1,
+            repo_root: String::new(),
+            whole_file: false,
+        })
+        .unwrap();
         assert_eq!(snip.lines.len(), 1);
         assert_eq!(snip.lines[0].text, "fn main() {}");
     }
@@ -220,6 +237,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![analyze_repo, read_source_snippet, explain_function])
         .run(tauri::generate_context!())
         .expect("error while running Live Code Walk");

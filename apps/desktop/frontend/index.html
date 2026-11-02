@@ -66,6 +66,14 @@
         white-space: nowrap;
       }
 
+      .toolbar .path-row {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 120px;
+      }
+
       .toolbar .path {
         flex: 1;
         min-width: 120px;
@@ -80,6 +88,12 @@
       .toolbar .path:focus {
         outline: none;
         border-color: var(--accent);
+      }
+
+      .toolbar .browse {
+        flex-shrink: 0;
+        padding: 8px 12px;
+        white-space: nowrap;
       }
 
       .search {
@@ -983,6 +997,54 @@
         font-size: 12px;
       }
 
+      .sugg-loc {
+        margin-top: 4px;
+        font-size: 11px;
+        font-family: var(--mono);
+        color: var(--accent);
+      }
+
+      .sugg-fix {
+        margin-top: 4px;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .sugg-fix .fix-label {
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .sugg-jump {
+        cursor: pointer;
+      }
+
+      .sugg-jump:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .sugg-related {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+
+      .sugg-related-link {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--accent);
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 2px 6px;
+        cursor: pointer;
+      }
+
+      .sugg-related-link:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
       .sugg-tgt {
         margin-top: 4px;
         font-size: 11px;
@@ -1069,6 +1131,14 @@
         cursor: pointer;
       }
 
+      .diag-loc {
+        display: inline-block;
+        margin-right: 6px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--accent);
+      }
+
       .diag-jump:hover {
         background: rgba(255, 255, 255, 0.04);
         border-radius: 4px;
@@ -1083,6 +1153,11 @@
         margin-bottom: 14px;
         font-size: 13px;
         word-break: break-word;
+        white-space: pre-wrap;
+      }
+
+      .banner.error {
+        margin: 0 12px 8px;
       }
 
       .legend ul {

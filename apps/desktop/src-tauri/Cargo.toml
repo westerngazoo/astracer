@@ -39,3 +39,4 @@ lcw-desktop-api = { path = "../../../crates/lcw-desktop-api" }
 lcw-config = { path = "../../../crates/lcw-config" }
 lcw-engine = { path = "../../../crates/lcw-engine" }
 lcw-layout = { path = "../../../crates/lcw-layout" }
+tauri-plugin-dialog = "2"

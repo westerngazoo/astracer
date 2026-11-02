@@ -35,6 +35,8 @@ pub trait EngineTransport {
         file: String,
         start_line: u32,
         end_line: u32,
+        repo_root: String,
+        whole_file: bool,
     ) -> Result<SourceSnippet, String>;
 
     /// Ask an LLM to explain a function. `provider` is `ollama` or `gemini`.
@@ -55,6 +57,9 @@ extern "C" {
         event: &str,
         handler: &Closure<dyn FnMut(JsValue)>,
     ) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "dialog"], js_name = open, catch)]
+    async fn tauri_dialog_open(options: JsValue) -> Result<JsValue, JsValue>;
 }
 
 /// The Tauri host transport.
@@ -87,11 +92,15 @@ impl EngineTransport for TauriTransport {
         file: String,
         start_line: u32,
         end_line: u32,
+        repo_root: String,
+        whole_file: bool,
     ) -> Result<SourceSnippet, String> {
         let args = serde_wasm_bindgen::to_value(&ReadSourceSnippetArgs {
             file,
             start_line,
             end_line,
+            repo_root,
+            whole_file,
         })
         .map_err(|e| format!("serializing args: {e}"))?;
         let value = tauri_invoke("read_source_snippet", args)
@@ -176,6 +185,8 @@ impl EngineTransport for FixtureTransport {
         _file: String,
         _start_line: u32,
         _end_line: u32,
+        _repo_root: String,
+        _whole_file: bool,
     ) -> Result<SourceSnippet, String> {
         Err(
             "source viewing requires the Tauri desktop app (browser dev mode cannot read arbitrary files)"
@@ -233,19 +244,81 @@ impl EngineTransport for FixtureTransport {
     }
 }
 
+/// Open a native folder picker (Tauri) or a `prompt()` fallback in browser dev
+/// mode. Returns `Ok(None)` when the user cancels.
+pub async fn pick_repo_folder(current: &str) -> Result<Option<String>, String> {
+    if has_tauri() {
+        let options = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &options,
+            &JsValue::from_str("directory"),
+            &JsValue::TRUE,
+        )
+        .map_err(|_| "building dialog options".to_string())?;
+        js_sys::Reflect::set(
+            &options,
+            &JsValue::from_str("multiple"),
+            &JsValue::FALSE,
+        )
+        .map_err(|_| "building dialog options".to_string())?;
+        js_sys::Reflect::set(
+            &options,
+            &JsValue::from_str("title"),
+            &JsValue::from_str("Select repository"),
+        )
+        .map_err(|_| "building dialog options".to_string())?;
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            js_sys::Reflect::set(
+                &options,
+                &JsValue::from_str("defaultPath"),
+                &JsValue::from_str(trimmed),
+            )
+            .map_err(|_| "building dialog options".to_string())?;
+        }
+        let value = tauri_dialog_open(options.into())
+            .await
+            .map_err(js_error_to_string)?;
+        if value.is_null() || value.is_undefined() {
+            return Ok(None);
+        }
+        value
+            .as_string()
+            .ok_or_else(|| format!("unexpected folder pick result: {value:?}"))
+            .map(Some)
+    } else {
+        let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+        let default = if current.trim().is_empty() {
+            DEFAULT_FIXTURE
+        } else {
+            current.trim()
+        };
+        match window.prompt_with_message_and_default(
+            "Repository path or fixture URL (browser dev mode has no native folder picker):",
+            default,
+        ) {
+            Ok(Some(s)) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+            Ok(_) => Ok(None),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 /// Host-aware entry point for source reads (delegates to [`EngineTransport`]).
 pub async fn read_source_snippet(
     file: String,
     start_line: u32,
     end_line: u32,
+    repo_root: String,
+    whole_file: bool,
 ) -> Result<SourceSnippet, String> {
     if has_tauri() {
         TauriTransport
-            .read_source_snippet(file, start_line, end_line)
+            .read_source_snippet(file, start_line, end_line, repo_root, whole_file)
             .await
     } else {
         FixtureTransport
-            .read_source_snippet(file, start_line, end_line)
+            .read_source_snippet(file, start_line, end_line, repo_root, whole_file)
             .await
     }
 }

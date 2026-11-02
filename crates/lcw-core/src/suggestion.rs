@@ -42,6 +42,9 @@ pub struct Suggestion {
     /// 0 (lowest) ..= 100 (highest). Weighted by config target priorities.
     pub priority: u8,
     pub node: Option<NodeId>,
+    /// Layer-2 diagnostic codes this suggestion addresses (for cross-linking).
+    #[serde(default)]
+    pub codes: Vec<String>,
 }
 
 impl Suggestion {
@@ -52,6 +55,7 @@ impl Suggestion {
             targets: Vec::new(),
             priority: 50,
             node: None,
+            codes: Vec::new(),
         }
     }
 
@@ -67,6 +71,11 @@ impl Suggestion {
 
     pub fn at(mut self, node: NodeId) -> Self {
         self.node = Some(node);
+        self
+    }
+
+    pub fn with_codes(mut self, codes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.codes = codes.into_iter().map(Into::into).collect();
         self
     }
 }

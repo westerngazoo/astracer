@@ -93,6 +93,22 @@ fn snippet_window(
     (lo, hi)
 }
 
+/// Resolve a graph file path against the analyzed repository root. Absolute
+/// paths are unchanged; relative paths are joined with `repo_root` when set.
+pub fn resolve_source_path(repo_root: &str, file: &str) -> PathBuf {
+    if file.is_empty() {
+        return PathBuf::new();
+    }
+    let path = Path::new(file);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if repo_root.is_empty() {
+        return path.to_path_buf();
+    }
+    Path::new(repo_root).join(path)
+}
+
 /// Read lines from `path` around the node's `[start, end]` span (1-based,
 /// inclusive). `context` pads before/after; the result is capped at `max_lines`
 /// (the full highlight is kept; context is trimmed, then long spans anchor at
@@ -147,12 +163,26 @@ pub fn read_snippet(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write_lines(path: &std::path::Path, n: usize) {
         let mut f = std::fs::File::create(path).unwrap();
         for i in 1..=n {
             writeln!(f, "// line {i}").unwrap();
         }
+    }
+
+    #[test]
+    fn resolve_source_path_joins_relative_paths() {
+        let root = "/tmp/repo";
+        assert_eq!(
+            resolve_source_path(root, "src/lib.rs"),
+            PathBuf::from("/tmp/repo/src/lib.rs")
+        );
+        assert_eq!(
+            resolve_source_path("", "src/lib.rs"),
+            PathBuf::from("src/lib.rs")
+        );
     }
 
     #[test]

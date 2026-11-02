@@ -552,6 +552,10 @@ struct Nav {
     history: RwSignal<Vec<usize>>,
     /// Source snippet for the Code tab.
     source: RwSignal<SourcePane>,
+    /// Analyzed repository root (for resolving relative file paths).
+    repo_root: RwSignal<String>,
+    /// Last successful analyze used graph.sqlite (diagnostics may be incomplete).
+    analysis_from_cache: RwSignal<bool>,
     /// LLM explanation below the source snippet.
     explanation: RwSignal<ExplanationPane>,
     explain_provider: RwSignal<ExplainProvider>,
@@ -570,6 +574,8 @@ impl Nav {
             tree: RwSignal::new(None),
             history: RwSignal::new(Vec::new()),
             source: RwSignal::new(SourcePane::Idle),
+            repo_root: RwSignal::new(String::new()),
+            analysis_from_cache: RwSignal::new(false),
             explanation: RwSignal::new(ExplanationPane::Idle),
             explain_provider: RwSignal::new(ExplainProvider::Ollama),
             detail_tab: RwSignal::new(DetailTab::Details),
@@ -586,6 +592,8 @@ impl Nav {
         self.tree.set(None);
         self.history.set(Vec::new());
         self.source.set(SourcePane::Idle);
+        self.repo_root.set(String::new());
+        self.analysis_from_cache.set(false);
         self.explanation.set(ExplanationPane::Idle);
         self.detail_tab.set(DetailTab::Details);
     }
@@ -630,6 +638,7 @@ type RunRowsFn = Rc<dyn Fn(&[RootRow], &OpenPaths) -> Vec<RunRow>>;
 /// (`{move || ...}` blocks) to be `Send`, and `Actions` is not, so views hold
 /// this thread-local-storage handle and fetch the closures when they run.
 type ActionsHandle = StoredValue<Actions, LocalStorage>;
+type StateHandle = StoredValue<Shared, LocalStorage>;
 
 /// Inclusive end line for source snippets when the graph span is missing or partial.
 fn node_snippet_end(card: &NodeCard) -> u32 {
@@ -646,7 +655,7 @@ fn node_snippet_end(card: &NodeCard) -> u32 {
 
 /// Fetch source for the Code tab (Tauri only). Ignores stale responses when
 /// the user has already moved to another node.
-fn load_node_source(nav: Nav, idx: usize, card: &NodeCard) {
+fn load_node_source(nav: Nav, idx: usize, card: &NodeCard, whole_file: bool) {
     if card.file.is_empty() {
         nav.source.set(SourcePane::External);
         return;
@@ -656,8 +665,9 @@ fn load_node_source(nav: Nav, idx: usize, card: &NodeCard) {
     let file = card.file.clone();
     let start = card.line;
     let end = node_snippet_end(card);
+    let repo_root = nav.repo_root.get_untracked();
     spawn_local(async move {
-        let result = transport::read_source_snippet(file, start, end).await;
+        let result = transport::read_source_snippet(file, start, end, repo_root, whole_file).await;
         if nav.selected.get_untracked() != Some(idx) {
             return;
         }
@@ -738,7 +748,10 @@ fn select_node(
     nav.tree.set(Some(tree));
     nav.chain.set(chain.clone());
     nav.flow.set(flow);
-    load_node_source(nav, idx, &card);
+    if !card.file.is_empty() {
+        nav.detail_tab.set(DetailTab::Code);
+    }
+    load_node_source(nav, idx, &card, false);
     // The detail pane keeps its scroll position, so after clicking something
     // far down (a callee, a call-tree row) the new node's header would be
     // above the fold. Bring it back into view.
@@ -910,6 +923,7 @@ pub fn App() -> impl IntoView {
     let labels = RwSignal::new(Vec::<LabelBox>::new());
 
     let actions: ActionsHandle = StoredValue::new_local(make_actions(state.clone(), nav, labels));
+    let state_handle: StateHandle = StoredValue::new_local(state.clone());
 
     // Stream backend progress into the status line.
     transport::on_progress(move |p| status.set(format!("[{}] {}", p.phase, p.message)));
@@ -997,6 +1011,8 @@ pub fn App() -> impl IntoView {
                 match result {
                     Ok(view) => {
                         let report = view.report;
+                        nav.repo_root.set(view.repo_root.clone());
+                        nav.analysis_from_cache.set(cache);
                         summary.set(Some(report.summary));
                         vertical.set(report.vertical.to_string());
                         suggestions.set(report.suggestions.clone());
@@ -1055,15 +1071,14 @@ pub fn App() -> impl IntoView {
                         }
                     }
                     Err(e) => {
+                        status.set(e.clone());
                         if cache {
-                            status.set("Cached load failed.".into());
                             error.set(Some(format!(
-                                "Could not load a saved graph ({e}). Uncheck \"cached\" and run \
-                                 Analyze first, or fix the path / livewalk.toml [graph_store] setting."
+                                "{e}\n\nTip: uncheck \"cached\" for a fresh parse, or run \
+                                 `lcw analyze` on this repo first so graph.sqlite exists."
                             )));
                         } else {
-                            status.set("Analysis failed.".into());
-                            error.set(Some(format!("Analysis failed: {e}")));
+                            error.set(Some(e));
                         }
                     }
                 }
@@ -1074,6 +1089,19 @@ pub fn App() -> impl IntoView {
     let on_analyze = {
         let run = run_analysis.clone();
         move |_| run()
+    };
+    let on_browse = move |_| {
+        let current = path.get_untracked();
+        spawn_local(async move {
+            match transport::pick_repo_folder(&current).await {
+                Ok(Some(p)) => {
+                    path.set(p);
+                    error.set(None);
+                }
+                Ok(None) => {}
+                Err(e) => error.set(Some(e)),
+            }
+        });
     };
 
     // Once the canvas is connected to the DOM, remember it and wire
@@ -1180,6 +1208,7 @@ pub fn App() -> impl IntoView {
         <div class="app">
             <header class="toolbar">
                 <div class="brand">"Live Code Walk"</div>
+                <div class="path-row">
                 <input
                     class="path"
                     type="text"
@@ -1187,6 +1216,19 @@ pub fn App() -> impl IntoView {
                     prop:value=move || path.get()
                     on:input=move |ev| path.set(target_value(&ev))
                 />
+                <button
+                    type="button"
+                    class="browse"
+                    on:click=on_browse
+                    title=if transport::has_tauri() {
+                        "Choose repository folder"
+                    } else {
+                        "Enter repository path or fixture URL (browser dev mode)"
+                    }
+                >
+                    "Browse…"
+                </button>
+                </div>
                 <label
                     class="mode"
                     class:disabled=move || !transport::semantic_available()
@@ -1275,6 +1317,12 @@ pub fn App() -> impl IntoView {
                 </label>
             </header>
 
+            {move || {
+                error.get().map(|e| view! {
+                    <div class="banner error" role="alert">{e}</div>
+                })
+            }}
+
             <div class="body">
                 <ExplorerPane
                     explorer=explorer
@@ -1323,14 +1371,14 @@ pub fn App() -> impl IntoView {
                 </div>
                 <div class="splitter split-side" role="separator" aria-label="Resize detail panel"></div>
                 <aside class="side">
-                    {move || error.get().map(|e| view! { <div class="error">{e}</div> })}
                     <DetailPane nav=nav actions=actions />
                     <Overview summary=summary vertical=vertical />
-                    <Suggestions suggestions=suggestions />
+                    <Suggestions suggestions=suggestions diagnostics=diagnostics state=state_handle actions=actions />
                     <Diagnostics
                         diagnostics=diagnostics
                         lens_filter=diag_lens
                         actions=actions
+                        state=state_handle
                     />
                     <Legend />
                 </aside>
@@ -1955,7 +2003,22 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
             let tab = nav.detail_tab;
             let on_details = move |_| tab.set(DetailTab::Details);
             let on_flow = move |_| tab.set(DetailTab::Flow);
-            let on_code = move |_| tab.set(DetailTab::Code);
+            let on_code = {
+                let tab = nav.detail_tab;
+                move |_| {
+                    tab.set(DetailTab::Code);
+                    if let (Some(idx), Some(card)) =
+                        (nav.selected.get_untracked(), nav.card.get_untracked())
+                    {
+                        if matches!(
+                            nav.source.get_untracked(),
+                            SourcePane::Idle | SourcePane::Error(_)
+                        ) {
+                            load_node_source(nav, idx, &card, false);
+                        }
+                    }
+                }
+            };
             let qname = card.qualified_name.clone();
 
             view! {
@@ -2191,17 +2254,44 @@ async fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cache_source_hint(nav: Nav) -> Option<&'static str> {
+    if !nav.analysis_from_cache.get_untracked() {
+        return None;
+    }
+    Some(
+        "Loaded from cache — source spans and diagnostics may be incomplete vs a full analyze. \
+         Uncheck \"cached\" and run Analyze for fresh results.",
+    )
+}
+
 /// The Code tab: monospace snippet with line numbers and the node's span highlighted.
 fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
+    let cache_hint = cache_source_hint(nav);
     match nav.source.get() {
-        SourcePane::Idle | SourcePane::Loading => {
+        SourcePane::Idle => {
+            if cache_hint.is_some() {
+                view! {
+                    <p class="hint warn code-status">{cache_hint.unwrap()}</p>
+                }
+                .into_any()
+            } else {
+                view! { <p class="hint code-status">"Select a node to view its source, or switch here after selecting on the canvas."</p> }.into_any()
+            }
+        }
+        SourcePane::Loading => {
             view! { <p class="hint code-status">"Loading source…"</p> }.into_any()
         }
         SourcePane::External => {
-            view! { <p class="hint code-status">"No source file — this node is external or unresolved."</p> }.into_any()
+            view! {
+                <p class="hint code-status">"No source file — this node is external or unresolved."</p>
+                {cache_hint.map(|h| view! { <p class="hint warn code-status">{h}</p> })}
+            }.into_any()
         }
         SourcePane::Error(msg) => {
-            view! { <p class="hint warn code-status">{msg}</p> }.into_any()
+            view! {
+                <p class="hint warn code-status">{msg.clone()}</p>
+                {cache_hint.map(|h| view! { <p class="hint warn code-status">{h}</p> })}
+            }.into_any()
         }
         SourcePane::Ready(snip) => {
             let header = format!(
@@ -2284,11 +2374,21 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                     "Explain"
                 }
             };
+            let partial = snip.start_line > 1 || snip.lines.len() >= 500;
+            let card_for_full = card.clone();
+            let on_full = move |_| {
+                if let Some(idx) = nav.selected.get_untracked() {
+                    load_node_source(nav, idx, &card_for_full, true);
+                }
+            };
             view! {
                 <div class="code-pane">
                     <div class="code-head-row">
                         <div class="code-head" title=snip.file.clone()>{header}</div>
                         <div class="explain-bar">
+                            {partial.then(|| view! {
+                                <button class="small" on:click=on_full title="Load the full file (up to 500 lines)">"Full file"</button>
+                            })}
                             <select
                                 class="explain-provider"
                                 on:change=on_provider
@@ -2372,9 +2472,15 @@ fn Overview(summary: RwSignal<Option<Summary>>, vertical: RwSignal<String>) -> i
 }
 
 #[component]
-fn Suggestions(suggestions: RwSignal<Vec<Suggestion>>) -> impl IntoView {
+fn Suggestions(
+    suggestions: RwSignal<Vec<Suggestion>>,
+    diagnostics: RwSignal<Vec<Diagnostic>>,
+    state: StateHandle,
+    actions: ActionsHandle,
+) -> impl IntoView {
     move || {
         let items = suggestions.get();
+        let diags = diagnostics.get();
         (!items.is_empty()).then(|| {
             let rows = items
                 .into_iter()
@@ -2385,13 +2491,94 @@ fn Suggestions(suggestions: RwSignal<Vec<Suggestion>>) -> impl IntoView {
                         .map(|t| t.as_str())
                         .collect::<Vec<_>>()
                         .join(" · ");
+                    let node_idx = s.node.map(|id| id.0 as usize);
+                    let loc = node_idx.and_then(|idx| {
+                        state.with_value(|st| {
+                            st.borrow()
+                                .graph
+                                .as_ref()
+                                .map(|g| compact_location(&short_location(g, NodeId(idx as u32))))
+                        })
+                    });
+                    let related: Vec<(usize, String)> = if node_idx.is_none() && !s.codes.is_empty() {
+                        diags
+                            .iter()
+                            .filter(|d| s.codes.iter().any(|c| c == &d.code))
+                            .filter_map(|d| {
+                                d.node.map(|id| {
+                                    let idx = id.0 as usize;
+                                    let label = state.with_value(|st| {
+                                        st.borrow().graph.as_ref().map_or_else(
+                                            || format!("node {}", idx),
+                                            |g| compact_location(&short_location(g, id)),
+                                        )
+                                    });
+                                    (idx, label)
+                                })
+                            })
+                            .take(6)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let jump_idx = node_idx.or_else(|| related.first().map(|(i, _)| *i));
+                    let jumpable = jump_idx.is_some();
+                    let mut class = String::from("sugg");
+                    if jumpable {
+                        class.push_str(" sugg-jump");
+                    }
+                    let scope = if loc.is_some() {
+                        loc.clone().unwrap_or_default()
+                    } else if !related.is_empty() {
+                        format!("{} location(s) — click to jump", related.len())
+                    } else if s.node.is_none() && !s.codes.is_empty() {
+                        "Project-wide — see Diagnostics".to_string()
+                    } else if s.node.is_none() {
+                        "Project-wide".to_string()
+                    } else {
+                        String::new()
+                    };
+                    let title = s.title.clone();
+                    let rationale = s.rationale.clone();
+                    let related_links: Vec<AnyView> = related
+                        .into_iter()
+                        .map(|(ridx, label)| {
+                            view! {
+                                <button
+                                    type="button"
+                                    class="sugg-related-link"
+                                    on:click=move |ev: leptos::ev::MouseEvent| {
+                                        ev.stop_propagation();
+                                        actions.with_value(|a| a.go.clone())(ridx, true);
+                                    }
+                                >
+                                    {label}
+                                </button>
+                            }
+                            .into_any()
+                        })
+                        .collect();
                     view! {
-                        <li class="sugg">
+                        <li
+                            class=class
+                            title=if jumpable { "Jump to node on canvas" } else { "" }
+                            on:click=move |_| {
+                                if let Some(idx) = jump_idx {
+                                    actions.with_value(|a| a.go.clone())(idx, true);
+                                }
+                            }
+                        >
                             <div class="sugg-head">
                                 <span class="prio">{s.priority}</span>
-                                <b>{s.title.clone()}</b>
+                                <b>{title}</b>
                             </div>
-                            <div class="sugg-why">{s.rationale.clone()}</div>
+                            {(!scope.is_empty()).then(|| view! {
+                                <div class="sugg-loc">{scope}</div>
+                            })}
+                            {(!related_links.is_empty()).then(|| view! {
+                                <div class="sugg-related">{related_links}</div>
+                            })}
+                            <div class="sugg-fix"><span class="fix-label">"Fix: "</span>{rationale}</div>
                             <div class="sugg-tgt">{targets}</div>
                         </li>
                     }
@@ -2412,6 +2599,7 @@ fn Diagnostics(
     diagnostics: RwSignal<Vec<Diagnostic>>,
     lens_filter: RwSignal<Option<String>>,
     actions: ActionsHandle,
+    state: StateHandle,
 ) -> impl IntoView {
     move || {
         let items = diagnostics.get();
@@ -2459,6 +2647,14 @@ fn Diagnostics(
                     let lens = d.lens.clone();
                     let node_idx = d.node.map(|id| id.0 as usize);
                     let jumpable = node_idx.is_some();
+                    let loc = node_idx.and_then(|idx| {
+                        state.with_value(|st| {
+                            st.borrow()
+                                .graph
+                                .as_ref()
+                                .map(|g| compact_location(&short_location(g, NodeId(idx as u32))))
+                        })
+                    });
                     let mut class = format!("diag sev-{sev}");
                     if jumpable {
                         class.push_str(" diag-jump");
@@ -2475,6 +2671,7 @@ fn Diagnostics(
                         >
                             <span class="sev">{sev.clone()}</span>
                             <span class="lens-badge">{lens}</span>
+                            {loc.map(|l| view! { <span class="diag-loc">{l}</span> })}
                             {d.message.clone()}
                         </li>
                     }

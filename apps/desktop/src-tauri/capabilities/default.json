@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Core permissions for the main window: invoke commands + listen for engine events.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

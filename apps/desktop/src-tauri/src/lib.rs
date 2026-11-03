@@ -170,7 +170,23 @@ fn emit_progress(window: &Window, progress: EngineProgress) {
 /// context lines are included and the result is capped so the webview stays
 /// responsive.
 #[tauri::command]
-fn read_source_snippet(args: ReadSourceSnippetArgs) -> Result<SourceSnippet, String> {
+fn read_source_snippet(
+    file: String,
+    start_line: u32,
+    end_line: u32,
+    repo_root: String,
+    whole_file: bool,
+) -> Result<SourceSnippet, String> {
+    read_source_snippet_impl(ReadSourceSnippetArgs {
+        file,
+        start_line,
+        end_line,
+        repo_root,
+        whole_file,
+    })
+}
+
+fn read_source_snippet_impl(args: ReadSourceSnippetArgs) -> Result<SourceSnippet, String> {
     const CONTEXT: u32 = 5;
     const MAX_LINES: u32 = 500;
     let resolved = lcw_core::resolve_source_path(&args.repo_root, &args.file);
@@ -185,6 +201,11 @@ fn read_source_snippet(args: ReadSourceSnippetArgs) -> Result<SourceSnippet, Str
             "no source file for this node".into()
         } else if path.is_empty() {
             "no source file for this node".into()
+        } else if !args.repo_root.is_empty() && !PathBuf::from(&path).exists() {
+            format!(
+                "could not read {} (resolved from {} under repo root {})",
+                args.file, path, args.repo_root
+            )
         } else {
             format!("could not read {path} (from {})", args.file)
         }
@@ -220,7 +241,7 @@ mod tests {
             writeln!(f, "fn main() {{}}").unwrap();
         }
         let p = path.to_string_lossy().into_owned();
-        let snip = read_source_snippet(ReadSourceSnippetArgs {
+        let snip = read_source_snippet_impl(ReadSourceSnippetArgs {
             file: p,
             start_line: 1,
             end_line: 1,

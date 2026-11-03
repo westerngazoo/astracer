@@ -24,6 +24,7 @@ lcw-adapter-treesitter = { path = "../lcw-adapter-treesitter" }
 lcw-adapter-ts = { path = "../lcw-adapter-ts" }
 lcw-adapter-py = { path = "../lcw-adapter-py" }
 lcw-adapter-go = { path = "../lcw-adapter-go" }
+lcw-adapter-cpp = { path = "../lcw-adapter-cpp" }
 lcw-adapter-ra = { path = "../lcw-adapter-ra", optional = true }
 lcw-analysis = { path = "../lcw-analysis" }
 lcw-suggest = { path = "../lcw-suggest" }

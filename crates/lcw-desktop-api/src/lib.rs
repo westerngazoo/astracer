@@ -156,6 +156,7 @@ mod tests {
         };
         let json = serde_json::to_string(&args).unwrap();
         assert!(json.contains("startLine"));
+        assert!(json.contains("wholeFile"));
         let back: ReadSourceSnippetArgs = serde_json::from_str(&json).unwrap();
         assert_eq!(args, back);
     }

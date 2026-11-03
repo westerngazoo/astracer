@@ -1,0 +1,19 @@
+[package]
+name = "lcw-adapter-cpp"
+description = "Live Code Walk: Layer 1 C++ parser (tree-sitter + heuristic resolution)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+tree-sitter = "0.27.0"
+tree-sitter-cpp = "0.23.4"
+
+[dev-dependencies]
+serde_json = "1.0.151"

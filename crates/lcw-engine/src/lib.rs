@@ -18,6 +18,7 @@ mod discover;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use lcw_adapter_cpp::CppTreeSitterAdapter;
 use lcw_adapter_go::GoTreeSitterAdapter;
 use lcw_adapter_py::PythonTreeSitterAdapter;
 use lcw_adapter_treesitter::RustTreeSitterAdapter;
@@ -410,6 +411,7 @@ fn select_adapter(config: &Config) -> Box<dyn LanguageAdapter> {
             Language::Typescript => Box::new(TypeScriptTreeSitterAdapter::new()),
             Language::Python => Box::new(PythonTreeSitterAdapter::new()),
             Language::Go => Box::new(GoTreeSitterAdapter::new()),
+            Language::Cpp => Box::new(CppTreeSitterAdapter::new()),
         },
     }
 }
@@ -747,6 +749,38 @@ mod tests {
         let py = Engine::new(cfg);
         let report = py.analyze(&root).unwrap();
         assert!(report.graph.node_count() >= 2, "def a + def b");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fast_mode_selects_cpp_adapter() {
+        use lcw_config::Language;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lcw-cpp-{}-{nanos}", std::process::id()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("main.cpp"),
+            "void a() { b(); }\nvoid b() {}\n",
+        )
+        .unwrap();
+
+        let rust = Engine::new(Config::default());
+        assert!(matches!(rust.analyze(&root), Err(EngineError::NoFiles(_))));
+
+        let mut cfg = Config::default();
+        cfg.adapter.language = Language::Cpp;
+        cfg.cache.enabled = false;
+        let cpp = Engine::new(cfg);
+        let report = cpp.analyze(&root).unwrap();
+        assert!(report.graph.node_count() >= 2, "a + b");
 
         let _ = fs::remove_dir_all(&root);
     }

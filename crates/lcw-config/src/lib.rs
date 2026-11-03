@@ -114,6 +114,8 @@ pub enum Language {
     Python,
     /// `.go` (`lcw-adapter-go`).
     Go,
+    /// `.cpp`/`.cc`/`.cxx`/`.h`/`.hpp` (`lcw-adapter-cpp`).
+    Cpp,
 }
 
 /// `[adapter]` — parsing controls.

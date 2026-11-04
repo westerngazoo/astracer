@@ -60,6 +60,24 @@ pub struct AnalyzeArgs {
     pub path: String,
     pub semantic: bool,
     pub use_cache: bool,
+    /// Fast-mode language id (`rust`, `cpp`, …). Overrides `livewalk.toml` for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+/// One language the repo scanner found (or the config default).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// Arguments for `discover_repo_languages`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverLanguagesArgs {
+    pub path: String,
 }
 
 /// Arguments for the `read_source_snippet` Tauri command (camelCase on the wire).
@@ -138,9 +156,11 @@ mod tests {
             path: "/tmp/repo".into(),
             semantic: true,
             use_cache: false,
+            language: Some("cpp".into()),
         };
         let json = serde_json::to_string(&args).unwrap();
         assert!(json.contains("useCache"));
+        assert!(json.contains("language"));
         let back: AnalyzeArgs = serde_json::from_str(&json).unwrap();
         assert_eq!(args, back);
     }

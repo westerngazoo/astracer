@@ -102,7 +102,7 @@ pub enum AdapterMode {
 /// [`AdapterMode`]: `semantic` is Rust-only and ignores this. Each variant maps
 /// to one tree-sitter adapter, so a run analyzes a single language (pick the one
 /// matching the repo). Default is [`Language::Rust`], preserving prior behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
     /// `.rs` — the default Rust front end (`lcw-adapter-treesitter`).
@@ -116,6 +116,56 @@ pub enum Language {
     Go,
     /// `.cpp`/`.cc`/`.cxx`/`.h`/`.hpp` (`lcw-adapter-cpp`).
     Cpp,
+}
+
+impl Language {
+    /// Subdirectory suffix for per-language cache isolation (`rust`, `cpp`, …).
+    pub fn cache_suffix(self) -> &'static str {
+        match self {
+            Language::Rust => "rust",
+            Language::Typescript => "typescript",
+            Language::Python => "python",
+            Language::Go => "go",
+            Language::Cpp => "cpp",
+        }
+    }
+
+    /// Short label for UI chips and CLI help.
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::Rust => "Rust",
+            Language::Typescript => "TypeScript",
+            Language::Python => "Python",
+            Language::Go => "Go",
+            Language::Cpp => "C++",
+        }
+    }
+
+    /// All fast-mode languages (stable order for UI).
+    pub const ALL: [Language; 5] = [
+        Language::Rust,
+        Language::Typescript,
+        Language::Python,
+        Language::Go,
+        Language::Cpp,
+    ];
+}
+
+impl std::str::FromStr for Language {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rust" | "rs" => Ok(Language::Rust),
+            "typescript" | "ts" => Ok(Language::Typescript),
+            "python" | "py" => Ok(Language::Python),
+            "go" => Ok(Language::Go),
+            "cpp" | "c++" | "cxx" => Ok(Language::Cpp),
+            other => Err(format!(
+                "unknown language {other:?} (expected rust | typescript | python | go | cpp)"
+            )),
+        }
+    }
 }
 
 /// `[adapter]` — parsing controls.
@@ -139,6 +189,17 @@ impl Default for AdapterConfig {
             language: Language::Rust,
             exclude: Vec::new(),
             follow_symlinks: false,
+        }
+    }
+}
+
+impl Config {
+    /// Cache subdirectory name: one graph + fragment store per repo **and**
+    /// language (or `semantic` for the rust-analyzer backend).
+    pub fn cache_variant(&self) -> &str {
+        match self.adapter.mode {
+            AdapterMode::Semantic => "semantic",
+            AdapterMode::Fast => self.adapter.language.cache_suffix(),
         }
     }
 }

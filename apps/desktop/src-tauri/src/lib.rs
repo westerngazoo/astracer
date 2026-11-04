@@ -13,10 +13,10 @@ use std::path::PathBuf;
 
 mod llm;
 
-use lcw_config::{AdapterMode, Config};
+use lcw_config::{AdapterMode, Config, Language};
 use lcw_core::SourceSnippet;
-use lcw_desktop_api::{GraphView, Progress, ReadSourceSnippetArgs};
-use lcw_engine::{Engine, EngineError, Progress as EngineProgress};
+use lcw_desktop_api::{GraphView, LanguageChoice, Progress, ReadSourceSnippetArgs};
+use lcw_engine::{discover_languages, Engine, EngineError, Progress as EngineProgress};
 use lcw_layout::LayoutParams;
 use tauri::{Emitter, Window};
 
@@ -43,14 +43,41 @@ async fn analyze_repo(
     path: String,
     semantic: bool,
     use_cache: bool,
+    language: Option<String>,
 ) -> Result<GraphView, String> {
     // Analysis is CPU-bound (parsing + O(n^2) layout), so run it on the blocking
     // pool to keep the webview responsive and progress events flowing.
     tauri::async_runtime::spawn_blocking(move || {
-        analyze_blocking(window, path, semantic, use_cache)
+        analyze_blocking(window, path, semantic, use_cache, language)
     })
     .await
     .map_err(|e| format!("analysis task panicked: {e}"))?
+}
+
+/// List fast-mode languages detected under `path` (by source file extensions).
+#[tauri::command]
+fn discover_repo_languages(path: String) -> Result<Vec<LanguageChoice>, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("repository path is empty".into());
+    }
+    let root = PathBuf::from(trimmed);
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("repository path not found or not accessible: {e}"))?;
+
+    let mut langs = discover_languages(&root).map_err(|e| e.to_string())?;
+    if langs.is_empty() {
+        let cfg = Config::resolve(None, &root).map_err(|e| e.to_string())?;
+        langs.push(cfg.adapter.language);
+    }
+    Ok(langs
+        .into_iter()
+        .map(|l| LanguageChoice {
+            id: l.cache_suffix().into(),
+            label: l.label().into(),
+        })
+        .collect())
 }
 
 fn analyze_blocking(
@@ -58,6 +85,7 @@ fn analyze_blocking(
     path: String,
     semantic: bool,
     use_cache: bool,
+    language: Option<String>,
 ) -> Result<GraphView, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -72,6 +100,12 @@ fn analyze_blocking(
     let mut config = Config::resolve(None, &root).map_err(|e| e.to_string())?;
     if semantic && !use_cache {
         config.adapter.mode = AdapterMode::Semantic;
+    }
+    if let Some(lang) = language {
+        let lang = lang
+            .parse::<Language>()
+            .map_err(|e| format!("invalid language: {e}"))?;
+        config.adapter.language = lang;
     }
 
     let engine = Engine::new(config);
@@ -259,7 +293,12 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![analyze_repo, read_source_snippet, explain_function])
+        .invoke_handler(tauri::generate_handler![
+            analyze_repo,
+            discover_repo_languages,
+            read_source_snippet,
+            explain_function
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Live Code Walk");
 }

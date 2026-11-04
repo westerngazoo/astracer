@@ -14,6 +14,7 @@
 
 pub mod cache;
 mod discover;
+pub mod languages;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ use lcw_config::{AdapterMode, Config, Language};
 use lcw_core::{AdapterError, AnalysisReport, CodeGraph, LanguageAdapter, SourceFile};
 
 pub use discover::{discover_files, read_sources};
+pub use languages::discover_languages;
 
 /// Errors surfaced by the engine.
 #[derive(Debug, thiserror::Error)]
@@ -168,7 +170,7 @@ impl Engine {
         if !self.config.graph_store.enabled {
             return Err(EngineError::GraphStoreDisabled);
         }
-        let path = cache::graph_db_file(root, &self.config.cache.dir)
+        let path = cache::graph_db_file(root, &self.config.cache.dir, self.config.cache_variant())
             .ok_or_else(|| EngineError::Config("could not resolve graph store path".into()))?;
         if !path.is_file() {
             return Err(EngineError::NoCachedGraph { path });
@@ -216,7 +218,11 @@ impl Engine {
         let _perf = lcw_telemetry::PerfGuard::new("engine.analyze");
 
         if self.config.cache.enabled || self.config.graph_store.enabled {
-            if let Err(e) = cache::ensure_repo_cache_dir(root, &self.config.cache.dir) {
+            if let Err(e) = cache::ensure_repo_cache_dir(
+                root,
+                &self.config.cache.dir,
+                self.config.cache_variant(),
+            ) {
                 lcw_telemetry::warn!(
                     target: "lcw::engine",
                     error = %e,
@@ -286,7 +292,11 @@ impl Engine {
     ) -> Result<(CodeGraph, IncrementalStats), EngineError> {
         let _perf = lcw_telemetry::PerfGuard::new("engine.parse_incremental");
         let adapter_name = self.adapter.name();
-        let cache_path = cache::cache_file(root, &self.config.cache.dir);
+        let cache_path = cache::cache_file(
+            root,
+            &self.config.cache.dir,
+            self.config.cache_variant(),
+        );
         let mut store = match &cache_path {
             Some(p) => cache::FragmentCache::load(p, adapter_name),
             None => cache::FragmentCache::new(adapter_name),
@@ -386,7 +396,11 @@ impl Engine {
         if !self.config.graph_store.enabled {
             return;
         }
-        let Some(path) = cache::graph_db_file(root, &self.config.cache.dir) else {
+        let Some(path) = cache::graph_db_file(
+            root,
+            &self.config.cache.dir,
+            self.config.cache_variant(),
+        ) else {
             return;
         };
         let snapshot = graph.snapshot();
@@ -558,7 +572,7 @@ mod tests {
             "repo root must not gain cache or other analysis artifacts"
         );
 
-        let cache_path = cache::cache_file(&root, "").expect("cache path");
+        let cache_path = cache::cache_file(&root, "", "rust").expect("cache path");
         assert!(
             cache_path.starts_with(&cache_home),
             "cache file {:?} should live under {:?}",
@@ -567,7 +581,7 @@ mod tests {
         );
         assert!(cache_path.is_file(), "fragment cache should be persisted");
 
-        let graph_path = cache::graph_db_file(&root, "").expect("graph db path");
+        let graph_path = cache::graph_db_file(&root, "", "rust").expect("graph db path");
         assert!(
             graph_path.starts_with(&cache_home),
             "graph store {:?} should live under {:?}",
@@ -682,7 +696,7 @@ mod tests {
         let report = Engine::new(Config::default())
             .analyze(&root)
             .expect("analyze");
-        let graph_path = cache::graph_db_file(&root, "").expect("path");
+        let graph_path = cache::graph_db_file(&root, "", "rust").expect("path");
         let loaded = lcw_graph_store::read(&graph_path).expect("read store");
         let from_disk = CodeGraph::from_snapshot(loaded);
         assert_eq!(from_disk.node_count(), report.graph.node_count());

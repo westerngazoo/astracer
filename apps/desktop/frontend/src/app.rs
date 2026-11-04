@@ -897,6 +897,8 @@ pub fn App() -> impl IntoView {
     let path = RwSignal::new(String::new());
     let semantic = RwSignal::new(false);
     let use_cache = RwSignal::new(false);
+    let language_choices = RwSignal::new(Vec::<(String, String)>::new());
+    let selected_language = RwSignal::new(String::from("rust"));
     let busy = RwSignal::new(false);
     let status = RwSignal::new(String::from("Idle — enter a repository path and analyze."));
     let error = RwSignal::new(Option::<String>::None);
@@ -928,6 +930,52 @@ pub fn App() -> impl IntoView {
     // Stream backend progress into the status line.
     transport::on_progress(move |p| status.set(format!("[{}] {}", p.phase, p.message)));
 
+    let refresh_languages: Rc<dyn Fn()> = Rc::new({
+        move || {
+            if !transport::has_tauri() {
+                language_choices.set(vec![("rust".into(), "Rust".into())]);
+                selected_language.set("rust".into());
+                return;
+            }
+            let repo = path.get_untracked();
+            if repo.trim().is_empty() {
+                language_choices.set(Vec::new());
+                return;
+            }
+            spawn_local(async move {
+                match transport::discover_repo_languages(repo).await {
+                    Ok(choices) => {
+                        let pairs: Vec<(String, String)> = choices
+                            .into_iter()
+                            .map(|c| (c.id, c.label))
+                            .collect();
+                        if pairs.is_empty() {
+                            language_choices.set(vec![("rust".into(), "Rust".into())]);
+                            selected_language.set("rust".into());
+                        } else {
+                            let cur = selected_language.get_untracked();
+                            if !pairs.iter().any(|(id, _)| id == &cur) {
+                                selected_language.set(pairs[0].0.clone());
+                            }
+                            language_choices.set(pairs);
+                        }
+                    }
+                    Err(_) => {
+                        language_choices.set(vec![("rust".into(), "Rust".into())]);
+                    }
+                }
+            });
+        }
+    });
+
+    let refresh_languages_on_input = {
+        let refresh = refresh_languages.clone();
+        move |ev: web_sys::Event| {
+            path.set(target_value(&ev));
+            refresh();
+        }
+    };
+
     let canvas_ref = NodeRef::<Canvas>::new();
     let minimap_ref = NodeRef::<Canvas>::new();
 
@@ -956,6 +1004,11 @@ pub fn App() -> impl IntoView {
             let state = state.clone();
             let sem = semantic.get_untracked();
             let cache = use_cache.get_untracked();
+            let lang = if sem {
+                None
+            } else {
+                Some(selected_language.get_untracked())
+            };
             if !hosted {
                 if cache {
                     error.set(Some(
@@ -1004,9 +1057,11 @@ pub fn App() -> impl IntoView {
                 // Tauri hosts the engine; a plain browser gets a fixture (see
                 // `transport::FixtureTransport`). Same trait, same UI code.
                 let result = if hosted {
-                    TauriTransport.analyze(repo, sem, cache).await
+                    TauriTransport
+                        .analyze(repo, sem, cache, lang)
+                        .await
                 } else {
-                    FixtureTransport.analyze(repo, sem, cache).await
+                    FixtureTransport.analyze(repo, sem, cache, lang).await
                 };
                 match result {
                     Ok(view) => {
@@ -1092,11 +1147,13 @@ pub fn App() -> impl IntoView {
     };
     let on_browse = move |_| {
         let current = path.get_untracked();
+        let refresh = refresh_languages.clone();
         spawn_local(async move {
             match transport::pick_repo_folder(&current).await {
                 Ok(Some(p)) => {
                     path.set(p);
                     error.set(None);
+                    refresh();
                 }
                 Ok(None) => {}
                 Err(e) => error.set(Some(e)),
@@ -1214,7 +1271,7 @@ pub fn App() -> impl IntoView {
                     type="text"
                     placeholder=if transport::has_tauri() { "/path/to/repo" } else { "fixture.json (browser dev mode)" }
                     prop:value=move || path.get()
-                    on:input=move |ev| path.set(target_value(&ev))
+                    on:input=refresh_languages_on_input
                 />
                 <button
                     type="button"
@@ -1229,6 +1286,30 @@ pub fn App() -> impl IntoView {
                     "Browse…"
                 </button>
                 </div>
+                <Show when=move || !language_choices.get().is_empty() && !semantic.get()>
+                    <div class="lang-row" title="Analyze one language at a time (separate graphs per language)">
+                        <For
+                            each=move || language_choices.get()
+                            key=|(id, _)| id.clone()
+                            children=move |(id, label)| {
+                                let chip_id = id.clone();
+                                let active_id = chip_id.clone();
+                                let click_id = chip_id.clone();
+                                view! {
+                                    <button
+                                        type="button"
+                                        class="lang-chip"
+                                        class:active=move || selected_language.get() == active_id
+                                        disabled=move || busy.get()
+                                        on:click=move |_| selected_language.set(click_id.clone())
+                                    >
+                                        {label}
+                                    </button>
+                                }
+                            }
+                        />
+                    </div>
+                </Show>
                 <label
                     class="mode"
                     class:disabled=move || !transport::semantic_available()

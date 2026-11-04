@@ -128,21 +128,15 @@ pub fn hash_text(text: &str) -> u64 {
     h.finish()
 }
 
-/// Resolve the cache file for `root` given the `[cache]` config.
+/// Resolve the cache file for `root` given the `[cache]` config and language
+/// variant (see [`repo_cache_dir`]).
 ///
-/// * An explicit `dir` is used verbatim (relative to `root` if not absolute).
-///   **Opt-in only:** relative paths create directories inside the analyzed
-///   repository; prefer leaving `dir` empty so artifacts stay under the cache
-///   home (see [`cache_home`]).
-/// * When `dir` is empty, a per-repository directory under the user's cache
-///   home is used (`…/livewalk/{hash-of-canonical-root}/fragments.json`), so
-///   analysis never writes into the source tree by default.
-///
-/// Returns `None` only if no cache home can be determined and no explicit dir
-/// was given (in practice always `Some`, since we fall back to the temp dir).
-/// Per-repository cache directory (fragments + graph store share this folder).
-pub fn repo_cache_dir(root: &Path, dir: &str) -> Option<PathBuf> {
+/// `variant` isolates caches by language or adapter mode (e.g. `rust`, `cpp`,
+/// `semantic`). See [`lcw_config::Config::cache_variant`].
+pub fn repo_cache_dir(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> {
     let dir = dir.trim();
+    let variant = variant.trim();
+    let variant = if variant.is_empty() { "rust" } else { variant };
     if !dir.is_empty() {
         let base = PathBuf::from(dir);
         let base = if base.is_absolute() {
@@ -150,27 +144,31 @@ pub fn repo_cache_dir(root: &Path, dir: &str) -> Option<PathBuf> {
         } else {
             root.join(base)
         };
-        return Some(base);
+        return Some(base.join(variant));
     }
     let home = cache_home()?;
     let key = hash_path(root);
-    Some(home.join("livewalk").join(format!("{key:016x}")))
+    Some(
+        home
+            .join("livewalk")
+            .join(format!("{key:016x}-{variant}")),
+    )
 }
 
-pub fn cache_file(root: &Path, dir: &str) -> Option<PathBuf> {
-    repo_cache_dir(root, dir).map(|d| d.join(CACHE_FILE))
+pub fn cache_file(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> {
+    repo_cache_dir(root, dir, variant).map(|d| d.join(CACHE_FILE))
 }
 
 /// Path to the embedded graph SQLite file for `root` (same dir as [`cache_file`]).
-pub fn graph_db_file(root: &Path, dir: &str) -> Option<PathBuf> {
-    repo_cache_dir(root, dir).map(|d| d.join(GRAPH_DB_FILE))
+pub fn graph_db_file(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> {
+    repo_cache_dir(root, dir, variant).map(|d| d.join(GRAPH_DB_FILE))
 }
 
 /// Create the per-repo cache directory if needed. Analysis does not require a
 /// pre-existing cache; this is called before writes so `fragments.json` and
-/// `graph.sqlite` can land in a fresh `livewalk/{hash}/` folder.
-pub fn ensure_repo_cache_dir(root: &Path, dir: &str) -> std::io::Result<()> {
-    if let Some(p) = repo_cache_dir(root, dir) {
+/// `graph.sqlite` can land in a fresh `livewalk/{hash}-{variant}/` folder.
+pub fn ensure_repo_cache_dir(root: &Path, dir: &str, variant: &str) -> std::io::Result<()> {
+    if let Some(p) = repo_cache_dir(root, dir, variant) {
         std::fs::create_dir_all(&p)?;
     }
     Ok(())
@@ -232,15 +230,15 @@ mod tests {
 
     #[test]
     fn explicit_relative_dir_resolves_against_root() {
-        let f = cache_file(Path::new("/repo"), ".livewalk-cache").unwrap();
+        let f = cache_file(Path::new("/repo"), ".livewalk-cache", "rust").unwrap();
         assert!(f.ends_with("fragments.json"));
-        assert!(f.starts_with("/repo/.livewalk-cache"));
+        assert!(f.starts_with("/repo/.livewalk-cache/rust"));
     }
 
     #[test]
     fn default_dir_lives_under_cache_home_not_repo() {
         let repo = Path::new("/tmp/some-analyzed-project");
-        let f = cache_file(repo, "").unwrap();
+        let f = cache_file(repo, "", "rust").unwrap();
         let home = cache_home().expect("cache home");
         assert!(
             f.starts_with(home.join("livewalk")),
@@ -249,15 +247,29 @@ mod tests {
             home
         );
         assert!(
+            f.to_string_lossy().contains("-rust/"),
+            "cache dir should include language variant"
+        );
+        assert!(
             !f.starts_with(repo),
             "default cache must not live inside the analyzed tree"
         );
     }
 
     #[test]
+    fn different_languages_use_distinct_cache_dirs() {
+        let repo = Path::new("/tmp/multi-lang-repo");
+        let rust = repo_cache_dir(repo, "", "rust").unwrap();
+        let cpp = repo_cache_dir(repo, "", "cpp").unwrap();
+        assert_ne!(rust, cpp);
+        assert!(rust.to_string_lossy().ends_with("-rust"));
+        assert!(cpp.to_string_lossy().ends_with("-cpp"));
+    }
+
+    #[test]
     fn whitespace_only_dir_uses_cache_home() {
         let repo = Path::new("/tmp/another-repo");
-        let f = cache_file(repo, "  \t  ").unwrap();
+        let f = cache_file(repo, "  \t  ", "go").unwrap();
         let home = cache_home().expect("cache home");
         assert!(f.starts_with(home.join("livewalk")));
     }
@@ -278,8 +290,8 @@ mod tests {
         let cache_dir = base.join("cache-root");
         std::fs::create_dir_all(&repo).unwrap();
         assert!(!cache_dir.exists(), "precondition: cache dir must not exist yet");
-        ensure_repo_cache_dir(&repo, &cache_dir.to_string_lossy()).expect("create cache dir");
-        assert!(cache_dir.is_dir());
+        ensure_repo_cache_dir(&repo, &cache_dir.to_string_lossy(), "rust").expect("create cache dir");
+        assert!(cache_dir.join("rust").is_dir());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

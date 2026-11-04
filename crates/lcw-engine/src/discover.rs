@@ -11,7 +11,7 @@ use lcw_core::SourceFile;
 use crate::EngineError;
 
 /// Directories we always skip, even if a repo doesn't `.gitignore` them.
-const DEFAULT_EXCLUDES: &[&str] = &["target", "node_modules", "dist", ".git"];
+pub(crate) const DEFAULT_EXCLUDES: &[&str] = &["target", "node_modules", "dist", ".git"];
 
 /// Find all files under `root` whose extension is in `extensions`.
 pub fn discover_files(

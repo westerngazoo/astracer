@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use lcw_config::Config;
+use lcw_config::{Config, Language};
 use lcw_core::AnalysisReport;
 use lcw_engine::Engine;
 use lcw_query::{CallTreeOptions, Direction, EntryKind};
@@ -87,6 +87,10 @@ struct AnalyzeArgs {
     /// Load graph.sqlite instead of re-parsing (requires a prior `lcw analyze`).
     #[arg(long)]
     cached: bool,
+
+    /// Fast-mode source language for this run (overrides `livewalk.toml` `[adapter].language`).
+    #[arg(long, value_parser = clap::value_parser!(Language))]
+    language: Option<Language>,
 
     /// Which graph the viewer renders: every function boxed by crate, the
     /// free call graph, or the aggregated module view. Only affects `view`.
@@ -178,6 +182,10 @@ struct RepoArgs {
     /// mode (which cannot see cross-crate edges).
     #[arg(long)]
     semantic: bool,
+
+    /// Fast-mode source language for this run (overrides `livewalk.toml` `[adapter].language`).
+    #[arg(long, value_parser = clap::value_parser!(Language))]
+    language: Option<Language>,
 }
 
 #[derive(Debug, Args)]
@@ -401,12 +409,16 @@ fn analyze_path(
     config: Option<&Path>,
     semantic: bool,
     cached: bool,
+    language: Option<Language>,
     log_override: Option<&str>,
 ) -> Result<AnalysisReport> {
     let search_dir = config_search_dir(path);
     let mut config = Config::resolve(config, &search_dir).context("resolving configuration")?;
     if semantic {
         config.adapter.mode = lcw_config::AdapterMode::Semantic;
+    }
+    if let Some(lang) = language {
+        config.adapter.language = lang;
     }
     // Telemetry: CLI stays quiet by default so stdout output isn't polluted.
     lcw_telemetry::init(log_override.unwrap_or("warn"));
@@ -432,6 +444,7 @@ fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisR
         repo.config.as_deref(),
         repo.semantic,
         false,
+        repo.language,
         log_override,
     )
 }
@@ -439,7 +452,7 @@ fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisR
 #[cfg(feature = "viewer")]
 fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let report = analyze_path(&path, args.config.as_deref(), false, false, log_override)?;
+    let report = analyze_path(&path, args.config.as_deref(), false, false, None, log_override)?;
 
     match args.view_kind {
         ViewKind::Module => {
@@ -523,6 +536,7 @@ fn run_view(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
         args.config.as_deref(),
         false,
         args.cached,
+        args.language,
         Some(log_override.unwrap_or("info")),
     )?;
 
@@ -560,7 +574,14 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     let search_dir = config_search_dir(&path);
     let cfg =
         Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    let report = analyze_path(&path, args.config.as_deref(), false, args.cached, log_override)?;
+    let report = analyze_path(
+        &path,
+        args.config.as_deref(),
+        false,
+        args.cached,
+        args.language,
+        log_override,
+    )?;
 
     let rendered = match args.format {
         Format::Summary => export::format_summary(&report, args.top),
@@ -597,7 +618,7 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
 
 fn run_load(args: LoadArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let report = analyze_path(&path, args.config.as_deref(), false, true, log_override)?;
+    let report = analyze_path(&path, args.config.as_deref(), false, true, None, log_override)?;
     let s = report.summary();
     println!(
         "loaded cached graph: {} nodes, {} edges, {} files",
@@ -617,7 +638,7 @@ fn run_graph_info(args: GraphArgs) -> Result<()> {
     let search_dir = config_search_dir(&path);
     let cfg =
         Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    let db_path = lcw_engine::cache::graph_db_file(&path, &cfg.cache.dir)
+    let db_path = lcw_engine::cache::graph_db_file(&path, &cfg.cache.dir, cfg.cache_variant())
         .context("resolving graph store path")?;
     if !db_path.is_file() {
         anyhow::bail!(
@@ -635,11 +656,13 @@ fn run_graph_info(args: GraphArgs) -> Result<()> {
 }
 
 fn emit_store_paths(repo: &Path, cfg: &Config) {
-    if let Some(p) = lcw_engine::cache::cache_file(repo, &cfg.cache.dir) {
+    if let Some(p) = lcw_engine::cache::cache_file(repo, &cfg.cache.dir, cfg.cache_variant()) {
         eprintln!("fragment cache: {}", p.display());
     }
     if cfg.graph_store.enabled {
-        if let Some(p) = lcw_engine::cache::graph_db_file(repo, &cfg.cache.dir) {
+        if let Some(p) =
+            lcw_engine::cache::graph_db_file(repo, &cfg.cache.dir, cfg.cache_variant())
+        {
             eprintln!("graph store:    {}", p.display());
         }
     } else {

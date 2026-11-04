@@ -13,7 +13,7 @@
 //!   `acquireVsCodeApi().postMessage` + `window.addEventListener("message")`.
 
 use lcw_core::SourceSnippet;
-use lcw_desktop_api::{AnalyzeArgs, GraphView, Progress, ReadSourceSnippetArgs};
+use lcw_desktop_api::{AnalyzeArgs, DiscoverLanguagesArgs, GraphView, LanguageChoice, Progress, ReadSourceSnippetArgs};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -26,8 +26,18 @@ pub use lcw_desktop_api::{ExplainContext, ExplainMetrics};
 pub trait EngineTransport {
     /// Analyze the repository at `path`. `semantic` requests the precise
     /// (rust-analyzer) backend where available. `use_cache` loads `graph.sqlite`
-    /// instead of parsing (Tauri host only).
-    async fn analyze(&self, path: String, semantic: bool, use_cache: bool) -> Result<GraphView, String>;
+    /// instead of parsing (Tauri host only). `language` overrides fast-mode
+    /// adapter (`rust`, `cpp`, …) without editing `livewalk.toml`.
+    async fn analyze(
+        &self,
+        path: String,
+        semantic: bool,
+        use_cache: bool,
+        language: Option<String>,
+    ) -> Result<GraphView, String>;
+
+    /// Scan `path` for source extensions and list matching adapters (Tauri only).
+    async fn discover_languages(&self, path: String) -> Result<Vec<LanguageChoice>, String>;
 
     /// Read source lines for a node (Tauri host only).
     async fn read_source_snippet(
@@ -74,14 +84,30 @@ struct ExplainArgs {
 }
 
 impl EngineTransport for TauriTransport {
-    async fn analyze(&self, path: String, semantic: bool, use_cache: bool) -> Result<GraphView, String> {
+    async fn analyze(
+        &self,
+        path: String,
+        semantic: bool,
+        use_cache: bool,
+        language: Option<String>,
+    ) -> Result<GraphView, String> {
         let args = serde_wasm_bindgen::to_value(&AnalyzeArgs {
             path,
             semantic,
             use_cache,
+            language,
         })
         .map_err(|e| format!("serializing args: {e}"))?;
         let value = tauri_invoke("analyze_repo", args)
+            .await
+            .map_err(js_error_to_string)?;
+        serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding result: {e}"))
+    }
+
+    async fn discover_languages(&self, path: String) -> Result<Vec<LanguageChoice>, String> {
+        let args = serde_wasm_bindgen::to_value(&DiscoverLanguagesArgs { path })
+            .map_err(|e| format!("serializing args: {e}"))?;
+        let value = tauri_invoke("discover_repo_languages", args)
             .await
             .map_err(js_error_to_string)?;
         serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding result: {e}"))
@@ -205,7 +231,20 @@ impl EngineTransport for FixtureTransport {
         )
     }
 
-    async fn analyze(&self, path: String, semantic: bool, use_cache: bool) -> Result<GraphView, String> {
+    async fn discover_languages(&self, _path: String) -> Result<Vec<LanguageChoice>, String> {
+        Ok(vec![LanguageChoice {
+            id: "rust".into(),
+            label: "Rust".into(),
+        }])
+    }
+
+    async fn analyze(
+        &self,
+        path: String,
+        semantic: bool,
+        use_cache: bool,
+        _language: Option<String>,
+    ) -> Result<GraphView, String> {
         if use_cache {
             return Err(
                 "cached load requires the Tauri desktop app (run a prior `lcw analyze` first)"
@@ -301,6 +340,15 @@ pub async fn pick_repo_folder(current: &str) -> Result<Option<String>, String> {
             Ok(_) => Ok(None),
             Err(_) => Ok(None),
         }
+    }
+}
+
+/// Host-aware language discovery for the toolbar chips.
+pub async fn discover_repo_languages(path: String) -> Result<Vec<LanguageChoice>, String> {
+    if has_tauri() {
+        TauriTransport.discover_languages(path).await
+    } else {
+        FixtureTransport.discover_languages(path).await
     }
 }
 

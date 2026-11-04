@@ -96,6 +96,35 @@
         white-space: nowrap;
       }
 
+      .toolbar .lang-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        max-width: 280px;
+      }
+
+      .toolbar .lang-chip {
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .toolbar .lang-chip.active {
+        border-color: var(--accent);
+        color: var(--text);
+        background: color-mix(in srgb, var(--accent) 18%, var(--panel-2));
+      }
+
+      .toolbar .lang-chip:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
       .search {
         width: 160px;
         flex-shrink: 0;

@@ -147,7 +147,7 @@ pub fn repo_cache_dir(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> 
         return Some(base.join(variant));
     }
     let home = cache_home()?;
-    let key = hash_path(root);
+    let key = repo_cache_key(root);
     Some(
         home
             .join("livewalk")
@@ -202,11 +202,216 @@ pub fn cache_home() -> Option<PathBuf> {
 }
 
 /// Stable-ish hash of a repository root for use as a cache subdirectory name.
-fn hash_path(p: &Path) -> u64 {
+pub fn repo_cache_key(p: &Path) -> u64 {
     let key = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut h);
     h.finish()
+}
+
+/// Root directory for all Livewalk caches (`~/.cache/livewalk` by default).
+pub fn livewalk_cache_root() -> Option<PathBuf> {
+    cache_home().map(|h| h.join("livewalk"))
+}
+
+/// One on-disk cache bucket under [`livewalk_cache_root`].
+#[derive(Debug, Clone)]
+pub struct CacheDirEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    /// Newest modification time among the directory tree (best-effort).
+    pub modified: Option<std::time::SystemTime>,
+    /// Hash-only dir superseded by a `{hash}-{variant}` sibling.
+    pub legacy_superseded: bool,
+}
+
+/// Options for [`clean_cache_dirs`].
+#[derive(Debug, Clone, Default)]
+pub struct CacheCleanOptions {
+    /// Delete matching entries (default is list-only).
+    pub yes: bool,
+    /// Remove the entire cache tree (still honors [`Self::keep_repo`]).
+    pub all: bool,
+    /// Only remove legacy `{16-hex}` buckets (no `-{variant}` suffix).
+    pub legacy_only: bool,
+    /// Only delete entries whose newest mtime is older than this many days.
+    pub older_than_days: Option<u64>,
+    /// Never delete buckets for this repository root.
+    pub keep_repo: Option<PathBuf>,
+    /// If true, apply removal logic but do not delete (preview only).
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct CacheCleanReport {
+    pub listed: Vec<CacheDirEntry>,
+    pub removed: Vec<PathBuf>,
+    pub skipped_keep: Vec<PathBuf>,
+    pub bytes_freed: u64,
+    /// Paths that would be removed when [`CacheCleanOptions::dry_run`] is set.
+    pub would_remove: Vec<PathBuf>,
+    /// Total size of [`Self::would_remove`].
+    pub would_free_bytes: u64,
+}
+
+/// List (and optionally remove) cache buckets under the Livewalk cache root.
+pub fn clean_cache_dirs(opts: &CacheCleanOptions) -> std::io::Result<CacheCleanReport> {
+    let mut report = CacheCleanReport::default();
+    let Some(root) = livewalk_cache_root() else {
+        return Ok(report);
+    };
+    if !root.is_dir() {
+        return Ok(report);
+    }
+
+    let keep_key = opts.keep_repo.as_deref().map(repo_cache_key);
+    let mut names: Vec<String> = std::fs::read_dir(&root)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+
+    let superseded_legacy = legacy_superseded_names(&names);
+
+    for name in &names {
+        let path = root.join(name);
+        let size_bytes = dir_size_bytes(&path).unwrap_or(0);
+        let modified = dir_newest_mtime(&path);
+        let legacy_superseded = superseded_legacy.contains(name.as_str());
+        report.listed.push(CacheDirEntry {
+            name: name.clone(),
+            path: path.clone(),
+            size_bytes,
+            modified,
+            legacy_superseded,
+        });
+    }
+
+    let cutoff = opts.older_than_days.map(|days| {
+        std::time::SystemTime::now()
+            - std::time::Duration::from_secs(days.saturating_mul(86_400))
+    });
+
+    // Apply removal selection only when deleting, dry-run preview, or legacy
+    // `all`-without-`yes` API use (same gate as historical `opts.yes || opts.all`).
+    let run_removal_pass = opts.dry_run || opts.yes || opts.all;
+    if !run_removal_pass {
+        return Ok(report);
+    }
+
+    let really_delete = !opts.dry_run && (opts.yes || opts.all);
+
+    // `--dry-run` uses the same match rules as a real delete (`--yes` / `--all`).
+    let affirm = opts.yes || opts.dry_run;
+
+    for entry in &report.listed {
+        if should_keep(entry, keep_key) {
+            report.skipped_keep.push(entry.path.clone());
+            continue;
+        }
+
+        let remove = if opts.legacy_only {
+            is_legacy_cache_dir_name(&entry.name)
+        } else if let Some(cutoff) = cutoff {
+            entry
+                .modified
+                .is_some_and(|m| m < cutoff)
+                || (entry.modified.is_none() && (opts.all || affirm))
+        } else if affirm || opts.all {
+            true
+        } else if entry.legacy_superseded {
+            true
+        } else {
+            false
+        };
+
+        if remove {
+            let size = entry.size_bytes;
+            if !really_delete {
+                report.would_remove.push(entry.path.clone());
+                report.would_free_bytes = report.would_free_bytes.saturating_add(size);
+            } else {
+                std::fs::remove_dir_all(&entry.path)?;
+                report.removed.push(entry.path.clone());
+                report.bytes_freed = report.bytes_freed.saturating_add(size);
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn should_keep(entry: &CacheDirEntry, keep_key: Option<u64>) -> bool {
+    let Some(key) = keep_key else {
+        return false;
+    };
+    let prefix = format!("{key:016x}");
+    entry.name == prefix || entry.name.starts_with(&format!("{prefix}-"))
+}
+
+/// Legacy buckets are 16 lowercase hex digits with no `-{variant}` suffix.
+pub fn is_legacy_cache_dir_name(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn legacy_superseded_names(names: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for name in names {
+        if !is_legacy_cache_dir_name(name) {
+            continue;
+        }
+        let prefix = format!("{name}-");
+        if names.iter().any(|n| n.starts_with(&prefix)) {
+            out.insert(name.clone());
+        }
+    }
+    out
+}
+
+fn dir_size_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        for entry in std::fs::read_dir(&p)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                total = total.saturating_add(entry.metadata()?.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn dir_newest_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if let Ok(meta) = std::fs::metadata(&p) {
+            newest = Some(match newest {
+                Some(n) => n.max(meta.modified().unwrap_or(n)),
+                None => meta.modified().ok()?,
+            });
+        }
+        let Ok(read) = std::fs::read_dir(&p) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                stack.push(entry.path());
+            } else if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
+                newest = Some(match newest {
+                    Some(n) => n.max(m),
+                    None => m,
+                });
+            }
+        }
+    }
+    newest
 }
 
 #[cfg(test)]
@@ -272,6 +477,20 @@ mod tests {
         let f = cache_file(repo, "  \t  ", "go").unwrap();
         let home = cache_home().expect("cache home");
         assert!(f.starts_with(home.join("livewalk")));
+    }
+
+    #[test]
+    fn legacy_name_detected_and_superseded() {
+        assert!(is_legacy_cache_dir_name("9a156570a2843030"));
+        assert!(!is_legacy_cache_dir_name("9a156570a2843030-rust"));
+        let names = vec![
+            "9a156570a2843030".into(),
+            "9a156570a2843030-rust".into(),
+            "deadbeef00000000".into(),
+        ];
+        let sup = legacy_superseded_names(&names);
+        assert!(sup.contains("9a156570a2843030"));
+        assert!(!sup.contains("deadbeef00000000"));
     }
 
     #[test]

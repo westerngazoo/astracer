@@ -5,6 +5,7 @@
 //! (`explain`, `flow`, `outline`, `entries`, `calls`) are thin text renderers
 //! over `lcw-query`, the same traversal code the viewers use.
 
+mod cache_cmd;
 mod export;
 mod flow;
 mod nav;
@@ -51,6 +52,12 @@ enum Command {
     Graph(GraphArgs),
     /// Load a cached graph from graph.sqlite (no parse). Requires a prior analyze.
     Load(LoadArgs),
+    /// Inspect or prune on-disk analysis caches (`~/.cache/livewalk` or
+    /// `LIVEWALK_CACHE_HOME/livewalk` by default).
+    Cache {
+        #[command(subcommand)]
+        cmd: cache_cmd::CacheCommand,
+    },
     /// Open the interactive graph viewer (native window).
     #[cfg(feature = "viewer")]
     View(AnalyzeArgs),
@@ -394,6 +401,7 @@ fn main() -> Result<()> {
         Command::Init(args) => run_init(args),
         Command::Graph(args) => run_graph_info(args),
         Command::Load(args) => run_load(args, log),
+        Command::Cache { cmd } => cache_cmd::run(cmd),
         #[cfg(feature = "viewer")]
         Command::View(args) => run_view(args, log),
         #[cfg(feature = "viewer")]

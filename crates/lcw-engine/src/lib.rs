@@ -507,37 +507,12 @@ mod tests {
         let _ = fs::remove_dir_all(&cache_dir);
     }
 
-    /// [`cache::CACHE_HOME_ENV`] is process-global; serialize tests that set it.
-    static CACHE_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Pin [`cache::CACHE_HOME_ENV`] for one test, restoring the prior value on drop.
-    struct CacheHomeGuard {
-        old: Option<std::ffi::OsString>,
-    }
-
-    impl CacheHomeGuard {
-        fn set(path: &Path) -> Self {
-            let old = std::env::var_os(cache::CACHE_HOME_ENV);
-            std::env::set_var(cache::CACHE_HOME_ENV, path);
-            CacheHomeGuard { old }
-        }
-    }
-
-    impl Drop for CacheHomeGuard {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(v) => std::env::set_var(cache::CACHE_HOME_ENV, v),
-                None => std::env::remove_var(cache::CACHE_HOME_ENV),
-            }
-        }
-    }
-
     #[test]
     fn analyze_does_not_create_artifacts_in_repo_root() {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -555,7 +530,7 @@ mod tests {
             "lcw-isolate-cache-{}-{nanos}",
             std::process::id()
         ));
-        let _cache_env = CacheHomeGuard::set(&cache_home);
+        let _cache_env = cache::CacheHomeGuard::set(&cache_home);
 
         let engine = Engine::new(Config::default());
         engine.analyze(&root).expect("analyze");
@@ -601,7 +576,7 @@ mod tests {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -619,7 +594,7 @@ mod tests {
             "lcw-load-store-cache-{}-{nanos}",
             std::process::id()
         ));
-        let _cache_env = CacheHomeGuard::set(&cache_home);
+        let _cache_env = cache::CacheHomeGuard::set(&cache_home);
 
         let engine = Engine::new(Config::default());
         let full = engine.analyze(&root).expect("analyze");
@@ -640,7 +615,7 @@ mod tests {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -656,7 +631,7 @@ mod tests {
             "lcw-load-miss-cache-{}-{nanos}",
             std::process::id()
         ));
-        let _cache_env = CacheHomeGuard::set(&cache_home);
+        let _cache_env = cache::CacheHomeGuard::set(&cache_home);
 
         let engine = Engine::new(Config::default());
         assert!(matches!(
@@ -673,7 +648,7 @@ mod tests {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -691,7 +666,7 @@ mod tests {
             "lcw-graph-rt-cache-{}-{nanos}",
             std::process::id()
         ));
-        let _cache_env = CacheHomeGuard::set(&cache_home);
+        let _cache_env = cache::CacheHomeGuard::set(&cache_home);
 
         let report = Engine::new(Config::default())
             .analyze(&root)

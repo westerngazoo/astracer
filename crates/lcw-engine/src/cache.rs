@@ -231,16 +231,12 @@ pub struct CacheDirEntry {
 pub struct CacheCleanOptions {
     /// Delete matching entries (default is list-only).
     pub yes: bool,
-    /// Remove the entire cache tree (still honors [`Self::keep_repo`]).
-    pub all: bool,
     /// Only remove legacy `{16-hex}` buckets (no `-{variant}` suffix).
     pub legacy_only: bool,
     /// Only delete entries whose newest mtime is older than this many days.
     pub older_than_days: Option<u64>,
     /// Never delete buckets for this repository root.
     pub keep_repo: Option<PathBuf>,
-    /// If true, apply removal logic but do not delete (preview only).
-    pub dry_run: bool,
 }
 
 #[derive(Debug, Default)]
@@ -249,10 +245,6 @@ pub struct CacheCleanReport {
     pub removed: Vec<PathBuf>,
     pub skipped_keep: Vec<PathBuf>,
     pub bytes_freed: u64,
-    /// Paths that would be removed when [`CacheCleanOptions::dry_run`] is set.
-    pub would_remove: Vec<PathBuf>,
-    /// Total size of [`Self::would_remove`].
-    pub would_free_bytes: u64,
 }
 
 /// List (and optionally remove) cache buckets under the Livewalk cache root.
@@ -294,17 +286,9 @@ pub fn clean_cache_dirs(opts: &CacheCleanOptions) -> std::io::Result<CacheCleanR
             - std::time::Duration::from_secs(days.saturating_mul(86_400))
     });
 
-    // Apply removal selection only when deleting, dry-run preview, or legacy
-    // `all`-without-`yes` API use (same gate as historical `opts.yes || opts.all`).
-    let run_removal_pass = opts.dry_run || opts.yes || opts.all;
-    if !run_removal_pass {
+    if !opts.yes {
         return Ok(report);
     }
-
-    let really_delete = !opts.dry_run && (opts.yes || opts.all);
-
-    // `--dry-run` uses the same match rules as a real delete (`--yes` / `--all`).
-    let affirm = opts.yes || opts.dry_run;
 
     for entry in &report.listed {
         if should_keep(entry, keep_key) {
@@ -318,25 +302,16 @@ pub fn clean_cache_dirs(opts: &CacheCleanOptions) -> std::io::Result<CacheCleanR
             entry
                 .modified
                 .is_some_and(|m| m < cutoff)
-                || (entry.modified.is_none() && (opts.all || affirm))
-        } else if affirm || opts.all {
-            true
-        } else if entry.legacy_superseded {
-            true
+                || (entry.modified.is_none() && opts.yes)
         } else {
-            false
+            true
         };
 
         if remove {
             let size = entry.size_bytes;
-            if !really_delete {
-                report.would_remove.push(entry.path.clone());
-                report.would_free_bytes = report.would_free_bytes.saturating_add(size);
-            } else {
-                std::fs::remove_dir_all(&entry.path)?;
-                report.removed.push(entry.path.clone());
-                report.bytes_freed = report.bytes_freed.saturating_add(size);
-            }
+            std::fs::remove_dir_all(&entry.path)?;
+            report.removed.push(entry.path.clone());
+            report.bytes_freed = report.bytes_freed.saturating_add(size);
         }
     }
 
@@ -412,6 +387,33 @@ fn dir_newest_mtime(path: &Path) -> Option<std::time::SystemTime> {
         }
     }
     newest
+}
+
+#[cfg(test)]
+pub(crate) static CACHE_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct CacheHomeGuard {
+    old: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl CacheHomeGuard {
+    pub(crate) fn set(path: &Path) -> Self {
+        let old = std::env::var_os(CACHE_HOME_ENV);
+        std::env::set_var(CACHE_HOME_ENV, path);
+        CacheHomeGuard { old }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CacheHomeGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(v) => std::env::set_var(CACHE_HOME_ENV, v),
+            None => std::env::remove_var(CACHE_HOME_ENV),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -491,6 +493,42 @@ mod tests {
         let sup = legacy_superseded_names(&names);
         assert!(sup.contains("9a156570a2843030"));
         assert!(!sup.contains("deadbeef00000000"));
+    }
+
+    #[test]
+    fn clean_cache_dirs_requires_yes_to_remove() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "lcw-cache-clean-{}-{nanos}",
+            std::process::id()
+        ));
+        let root = base.join("livewalk");
+        let bucket = root.join("deadbeef00000000-rust");
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("fragments.json"), b"{}").unwrap();
+
+        let _guard = CacheHomeGuard::set(&base);
+
+        let list = clean_cache_dirs(&CacheCleanOptions::default()).unwrap();
+        assert_eq!(list.listed.len(), 1);
+        assert!(list.removed.is_empty());
+        assert!(bucket.is_dir());
+
+        let wiped = clean_cache_dirs(&CacheCleanOptions {
+            yes: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(wiped.removed.len(), 1);
+        assert!(!bucket.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

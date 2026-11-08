@@ -8,28 +8,24 @@ use lcw_engine::cache::{self, CacheCleanOptions, CacheDirEntry};
 
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
-    /// List cache buckets under the Livewalk cache root.
+    /// List cache buckets under the Livewalk cache root with on-disk sizes.
     List,
-    /// List cache sizes under the Livewalk cache root; remove with `--all` or
-    /// `--legacy-only` plus `--yes`, or preview with `--dry-run`.
+    /// Remove cache buckets. Deletion requires `--yes` (see `--legacy-only`,
+    /// `--older-than`).
     Clean(CleanArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CleanArgs {
-    /// Delete every cache bucket under the cache root (pair with `--yes` or
-    /// `--dry-run`).
-    #[arg(long)]
-    all: bool,
-    /// Actually delete matching cache directories.
+    /// Actually delete matching cache directories (required for any removal).
     #[arg(long)]
     yes: bool,
-    /// Show what would be deleted without removing anything.
-    #[arg(long)]
-    dry_run: bool,
     /// Only remove legacy `{16-hex}` dirs (no `-{language}` suffix).
     #[arg(long)]
     legacy_only: bool,
+    /// Only remove buckets whose newest mtime is older than this many days.
+    #[arg(long = "older-than", value_name = "DAYS")]
+    older_than: Option<u64>,
     /// Never delete buckets for this repository root.
     #[arg(long)]
     keep_repo: Option<PathBuf>,
@@ -55,7 +51,11 @@ fn run_list() -> Result<()> {
         print_entry(entry);
     }
     let total: u64 = report.listed.iter().map(|e| e.size_bytes).sum();
-    println!("total: {} ({:.2} MiB)", format_bytes(total), bytes_to_mib(total));
+    println!(
+        "total: {} ({:.2} MiB)",
+        format_bytes(total),
+        bytes_to_mib(total)
+    );
     Ok(())
 }
 
@@ -63,8 +63,7 @@ fn run_clean(args: CleanArgs) -> Result<()> {
     let root = cache::livewalk_cache_root();
     print_root(root.as_deref());
 
-    let list_only = !args.yes && !args.dry_run;
-    if list_only {
+    if !args.yes {
         let report = cache::clean_cache_dirs(&CacheCleanOptions::default())
             .context("listing cache directories")?;
         if report.listed.is_empty() {
@@ -81,41 +80,27 @@ fn run_clean(args: CleanArgs) -> Result<()> {
             );
         }
         println!(
-            "hint: `lcw cache clean --all --dry-run` to preview deletions; \
-             `lcw cache clean --all --yes` to delete (or add `--legacy-only`)"
+            "hint: pass `--yes` to delete (e.g. `lcw cache clean --yes`, \
+             `lcw cache clean --yes --legacy-only`, \
+             `lcw cache clean --yes --older-than 30`)"
         );
         return Ok(());
     }
 
-    if args.all && args.legacy_only {
-        bail!("choose only one of --all and --legacy-only");
-    }
-    if !args.all && !args.legacy_only {
-        bail!("specify --all or --legacy-only (try `lcw cache clean --all --dry-run` first)");
-    }
-    if args.yes && args.dry_run {
-        bail!("use either --yes or --dry-run, not both");
+    if args.legacy_only && args.older_than.is_some() {
+        bail!("choose only one of --legacy-only and --older-than");
     }
 
     let opts = CacheCleanOptions {
-        yes: args.yes,
-        dry_run: args.dry_run,
-        all: args.all,
+        yes: true,
         legacy_only: args.legacy_only,
+        older_than_days: args.older_than,
         keep_repo: args.keep_repo,
         ..CacheCleanOptions::default()
     };
     let report = cache::clean_cache_dirs(&opts).context("cleaning cache directories")?;
 
-    if args.dry_run {
-        if report.would_remove.is_empty() {
-            println!("would remove: 0 directories");
-        } else {
-            for path in &report.would_remove {
-                println!("would remove: {}", path.display());
-            }
-        }
-    } else if report.removed.is_empty() {
+    if report.removed.is_empty() {
         println!("removed: 0 directories");
     } else {
         for path in &report.removed {
@@ -129,20 +114,10 @@ fn run_clean(args: CleanArgs) -> Result<()> {
         }
     }
 
-    let freed = if args.dry_run {
-        report.would_free_bytes
-    } else {
-        report.bytes_freed
-    };
-    let label = if args.dry_run {
-        "would free"
-    } else {
-        "freed"
-    };
     println!(
-        "{label} {:.2} MiB ({} bytes)",
-        bytes_to_mib(freed),
-        freed
+        "freed {:.2} MiB ({} bytes)",
+        bytes_to_mib(report.bytes_freed),
+        report.bytes_freed
     );
     Ok(())
 }

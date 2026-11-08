@@ -142,10 +142,7 @@ lcw flow "parse_incremental" --from main
 lcw flow "parse_incremental" --from main --snippets   # JSON with each hop's source
 ```
 
-Fragment and graph caches live under `~/.cache/livewalk/` (or
-`$LIVEWALK_CACHE_HOME/livewalk/`): `lcw cache list` lists sizes; `lcw cache clean --all --dry-run`
-previews removal; `lcw cache clean --all --yes` deletes (add `--legacy-only` for old `{hash}` dirs only).
-To wipe by hand: `rm -rf ~/.cache/livewalk` or `rm -rf "$LIVEWALK_CACHE_HOME/livewalk"`.
+Disk caches: `lcw cache list` and `lcw cache clean --yes` (or `scripts/livewalk-cache-clean.sh`; honors `LIVEWALK_CACHE_HOME`).
 
 Fast mode (tree-sitter) links calls by name with qualifier checking; method
 calls whose receiver type is unknown may resolve to a same-named method in

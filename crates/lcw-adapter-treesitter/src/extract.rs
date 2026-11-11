@@ -620,7 +620,7 @@ fn scan_token_tree(scan: &mut Scan, tt: TsNode, text: &str, caller: &str, types:
                 i = j + 1;
                 continue;
             };
-            let end = args.map_or(tok, |a| a);
+            let end = args.unwrap_or(tok);
             scan.calls.push(RawCall {
                 caller: caller.to_string(),
                 kind: class_to_callkind(kind),

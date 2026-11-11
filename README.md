@@ -146,8 +146,8 @@ lcw flow "parse_incremental" --from main --snippets   # JSON with each hop's sou
 ```
 
 Navigation commands load the cached `graph.sqlite` when it is newer than every
-source file (otherwise they re-analyze and refresh it); `--no-cache` forces a
-fresh analysis.
+source file (otherwise they re-analyze and refresh it); `--no-cache` skips the
+cached graph and re-runs the analysis.
 
 ### For AI coding agents
 

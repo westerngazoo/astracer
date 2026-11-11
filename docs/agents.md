@@ -60,8 +60,9 @@ Each analysis writes `graph.sqlite` under `~/.cache/livewalk/{hash}-{lang}/`
 (or `$LIVEWALK_CACHE_HOME/livewalk/`). Query commands load it directly when it
 is fresh: written for the same root, same number of source files, and no
 source file modified since the analysis started. Otherwise they re-analyze
-(incrementally, reusing unchanged files) and rewrite it. `--no-cache` forces a
-full analysis.
+(incrementally, reusing unchanged files) and rewrite it. `--no-cache` skips the
+cached graph and re-runs the analysis (unchanged files' parse results are still
+reused).
 
 ## MCP server
 

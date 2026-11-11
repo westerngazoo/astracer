@@ -63,6 +63,13 @@ pub struct RawCall {
     pub path: String,
     /// Last path segment — the resolvable short name.
     pub short: String,
+    /// The receiver's type (as written, path included) when the adapter could
+    /// infer it cheaply: `Parser` for `self.expect()` inside `impl Parser`, or
+    /// for `p.expect()` with `p: &Parser`; the impl type for `Self::f()`. `None`
+    /// means unknown, and resolution must then stay conservative. Optional in
+    /// the serialized form so fragments written before it existed still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<String>,
     /// Call-site location. Its `file` field is fragment-local (there is only
     /// one file per fragment) and is remapped during resolution.
     pub call_site: SourceSpan,

@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use lcw_core::{EdgeExport, GraphSnapshot, Node, NodeKind, EdgeKind, SourceSpan};
+use lcw_core::{EdgeExport, EdgeKind, GraphSnapshot, Node, NodeKind, SourceSpan};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -38,8 +38,24 @@ pub struct GraphSummary {
     pub files: usize,
 }
 
-/// Write `snapshot` to `path`, replacing any previous contents.
+/// `meta` key: when the graph was produced, in Unix milliseconds. Callers that
+/// check freshness against source mtimes should pass the time the analysis
+/// *started* (via [`write_with_meta`]) so edits made mid-run read as stale.
+pub const META_WRITTEN_AT_MS: &str = "written_at_ms";
+
+/// Write `snapshot` to `path`, replacing any previous contents. Records
+/// [`META_WRITTEN_AT_MS`] as the current time.
 pub fn write(path: &Path, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
+    write_with_meta(path, snapshot, &[])
+}
+
+/// [`write`] plus extra `meta` rows. An entry for [`META_WRITTEN_AT_MS`]
+/// overrides the default timestamp; `version` cannot be overridden.
+pub fn write_with_meta(
+    path: &Path,
+    snapshot: &GraphSnapshot,
+    extra: &[(&str, String)],
+) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -55,6 +71,16 @@ pub fn write(path: &Path, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
         params!["version", STORE_VERSION.to_string()],
     )?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params![META_WRITTEN_AT_MS, now_ms().to_string()],
+    )?;
+    for (key, value) in extra.iter().filter(|(k, _)| *k != "version") {
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+    }
     for (i, file) in snapshot.files.iter().enumerate() {
         tx.execute(
             "INSERT INTO files (id, path) VALUES (?1, ?2)",
@@ -123,7 +149,11 @@ pub fn read(path: &Path) -> Result<GraphSnapshot, StoreError> {
     let files = load_files(&conn)?;
     let nodes = load_nodes(&conn)?;
     let edges = load_edges(&conn)?;
-    Ok(GraphSnapshot { files, nodes, edges })
+    Ok(GraphSnapshot {
+        files,
+        nodes,
+        edges,
+    })
 }
 
 /// Count rows without deserializing node bodies.
@@ -138,6 +168,29 @@ pub fn summary(path: &Path) -> Result<GraphSummary, StoreError> {
         edges: edges as usize,
         files: files as usize,
     })
+}
+
+/// Read one `meta` value (e.g. [`META_WRITTEN_AT_MS`]) without loading the graph.
+pub fn read_meta(path: &Path, key: &str) -> Result<Option<String>, StoreError> {
+    let conn = Connection::open(path)?;
+    check_version(&conn)?;
+    let v = conn
+        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .optional()?;
+    Ok(v)
+}
+
+/// The store's [`META_WRITTEN_AT_MS`], or `None` for stores written before it
+/// was recorded.
+pub fn written_at_ms(path: &Path) -> Result<Option<u64>, StoreError> {
+    Ok(read_meta(path, META_WRITTEN_AT_MS)?.and_then(|v| v.parse().ok()))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn init_schema(conn: &Connection) -> Result<(), StoreError> {
@@ -185,17 +238,15 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
 fn check_version(conn: &Connection) -> Result<(), StoreError> {
     init_schema(conn)?;
     let version: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'version'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT value FROM meta WHERE key = 'version'", [], |r| {
+            r.get(0)
+        })
         .optional()?;
     match version {
         Some(v) => {
-            let found = v.parse::<u32>().map_err(|_| {
-                StoreError::Corrupt(format!("meta.version is not a number: {v}"))
-            })?;
+            let found = v
+                .parse::<u32>()
+                .map_err(|_| StoreError::Corrupt(format!("meta.version is not a number: {v}")))?;
             if found != STORE_VERSION {
                 return Err(StoreError::VersionMismatch { found });
             }
@@ -211,7 +262,8 @@ fn load_files(conn: &Connection) -> Result<Vec<std::path::PathBuf>, StoreError> 
         let p: String = r.get(0)?;
         Ok(std::path::PathBuf::from(p))
     })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
 }
 
 fn load_nodes(conn: &Connection) -> Result<Vec<Node>, StoreError> {
@@ -386,7 +438,11 @@ mod tests {
             flags: NodeFlags::default(),
             stats: NodeStats::default(),
         });
-        g.add_edge(a, b, lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 2, 4, 2, 5)));
+        g.add_edge(
+            a,
+            b,
+            lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 2, 4, 2, 5)),
+        );
 
         let snap = g.snapshot();
         let path = temp_db();
@@ -401,6 +457,34 @@ mod tests {
         assert_eq!(sum.nodes, 2);
         assert_eq!(sum.edges, 1);
         assert_eq!(sum.files, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn meta_records_write_time_and_extras() {
+        let path = temp_db();
+        write(&path, &GraphSnapshot::default()).unwrap();
+        let t = written_at_ms(&path).unwrap().expect("written_at recorded");
+        assert!(t > 1_600_000_000_000);
+
+        write_with_meta(
+            &path,
+            &GraphSnapshot::default(),
+            &[
+                (META_WRITTEN_AT_MS, "42".into()),
+                ("root", "/tmp/repo".into()),
+                ("version", "999".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(written_at_ms(&path).unwrap(), Some(42));
+        assert_eq!(
+            read_meta(&path, "root").unwrap().as_deref(),
+            Some("/tmp/repo")
+        );
+        assert_eq!(read_meta(&path, "missing").unwrap(), None);
+        // `version` is not overridable, so the store still opens.
+        assert!(read(&path).is_ok());
         let _ = std::fs::remove_file(path);
     }
 

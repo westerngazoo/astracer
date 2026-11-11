@@ -71,7 +71,9 @@ navigation code; `lcw-layout` and `lcw-render` support the renderer;
 | `lcw-layout` | - | Force-directed graph layout, whole-graph or one box per crate (CPU by default; whole-graph GPU-compute behind the `gpu` feature). |
 | `lcw-render` | - | `wgpu` renderer (native + WASM), crate boxes, module/flow views, highlighting. |
 | `lcw-engine` | - | Orchestrator facade tying the layers together. |
+| `lcw-agent` | - | Agent contract: fresh-cache repo loading, token budgets, the schema-1 JSON shared by `lcw --json` and `lcw-mcp`. |
 | `lcw-cli` | - | Standalone CLI (`lcw`). |
+| `lcw-mcp` | - | MCP (stdio) server exposing the navigation queries to AI coding agents. |
 | `apps/desktop` | - | Tauri v2 shell + Rust/WASM UI with the Explorer sidebar. |
 
 ## Building
@@ -117,7 +119,8 @@ there and `cargo xtask <task>` runs the same binary.
 ## Walking a codebase from the CLI
 
 Every navigation command takes `--path <repo>` (default `.`), `--json` for a
-machine-readable slice, and `--semantic` for the rust-analyzer backend.
+machine-readable slice, `--semantic` for the rust-analyzer backend and
+`--no-cache` to skip the cached graph.
 
 ```bash
 # Where does it start? Ranked by how much code each entry drives.
@@ -141,6 +144,31 @@ lcw explain "Engine::analyze"
 lcw flow "parse_incremental" --from main
 lcw flow "parse_incremental" --from main --snippets   # JSON with each hop's source
 ```
+
+Navigation commands load the cached `graph.sqlite` when it is newer than every
+source file (otherwise they re-analyze and refresh it); `--no-cache` forces a
+fresh analysis.
+
+### For AI coding agents
+
+`lcw` answers the questions an agent would otherwise answer by reading whole
+files: `span` gives the exact lines of a definition, `explain` its callers and
+callees with call sites, `impact` the blast radius of a change. Every `--json`
+output carries `"schema": 1`; `--budget <tokens>` (or `--compact`) trims lists
+to fit, marking cuts with `<list>_more`; an ambiguous or unknown symbol prints
+candidates and exits with code 2.
+
+```bash
+lcw span "Engine::analyze"
+lcw span "Engine::analyze" --code
+lcw impact "Engine::analyze" --depth 3 --json
+lcw callers "parse_incremental"
+lcw --compact explain "Engine::analyze" --json
+```
+
+The same queries are served over MCP by `lcw-mcp`, which keeps each repo's
+graph in memory between calls. Setup for Cursor and Claude Code, and which
+command answers which question: [`docs/agents.md`](docs/agents.md).
 
 Disk caches: `lcw cache list` and `lcw cache clean --yes` (or `scripts/livewalk-cache-clean.sh`; honors `LIVEWALK_CACHE_HOME`).
 

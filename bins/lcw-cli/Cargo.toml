@@ -24,6 +24,7 @@ viewer = ["dep:lcw-render", "dep:lcw-layout"]
 semantic = ["lcw-engine/semantic"]
 
 [dependencies]
+lcw-agent = { path = "../../crates/lcw-agent" }
 lcw-core = { path = "../../crates/lcw-core" }
 lcw-config = { path = "../../crates/lcw-config" }
 lcw-engine = { path = "../../crates/lcw-engine" }

@@ -72,10 +72,19 @@ run_cli() {
 
 run_build_all() {
   ensure_wasm_target
-  (cd "${LIVEWALK_ROOT}" && cargo build --workspace --locked)
-  REBUILD_CLI=1
-  ensure_lcw_cli
-  (cd "${FRONTEND_DIR}" && trunk build)
+  local -a cmd=(cargo build --release --locked -p lcw-cli -p lcw-mcp)
+  local feats
+  feats="$(cli_cargo_features)"
+  if [[ -n "${feats}" ]]; then
+    cmd+=(--features "lcw-cli/${feats},lcw-mcp/${feats}")
+  fi
+  echo "==> release build: lcw, lcw-mcp"
+  (cd "${LIVEWALK_ROOT}" && "${cmd[@]}")
+  echo "==> desktop backend: cargo check (src-tauri)"
+  (cd "${TAURI_DIR}" && cargo check --locked)
+  echo "==> desktop frontend: cargo check --target wasm32-unknown-unknown"
+  (cd "${FRONTEND_DIR}" && cargo check --locked --target wasm32-unknown-unknown)
+  echo "==> built ${LIVEWALK_ROOT}/target/release/lcw and ${LIVEWALK_ROOT}/target/release/lcw-mcp"
 }
 
 run_rebuild() {
@@ -92,7 +101,8 @@ Usage: livewalk-dev.sh [--rebuild-cli] [dev|cli|build-all|rebuild] [args...]
 
   dev          Run the Tauri desktop app (default).
   cli          Run the release lcw binary (e.g. cli analyze /path/to/repo).
-  build-all    Build workspace, release lcw, and trunk-build the frontend.
+  build-all    Release-build lcw + lcw-mcp, cargo check the desktop backend
+               (src-tauri) and the wasm frontend.
   rebuild      Force rebuild lcw release, workspace, and frontend bundle.
 
 Environment:

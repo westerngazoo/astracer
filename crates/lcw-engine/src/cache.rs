@@ -22,7 +22,11 @@ use serde::{Deserialize, Serialize};
 /// 2: fragments carry spawn sites (`CallKind::Spawn`) and synthetic nodes for
 /// spawned closures; a version-1 fragment would silently lack both, so a warm
 /// cache would hide every thread root until the file happened to change.
-const CACHE_VERSION: u32 = 2;
+///
+/// 3: method calls carry an inferred receiver type (`RawCall::receiver`) and
+/// calls inside macro arguments are extracted; a version-2 fragment would
+/// load fine but drop those edges until the file changed.
+pub(crate) const CACHE_VERSION: u32 = 3;
 
 /// File name of the cache document inside the cache directory.
 const CACHE_FILE: &str = "fragments.json";

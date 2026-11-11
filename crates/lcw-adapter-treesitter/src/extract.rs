@@ -8,6 +8,12 @@
 //!
 //! Resolution is deliberately *heuristic* (fast mode). The semantic adapter
 //! (`lcw-adapter-ra`) is the precise alternative behind the same trait.
+//! Heuristic, but precision first: a method call binds by its receiver's type
+//! when [`infer`] can tell it, and otherwise only to a method whose name is
+//! unique in the repo and not one every std type has (see
+//! [`is_ubiquitous_method`]). A wrong edge is worse than a missing one.
+
+mod infer;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,6 +23,8 @@ use lcw_core::{
     NodeId, NodeKind, NodeStats, RawCall, SourceFile, SourceSpan,
 };
 use tree_sitter::{Node as TsNode, Parser};
+
+use infer::{FileTypes, LocalTypes};
 
 /// Parse a batch of Rust files into a single call graph.
 ///
@@ -68,12 +76,14 @@ fn extract_with_parser(parser: &mut Parser, sf: &SourceFile) -> Result<FileFragm
     let mut calls = Vec::new();
     let mut spawned = Vec::new();
     let mut taken = HashSet::new();
+    let file_types = FileTypes::collect(tree.root_node(), &sf.text);
     let mut scan = Scan {
         calls: &mut calls,
         spawned: &mut spawned,
         taken: &mut taken,
+        file_types: &file_types,
     };
-    collect_calls_into(&mut scan, tree.root_node(), &sf.text, &module_base);
+    collect_calls_into(&mut scan, tree.root_node(), &sf.text, &module_base, None);
     // Spawned closures are definitions too: resolution interns them with the
     // rest, so their spawn edge and their own calls link like any other.
     defs.extend(spawned);
@@ -95,6 +105,9 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
 
     // Pass 1: definitions (remapping each fragment-local span to its real file).
     let mut by_short: HashMap<String, Vec<NodeId>> = HashMap::new();
+    // Every definition's module path keyed by its last segment: for methods,
+    // the impl/trait type that owns them.
+    let mut owners: HashMap<String, HashSet<String>> = HashMap::new();
     for frag in fragments {
         let file = graph.intern_file(frag.path.clone());
         for def in &frag.defs {
@@ -103,6 +116,13 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
             let name = node.name.clone();
             let id = graph.add_node(node);
             by_short.entry(name).or_default().push(id);
+            let module = &graph.node(id).module_path;
+            if let Some(owner) = module.rsplit("::").next() {
+                owners
+                    .entry(owner.to_string())
+                    .or_default()
+                    .insert(module.clone());
+            }
         }
     }
     for ids in by_short.values_mut() {
@@ -139,8 +159,9 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
                 kind: callkind_to_class(rc.kind),
                 path: rc.path.clone(),
                 short: rc.short.clone(),
+                receiver: rc.receiver.clone(),
             };
-            let target = resolve_target(&mut graph, &by_short, &callee, &scope);
+            let target = resolve_target(&mut graph, &by_short, &owners, &callee, &scope);
             let edge_kind = if graph.node(target).kind == NodeKind::External {
                 EdgeKind::Unresolved
             } else {
@@ -385,16 +406,25 @@ struct Scan<'a> {
     calls: &'a mut Vec<RawCall>,
     spawned: &'a mut Vec<Node>,
     taken: &'a mut HashSet<String>,
+    file_types: &'a FileTypes,
 }
 
-fn collect_calls_into(scan: &mut Scan, node: TsNode, text: &str, scope: &str) {
+/// `self_ty` is the type of the `impl`/`trait` block the items sit directly
+/// in; a nested `fn` cannot see its outer impl's `Self`, so it is reset there.
+fn collect_calls_into(
+    scan: &mut Scan,
+    node: TsNode,
+    text: &str,
+    scope: &str,
+    self_ty: Option<&str>,
+) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "mod_item" => {
                 let inner = join(scope, &field_text(child, "name", text));
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls_into(scan, body, text, &inner);
+                    collect_calls_into(scan, body, text, &inner, None);
                 }
             }
             "impl_item" => {
@@ -404,14 +434,17 @@ fn collect_calls_into(scan: &mut Scan, node: TsNode, text: &str, scope: &str) {
                 } else {
                     join(scope, &ty)
                 };
+                let self_ty = (!ty.is_empty()).then_some(ty.as_str());
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls_into(scan, body, text, &inner);
+                    collect_calls_into(scan, body, text, &inner, self_ty);
                 }
             }
             "trait_item" => {
-                let inner = join(scope, &field_text(child, "name", text));
+                let name = field_text(child, "name", text);
+                let inner = join(scope, &name);
+                let self_ty = (!name.is_empty()).then_some(name.as_str());
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_calls_into(scan, body, text, &inner);
+                    collect_calls_into(scan, body, text, &inner, self_ty);
                 }
             }
             "function_item" | "function_signature_item" => {
@@ -424,22 +457,28 @@ fn collect_calls_into(scan: &mut Scan, node: TsNode, text: &str, scope: &str) {
                     // The caller's own body calls first, then nested fns (each
                     // its own caller) — mirrors the original edge order.
                     let locals = local_bindings(child, text);
-                    scan_calls_into(scan, body, text, &qualified, &locals);
-                    collect_calls_into(scan, body, text, &qualified);
+                    let types = LocalTypes::for_function(child, text, scan.file_types, self_ty);
+                    let env = Env {
+                        locals: &locals,
+                        types: &types,
+                    };
+                    scan_calls_into(scan, body, text, &qualified, &env);
+                    collect_calls_into(scan, body, text, &qualified, None);
                 }
             }
-            _ => collect_calls_into(scan, child, text, scope),
+            _ => collect_calls_into(scan, child, text, scope, self_ty),
         }
     }
 }
 
-fn scan_calls_into(
-    scan: &mut Scan,
-    node: TsNode,
-    text: &str,
-    caller: &str,
-    locals: &HashSet<String>,
-) {
+/// What a function body binds: every local name (for spawn arguments) and
+/// the types of those that can be inferred (for method receivers).
+struct Env<'a> {
+    locals: &'a HashSet<String>,
+    types: &'a LocalTypes<'a>,
+}
+
+fn scan_calls_into(scan: &mut Scan, node: TsNode, text: &str, caller: &str, env: &Env) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let kind = child.kind();
@@ -449,21 +488,180 @@ fn scan_calls_into(
             continue;
         }
         if matches!(kind, "call_expression" | "macro_invocation") {
-            if let Some(call) = callee_of_call(child, text) {
+            if let Some(call) = callee_of_call(child, text).filter(|c| !calls_a_local(c, env.types))
+            {
                 let spawns = call.kind != CallClass::Macro && is_spawn_name(&call.short);
+                let is_macro = call.kind == CallClass::Macro;
+                let receiver = receiver_type(child, &call, text, env.types);
                 scan.calls.push(RawCall {
                     caller: caller.to_string(),
                     kind: class_to_callkind(call.kind),
                     path: call.path,
                     short: call.short,
+                    receiver,
                     call_site: span_of(child, FileId(0)),
                 });
-                if spawns && scan_spawn(scan, child, text, caller, locals) {
+                if is_macro {
+                    scan_macro_args(scan, child, text, caller, env.types);
+                }
+                if spawns && scan_spawn(scan, child, text, caller, env) {
                     continue;
                 }
             }
         }
-        scan_calls_into(scan, child, text, caller, locals);
+        scan_calls_into(scan, child, text, caller, env);
+    }
+}
+
+/// `f(..)` where `f` is a local closure or function value: a call, but not
+/// of any definition in the graph.
+fn calls_a_local(call: &Callee, types: &LocalTypes) -> bool {
+    call.kind == CallClass::Direct
+        && !call.path.contains("::")
+        && types.is_callable_local(&call.path)
+}
+
+/// The receiver type of a call, when it can be inferred: the value in front
+/// of `x.m()`, or the impl type behind `Self::f()`.
+fn receiver_type(call: TsNode, callee: &Callee, text: &str, types: &LocalTypes) -> Option<String> {
+    match callee.kind {
+        CallClass::Method => {
+            let func = call.child_by_field_name("function")?;
+            let func = if func.kind() == "generic_function" {
+                func.child_by_field_name("function")?
+            } else {
+                func
+            };
+            types.type_of(func.child_by_field_name("value")?, text)
+        }
+        CallClass::Associated => self_assoc_receiver(&callee.path, types),
+        CallClass::Direct | CallClass::Macro => None,
+    }
+}
+
+fn self_assoc_receiver(path: &str, types: &LocalTypes) -> Option<String> {
+    let rest = path.strip_prefix("Self::")?;
+    (!rest.contains("::"))
+        .then(|| types.self_ty().map(str::to_string))
+        .flatten()
+}
+
+// ---------------------------------------------------------------------------
+// Calls inside macro arguments
+// ---------------------------------------------------------------------------
+
+/// Macro arguments are an unparsed token tree, so `assert_eq!(slugify(x), ..)`
+/// holds no call expression and its call would be lost. Recognize the plain
+/// call shapes in the tokens — `f(`, `a::b::f(`, `Self::f(`, and `.m(` when
+/// the receiver is a lone `self` or a local of known type — at any depth,
+/// including inside nested macros. A method on an unknown receiver is not
+/// recorded at all: macro arguments are mostly assertions about other
+/// libraries' values (`assert_eq!(res.status(), 200)`), where even a unique
+/// method name is no evidence. Anything subtler stays unseen too: a missed
+/// call costs an edge, a misread one would invent it.
+fn scan_macro_args(scan: &mut Scan, mac: TsNode, text: &str, caller: &str, types: &LocalTypes) {
+    let mut cursor = mac.walk();
+    let trees: Vec<TsNode> = mac
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "token_tree")
+        .collect();
+    for tt in trees {
+        scan_token_tree(scan, tt, text, caller, types);
+    }
+}
+
+fn scan_token_tree(scan: &mut Scan, tt: TsNode, text: &str, caller: &str, types: &LocalTypes) {
+    let mut cursor = tt.walk();
+    let toks: Vec<TsNode> = tt.children(&mut cursor).collect();
+    let kind_at = |i: usize| toks.get(i).map(|t| t.kind());
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = toks[i];
+        if tok.kind() == "token_tree" {
+            scan_token_tree(scan, tok, text, caller, types);
+            i += 1;
+            continue;
+        }
+        let is_head = matches!(tok.kind(), "identifier" | "self" | "super" | "crate")
+            || (tok.kind() == "primitive_type" && kind_at(i + 1) == Some("::"));
+        // A path segment after `::` was consumed with its head; after `fn` it
+        // is a declaration, after `'` a lifetime.
+        let prev = i.checked_sub(1).and_then(kind_at);
+        if !is_head || matches!(prev, Some("::" | "fn" | "'")) {
+            i += 1;
+            continue;
+        }
+        let mut segs = vec![node_text(tok, text)];
+        let mut j = i;
+        while kind_at(j + 1) == Some("::") && kind_at(j + 2) == Some("identifier") {
+            segs.push(node_text(toks[j + 2], text));
+            j += 2;
+        }
+        let args = toks.get(j + 1).copied();
+        let is_call = args
+            .is_some_and(|a| a.kind() == "token_tree" && text[a.start_byte()..].starts_with('('));
+        if is_call
+            && segs
+                .last()
+                .is_some_and(|s| s.chars().next().is_some_and(is_ident_start))
+        {
+            let short = segs.last().cloned().unwrap_or_default();
+            let path = segs.join("::");
+            let found = if prev == Some(".") {
+                let receiver = token_receiver(&toks, i, text, types);
+                (segs.len() == 1 && receiver.is_some()).then_some((CallClass::Method, receiver))
+            } else if segs.len() == 1 {
+                (tok.kind() == "identifier" && !types.is_callable_local(&short))
+                    .then_some((CallClass::Direct, None))
+            } else {
+                Some((CallClass::Associated, self_assoc_receiver(&path, types)))
+            };
+            let Some((kind, receiver)) = found else {
+                i = j + 1;
+                continue;
+            };
+            let end = args.map_or(tok, |a| a);
+            scan.calls.push(RawCall {
+                caller: caller.to_string(),
+                kind: class_to_callkind(kind),
+                path: if kind == CallClass::Method {
+                    short.clone()
+                } else {
+                    path
+                },
+                short,
+                receiver,
+                call_site: span_between(tok, end, FileId(0)),
+            });
+        }
+        i = j + 1;
+    }
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_'
+}
+
+/// The receiver of `.m(` at `toks[dot + 1]`: only the simplest shapes, a lone
+/// `self` or local name directly before the dot (`self.m(`, `x.m(`).
+fn token_receiver(
+    toks: &[TsNode],
+    name_at: usize,
+    text: &str,
+    types: &LocalTypes,
+) -> Option<String> {
+    let recv = toks.get(name_at.checked_sub(2)?)?;
+    let before = name_at
+        .checked_sub(3)
+        .and_then(|k| toks.get(k))
+        .map(|t| t.kind());
+    if matches!(before, Some("." | "::")) {
+        return None;
+    }
+    match recv.kind() {
+        "self" => types.self_ty().map(str::to_string),
+        "identifier" => types.var(&node_text(*recv, text)).map(str::to_string),
+        _ => None,
     }
 }
 
@@ -491,28 +689,22 @@ fn is_spawn_name(short: &str) -> bool {
 /// async block argument becomes its own node, and a function path becomes a
 /// spawn reference. Returns `false` when there is no argument list, so the
 /// caller scans the node normally.
-fn scan_spawn(
-    scan: &mut Scan,
-    call: TsNode,
-    text: &str,
-    caller: &str,
-    locals: &HashSet<String>,
-) -> bool {
+fn scan_spawn(scan: &mut Scan, call: TsNode, text: &str, caller: &str, env: &Env) -> bool {
     let Some(args) = call.child_by_field_name("arguments") else {
         return false;
     };
     if let Some(func) = call.child_by_field_name("function") {
-        scan_calls_into(scan, func, text, caller, locals);
+        scan_calls_into(scan, func, text, caller, env);
     }
     let mut cursor = args.walk();
     for arg in args.named_children(&mut cursor) {
         match arg.kind() {
-            "closure_expression" | "async_block" => spawn_closure(scan, arg, text, caller, locals),
+            "closure_expression" | "async_block" => spawn_closure(scan, arg, text, caller, env),
             // A bare name that is a parameter or a `let` binding is a value —
             // `spawn(slot)` with `slot: u8` — not a function to run.
-            "identifier" if locals.contains(node_text(arg, text).as_str()) => {}
+            "identifier" if env.locals.contains(node_text(arg, text).as_str()) => {}
             "identifier" | "scoped_identifier" => spawn_reference(scan, arg, text, caller),
-            _ => scan_calls_into(scan, arg, text, caller, locals),
+            _ => scan_calls_into(scan, arg, text, caller, env),
         }
     }
     true
@@ -526,13 +718,7 @@ fn scan_spawn(
 /// caller exactly as a nested `fn` would be (`module_path` is the caller), so
 /// the outline shows it inside the function that starts it. The angle
 /// brackets keep the name out of reach of ordinary call resolution.
-fn spawn_closure(
-    scan: &mut Scan,
-    closure: TsNode,
-    text: &str,
-    caller: &str,
-    outer_locals: &HashSet<String>,
-) {
+fn spawn_closure(scan: &mut Scan, closure: TsNode, text: &str, caller: &str, outer: &Env) {
     let line = closure.start_position().row + 1;
     let base = format!("<spawned@L{line}>");
     let mut name = base.clone();
@@ -586,21 +772,28 @@ fn spawn_closure(
         kind: CallKind::Spawn,
         path: qualified.clone(),
         short: name,
+        receiver: None,
         call_site: span_of(closure, FileId(0)),
     });
 
     // Captured variables are still values inside the closure.
-    let mut locals = outer_locals.clone();
+    let mut locals = outer.locals.clone();
     if let Some(params) = closure.child_by_field_name("parameters") {
         identifiers_in(params, text, &mut locals);
     }
     if let Some(body) = body {
         bindings_in(body, text, &mut locals);
     }
+    // The enclosing function's type environment already covers the closure:
+    // its bindings were collected from the whole body.
+    let env = Env {
+        locals: &locals,
+        types: outer.types,
+    };
     // Scan the closure node, not its body: the scan looks at a node's
     // children, and in `move || worker(rx)` the body *is* the call, so
     // scanning the body alone would lose the thread's only call.
-    scan_calls_into(scan, closure, text, &qualified, &locals);
+    scan_calls_into(scan, closure, text, &qualified, &env);
 }
 
 /// `spawn(worker)` / `spawn(workers::run)`: the function is passed, not
@@ -613,6 +806,7 @@ fn spawn_reference(scan: &mut Scan, arg: TsNode, text: &str, caller: &str) {
         kind: CallKind::Spawn,
         short: last_segment(&path),
         path,
+        receiver: None,
         call_site: span_of(arg, FileId(0)),
     });
 }
@@ -701,6 +895,7 @@ fn resolve_spawn(
 fn resolve_target(
     graph: &mut CodeGraph,
     by_short: &HashMap<String, Vec<NodeId>>,
+    owners: &HashMap<String, HashSet<String>>,
     call: &Callee,
     scope: &CallerScope,
 ) -> NodeId {
@@ -717,8 +912,16 @@ fn resolve_target(
             return id;
         }
     }
-    if let Some(cands) = by_short.get(&call.short) {
-        let qualifiers = path_qualifiers(&call.path);
+    if call.kind == CallClass::Method {
+        if let Some(id) = resolve_method(graph, by_short, owners, call, scope) {
+            return id;
+        }
+    } else if let Some(cands) = by_short.get(&call.short) {
+        let mut qualifiers = path_qualifiers(&call.path);
+        // `Self::f()` is `T::f()` for the impl's `T`.
+        if let Some(ty) = &call.receiver {
+            qualifiers.push(ty);
+        }
         // A type- or module-qualified call (`Calc::new`, `math::sum`) may only
         // bind to a definition whose path actually contains that qualifier.
         // Otherwise the qualifier names something outside the analyzed code
@@ -744,6 +947,133 @@ fn resolve_target(
         call.path.clone()
     };
     graph.intern_node(&key, || Node::external(key.clone()))
+}
+
+/// Bind `x.m()` to a method definition, or to nothing.
+///
+/// With a known receiver type `T`, only a method declared directly in an
+/// `impl T` / `impl Trait for T` / `trait T` block qualifies; when `T` owns
+/// nothing in the repo it is foreign and nothing does. Otherwise — receiver
+/// unknown, or a repo `T` that declares no `m` (a trait's default method) —
+/// a name is evidence only when exactly one method in
+/// the whole repo has it *and* it is not a name the standard library puts on
+/// everything (`expect`, `map`, `get`, ...): `opt.map(..)` must not become a
+/// call to the one `Camera::map` in the repo.
+fn resolve_method(
+    graph: &CodeGraph,
+    by_short: &HashMap<String, Vec<NodeId>>,
+    owners: &HashMap<String, HashSet<String>>,
+    call: &Callee,
+    scope: &CallerScope,
+) -> Option<NodeId> {
+    let methods: Vec<NodeId> = by_short
+        .get(&call.short)?
+        .iter()
+        .copied()
+        .filter(|&id| can_name(CallClass::Method, graph.node(id)))
+        .collect();
+    if let Some(ty) = &call.receiver {
+        // A path-qualified type (`reqwest::Client`) must match its qualifiers
+        // too, exactly as a `Type::f()` call must.
+        let name = ty.rsplit("::").next().unwrap_or(ty);
+        let qualifiers = path_qualifiers(ty);
+        let own: Vec<NodeId> = methods
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let n = graph.node(id);
+                n.module_path.rsplit("::").next() == Some(name)
+                    && has_qualifiers(&n.qualified_name, &qualifiers)
+            })
+            .collect();
+        if let Some(id) = pick_unambiguous(graph, &own, scope) {
+            return Some(id);
+        }
+        // A type that owns no definition here is another library's
+        // (`res: Response`), or a generic parameter: no repo method is its.
+        let known = owners
+            .get(name)
+            .is_some_and(|ms| ms.iter().any(|m| has_qualifiers(m, &qualifiers)));
+        if !known {
+            return None;
+        }
+    }
+    if is_ubiquitous_method(&call.short) {
+        return None;
+    }
+    match methods.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// Like [`pick_nearest`], but where it would fall back to "the first
+/// declared" among candidates in other crates, refuse instead: two
+/// same-named types elsewhere are two different answers.
+fn pick_unambiguous(graph: &CodeGraph, cands: &[NodeId], scope: &CallerScope) -> Option<NodeId> {
+    if cands.len() <= 1 {
+        return cands.first().copied();
+    }
+    let caller_crate = scope.module.split("::").next().unwrap_or("");
+    let in_crate = cands
+        .iter()
+        .any(|&id| graph.node(id).module_path.split("::").next() == Some(caller_crate));
+    if in_crate {
+        pick_nearest(graph, cands, scope)
+    } else {
+        None
+    }
+}
+
+/// Method names so common on std types — `Option`, `Result`, iterators,
+/// collections, strings, smart pointers, I/O, sync primitives and the derive
+/// traits — that a call by name alone says nothing about which type's method
+/// runs. Without a known receiver type these never bind to a repo method.
+fn is_ubiquitous_method(name: &str) -> bool {
+    matches!(
+        name,
+        // Option / Result
+        "expect" | "expect_err" | "unwrap" | "unwrap_err" | "unwrap_or" | "unwrap_or_else"
+            | "unwrap_or_default" | "map" | "map_err" | "map_or" | "map_or_else" | "and_then"
+            | "or_else" | "and" | "or" | "ok" | "err" | "ok_or" | "ok_or_else" | "is_some"
+            | "is_none" | "is_ok" | "is_err" | "take" | "replace" | "filter" | "flatten"
+            | "copied" | "cloned" | "as_deref" | "as_deref_mut" | "zip" | "unzip" | "inspect"
+            | "transpose" | "get_or_insert" | "get_or_insert_with"
+            // Iterators
+            | "iter" | "iter_mut" | "into_iter" | "next" | "next_back" | "collect" | "fold"
+            | "for_each" | "find" | "find_map" | "filter_map" | "flat_map" | "any" | "all"
+            | "count" | "sum" | "product" | "min" | "max" | "min_by" | "max_by" | "min_by_key"
+            | "max_by_key" | "position" | "enumerate" | "rev" | "skip" | "step_by" | "chain"
+            | "peekable" | "peek" | "last" | "nth" | "windows" | "chunks" | "scan"
+            | "take_while" | "skip_while" | "partition" | "by_ref"
+            // Collections / slices / strings
+            | "get" | "get_mut" | "insert" | "remove" | "push" | "push_str" | "push_back"
+            | "push_front" | "pop" | "pop_back" | "pop_front" | "len" | "is_empty" | "clear"
+            | "contains" | "contains_key" | "extend" | "append" | "truncate" | "retain"
+            | "drain" | "sort" | "sort_by" | "sort_by_key" | "sort_unstable" | "dedup"
+            | "reverse" | "first" | "split" | "split_at" | "splitn" | "join" | "concat"
+            | "entry" | "or_insert" | "or_insert_with" | "or_default" | "keys" | "values"
+            | "values_mut" | "starts_with" | "ends_with" | "trim" | "lines" | "chars"
+            | "bytes" | "as_bytes" | "parse" | "with_capacity" | "capacity" | "reserve"
+            | "resize" | "swap" | "fill" | "binary_search" | "to_lowercase" | "to_uppercase"
+            | "strip_prefix" | "strip_suffix" | "char_indices" | "split_whitespace"
+            | "to_vec" | "as_slice" | "as_mut_slice" | "set"
+            // Conversions / derive & std traits
+            | "clone" | "clone_from" | "to_string" | "to_owned" | "as_ref" | "as_mut"
+            | "as_str" | "into" | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut"
+            | "deref" | "deref_mut" | "default" | "new" | "fmt" | "eq" | "ne" | "cmp"
+            | "partial_cmp" | "hash" | "drop" | "build"
+            // I/O, sync, async
+            | "write" | "write_all" | "write_str" | "write_fmt" | "read" | "read_to_string"
+            | "read_to_end" | "read_line" | "flush" | "send" | "recv" | "try_recv" | "lock"
+            | "try_lock" | "read_lock" | "write_lock" | "load" | "store" | "close"
+            | "await" | "poll" | "wait" | "notify_one" | "notify_all" | "call" | "run"
+            | "start" | "stop" | "open"
+            // HTTP requests / responses, paths, time
+            | "status" | "headers" | "header" | "body" | "json" | "text" | "query" | "method"
+            | "uri" | "url" | "path" | "to_str" | "display" | "exists" | "is_file" | "is_dir"
+            | "file_name" | "extension" | "parent" | "elapsed" | "as_secs" | "as_millis"
+    )
 }
 
 /// The qualifying segments of a call path (`Calc::new` -> `["Calc"]`,
@@ -889,6 +1219,8 @@ struct Callee {
     path: String,
     /// Last path segment (the resolvable short name).
     short: String,
+    /// Inferred receiver type; see [`RawCall::receiver`].
+    receiver: Option<String>,
 }
 
 fn callee_of_call(call: TsNode, text: &str) -> Option<Callee> {
@@ -900,6 +1232,7 @@ fn callee_of_call(call: TsNode, text: &str) -> Option<Callee> {
             kind: CallClass::Macro,
             path,
             short,
+            receiver: None,
         });
     }
     let func = call.child_by_field_name("function")?;
@@ -914,6 +1247,7 @@ fn resolve_callee_expr(func: TsNode, text: &str) -> Option<Callee> {
                 kind: CallClass::Direct,
                 path: n.clone(),
                 short: n,
+                receiver: None,
             })
         }
         "scoped_identifier" => {
@@ -926,6 +1260,7 @@ fn resolve_callee_expr(func: TsNode, text: &str) -> Option<Callee> {
                 kind: CallClass::Associated,
                 path,
                 short,
+                receiver: None,
             })
         }
         "field_expression" => {
@@ -935,6 +1270,7 @@ fn resolve_callee_expr(func: TsNode, text: &str) -> Option<Callee> {
                 kind: CallClass::Method,
                 path: n.clone(),
                 short: n,
+                receiver: None,
             })
         }
         "generic_function" => {
@@ -948,6 +1284,7 @@ fn resolve_callee_expr(func: TsNode, text: &str) -> Option<Callee> {
                 kind: CallClass::Direct,
                 path: n,
                 short,
+                receiver: None,
             })
         }
     }
@@ -993,6 +1330,19 @@ fn field_text(node: TsNode, field: &str, text: &str) -> String {
 fn span_of(node: TsNode, file: FileId) -> SourceSpan {
     let s = node.start_position();
     let e = node.end_position();
+    SourceSpan::new(
+        file,
+        s.row as u32 + 1,
+        s.column as u32,
+        e.row as u32 + 1,
+        e.column as u32,
+    )
+}
+
+/// Span from the start of `first` to the end of `last`.
+fn span_between(first: TsNode, last: TsNode, file: FileId) -> SourceSpan {
+    let s = first.start_position();
+    let e = last.end_position();
     SourceSpan::new(
         file,
         s.row as u32 + 1,

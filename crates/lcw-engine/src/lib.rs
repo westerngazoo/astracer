@@ -100,6 +100,61 @@ impl IncrementalStats {
     }
 }
 
+/// `graph.sqlite` meta key: the repository root string the graph's file paths
+/// were joined onto.
+pub const META_ROOT: &str = "root";
+/// `graph.sqlite` meta key: how many source files discovery found.
+pub const META_FILE_COUNT: &str = "file_count";
+/// `graph.sqlite` meta key: the adapter and extraction version that built the
+/// graph, so a graph built by an older extractor is not served as fresh.
+pub const META_EXTRACTOR: &str = "extractor";
+
+/// Why a cached graph cannot be used as-is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Staleness {
+    /// `[graph_store].enabled = false`.
+    Disabled,
+    /// No `graph.sqlite` yet.
+    Missing,
+    /// The store predates freshness metadata (or it is unreadable).
+    NoMetadata,
+    /// The store was written for a different root path string.
+    RootChanged,
+    /// The store was built by another adapter or extraction version.
+    ExtractorChanged,
+    /// Source files were added or removed since the store was written.
+    FileSetChanged { before: usize, now: usize },
+    /// This many source files were modified after the store was written.
+    FilesModified(usize),
+}
+
+impl std::fmt::Display for Staleness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Staleness::Disabled => f.write_str("graph store disabled"),
+            Staleness::Missing => f.write_str("no cached graph"),
+            Staleness::NoMetadata => f.write_str("cached graph has no freshness metadata"),
+            Staleness::RootChanged => f.write_str("cached graph was built for another root path"),
+            Staleness::ExtractorChanged => {
+                f.write_str("cached graph was built by another extractor version")
+            }
+            Staleness::FileSetChanged { before, now } => {
+                write!(f, "source files changed ({before} -> {now})")
+            }
+            Staleness::FilesModified(n) => write!(f, "{n} source file(s) modified"),
+        }
+    }
+}
+
+/// Where [`Engine::load_or_analyze`] got its graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphSource {
+    /// Loaded from a fresh `graph.sqlite` (no parsing; no diagnostics).
+    Cache,
+    /// Freshly analyzed (and the store rewritten), for this reason.
+    Analyzed(Staleness),
+}
+
 /// Extra hooks the engine calls after the built-in Layer 2 pass to further
 /// enrich the report (e.g. Layer 3 advisors in phase 6, or bespoke rules).
 /// Keeping them as boxed closures means the engine's public API is stable
@@ -182,6 +237,73 @@ impl Engine {
         Ok(AnalysisReport::new(graph))
     }
 
+    /// Is the cached graph for `root` still valid? `Ok(None)` means fresh: it
+    /// was written for this root string, discovery finds the same number of
+    /// source files, and none was modified after the analysis that produced
+    /// it started. Costs one directory walk plus a `stat` per file.
+    pub fn staleness(&self, root: &Path) -> Result<Option<Staleness>, EngineError> {
+        if !self.config.graph_store.enabled {
+            return Ok(Some(Staleness::Disabled));
+        }
+        let Some(path) =
+            cache::graph_db_file(root, &self.config.cache.dir, self.config.cache_variant())
+        else {
+            return Ok(Some(Staleness::Missing));
+        };
+        if !path.is_file() {
+            return Ok(Some(Staleness::Missing));
+        }
+        let meta = |key: &str| lcw_graph_store::read_meta(&path, key).ok().flatten();
+        let (Some(written), Some(stored_root), Some(count)) = (
+            meta(lcw_graph_store::META_WRITTEN_AT_MS).and_then(|v| v.parse::<u64>().ok()),
+            meta(META_ROOT),
+            meta(META_FILE_COUNT).and_then(|v| v.parse::<usize>().ok()),
+        ) else {
+            return Ok(Some(Staleness::NoMetadata));
+        };
+        if stored_root != root.to_string_lossy() {
+            return Ok(Some(Staleness::RootChanged));
+        }
+        if meta(META_EXTRACTOR).as_deref() != Some(self.extractor_id().as_str()) {
+            return Ok(Some(Staleness::ExtractorChanged));
+        }
+        let files = discover_files(root, &self.config, self.adapter.extensions())?;
+        if files.len() != count {
+            return Ok(Some(Staleness::FileSetChanged {
+                before: count,
+                now: files.len(),
+            }));
+        }
+        let modified = files
+            .iter()
+            .filter(|f| mtime_ms(f).map_or(true, |m| m > written))
+            .count();
+        Ok((modified > 0).then_some(Staleness::FilesModified(modified)))
+    }
+
+    /// The fast path for query front ends: load `graph.sqlite` when it is
+    /// fresh (see [`staleness`](Self::staleness)), otherwise analyze (which
+    /// rewrites the store). A cached report carries the graph only — no
+    /// diagnostics or suggestions.
+    pub fn load_or_analyze(
+        &self,
+        root: &Path,
+    ) -> Result<(AnalysisReport, GraphSource), EngineError> {
+        let reason = match self.staleness(root)? {
+            None => match self.load_from_store(root) {
+                Ok(report) => {
+                    lcw_telemetry::incr("engine.graph_cache_hit");
+                    return Ok((report, GraphSource::Cache));
+                }
+                Err(_) => Staleness::NoMetadata,
+            },
+            Some(reason) => reason,
+        };
+        lcw_telemetry::incr("engine.graph_cache_miss");
+        let report = self.analyze(root)?;
+        Ok((report, GraphSource::Analyzed(reason)))
+    }
+
     /// Analyze `root`, streaming [`Progress`] events through `progress` as each
     /// stage begins/ends. This is the API front ends use for live status on big
     /// repositories (the Tauri UI forwards these to the webview); `analyze` is
@@ -216,6 +338,7 @@ impl Engine {
         progress: &mut dyn FnMut(Progress),
     ) -> Result<(AnalysisReport, IncrementalStats), EngineError> {
         let _perf = lcw_telemetry::PerfGuard::new("engine.analyze");
+        let started_ms = now_ms();
 
         if self.config.cache.enabled || self.config.graph_store.enabled {
             if let Err(e) = cache::ensure_repo_cache_dir(
@@ -256,7 +379,7 @@ impl Engine {
         lcw_telemetry::count("engine.graph_bytes", graph.estimated_bytes() as u64);
 
         let report = self.finish_report(graph, progress);
-        self.persist_graph_store(root, &report.graph);
+        self.persist_graph_store(root, &report.graph, started_ms, files.len());
         Ok((report, stats))
     }
 
@@ -292,11 +415,8 @@ impl Engine {
     ) -> Result<(CodeGraph, IncrementalStats), EngineError> {
         let _perf = lcw_telemetry::PerfGuard::new("engine.parse_incremental");
         let adapter_name = self.adapter.name();
-        let cache_path = cache::cache_file(
-            root,
-            &self.config.cache.dir,
-            self.config.cache_variant(),
-        );
+        let cache_path =
+            cache::cache_file(root, &self.config.cache.dir, self.config.cache_variant());
         let mut store = match &cache_path {
             Some(p) => cache::FragmentCache::load(p, adapter_name),
             None => cache::FragmentCache::new(adapter_name),
@@ -391,20 +511,36 @@ impl Engine {
         report
     }
 
-    /// Best-effort write of the Layer-1 graph to `graph.sqlite` under the cache dir.
-    fn persist_graph_store(&self, root: &Path, graph: &CodeGraph) {
+    /// What [`META_EXTRACTOR`] records for this engine's adapter.
+    fn extractor_id(&self) -> String {
+        format!("{}/{}", self.adapter.name(), cache::CACHE_VERSION)
+    }
+
+    /// Best-effort write of the Layer-1 graph to `graph.sqlite` under the cache
+    /// dir, with the freshness metadata [`staleness`](Self::staleness) checks.
+    fn persist_graph_store(
+        &self,
+        root: &Path,
+        graph: &CodeGraph,
+        started_ms: u64,
+        file_count: usize,
+    ) {
         if !self.config.graph_store.enabled {
             return;
         }
-        let Some(path) = cache::graph_db_file(
-            root,
-            &self.config.cache.dir,
-            self.config.cache_variant(),
-        ) else {
+        let Some(path) =
+            cache::graph_db_file(root, &self.config.cache.dir, self.config.cache_variant())
+        else {
             return;
         };
         let snapshot = graph.snapshot();
-        if let Err(e) = lcw_graph_store::write(&path, &snapshot) {
+        let meta = [
+            (lcw_graph_store::META_WRITTEN_AT_MS, started_ms.to_string()),
+            (META_ROOT, root.to_string_lossy().into_owned()),
+            (META_FILE_COUNT, file_count.to_string()),
+            (META_EXTRACTOR, self.extractor_id()),
+        ];
+        if let Err(e) = lcw_graph_store::write_with_meta(&path, &snapshot, &meta) {
             lcw_telemetry::warn!(
                 target: "lcw::engine",
                 error = %e,
@@ -413,6 +549,20 @@ impl Engine {
             );
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn mtime_ms(path: &Path) -> Option<u64> {
+    let t = std::fs::metadata(path).ok()?.modified().ok()?;
+    t.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
 }
 
 fn select_adapter(config: &Config) -> Box<dyn LanguageAdapter> {
@@ -477,10 +627,8 @@ mod tests {
         fs::write(src.join("b.rs"), "fn b() {}").unwrap();
 
         // Absolute cache dir outside the fake repo (mirrors default isolation, no env vars).
-        let cache_dir = std::env::temp_dir().join(format!(
-            "lcw-inc-cache-{}-{nanos}",
-            std::process::id()
-        ));
+        let cache_dir =
+            std::env::temp_dir().join(format!("lcw-inc-cache-{}-{nanos}", std::process::id()));
         let mut cfg = Config::default();
         cfg.cache.dir = cache_dir.to_string_lossy().into_owned();
         let engine = Engine::new(cfg);
@@ -518,18 +666,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "lcw-isolate-{}-{nanos}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("lcw-isolate-{}-{nanos}", std::process::id()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
 
-        let cache_home = std::env::temp_dir().join(format!(
-            "lcw-isolate-cache-{}-{nanos}",
-            std::process::id()
-        ));
+        let cache_home =
+            std::env::temp_dir().join(format!("lcw-isolate-cache-{}-{nanos}", std::process::id()));
         let _cache_env = cache::CacheHomeGuard::set(&cache_home);
 
         let engine = Engine::new(Config::default());
@@ -582,10 +725,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "lcw-load-store-{}-{nanos}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("lcw-load-store-{}-{nanos}", std::process::id()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
@@ -611,6 +752,69 @@ mod tests {
     }
 
     #[test]
+    fn load_or_analyze_uses_fresh_store_and_detects_staleness() {
+        use std::fs;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lcw-fresh-{}-{nanos}", std::process::id()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
+        let cache_home =
+            std::env::temp_dir().join(format!("lcw-fresh-cache-{}-{nanos}", std::process::id()));
+        let _cache_env = cache::CacheHomeGuard::set(&cache_home);
+
+        let engine = Engine::new(Config::default());
+        let (_, first) = engine.load_or_analyze(&root).unwrap();
+        assert_eq!(first, GraphSource::Analyzed(Staleness::Missing));
+        assert_eq!(engine.staleness(&root).unwrap(), None);
+        let (cached, second) = engine.load_or_analyze(&root).unwrap();
+        assert_eq!(second, GraphSource::Cache);
+        assert_eq!(cached.graph.node_count(), 2);
+
+        // A file touched after the store was written makes it stale.
+        let f = fs::File::options()
+            .write(true)
+            .open(src.join("lib.rs"))
+            .unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(5))
+            .unwrap();
+        drop(f);
+        assert_eq!(
+            engine.staleness(&root).unwrap(),
+            Some(Staleness::FilesModified(1))
+        );
+        let (_, third) = engine.load_or_analyze(&root).unwrap();
+        assert!(matches!(
+            third,
+            GraphSource::Analyzed(Staleness::FilesModified(1))
+        ));
+
+        // Re-analysis stamps the start time, which is before the future mtime,
+        // so it stays stale until the file is back in the past; adding a file
+        // is caught by the count check.
+        fs::write(src.join("c.rs"), "pub fn c() {}").unwrap();
+        assert_eq!(
+            engine.staleness(&root).unwrap(),
+            Some(Staleness::FileSetChanged { before: 1, now: 2 })
+        );
+
+        let other = root.join(".").join("src").join("..");
+        assert_eq!(
+            engine.staleness(&other).unwrap(),
+            Some(Staleness::RootChanged)
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache_home);
+    }
+
+    #[test]
     fn load_from_store_errors_when_missing() {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -621,10 +825,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "lcw-load-miss-{}-{nanos}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("lcw-load-miss-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
 
         let cache_home = std::env::temp_dir().join(format!(
@@ -654,18 +856,14 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "lcw-graph-rt-{}-{nanos}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("lcw-graph-rt-{}-{nanos}", std::process::id()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("lib.rs"), "pub fn a() { b(); } pub fn b() {}").unwrap();
 
-        let cache_home = std::env::temp_dir().join(format!(
-            "lcw-graph-rt-cache-{}-{nanos}",
-            std::process::id()
-        ));
+        let cache_home =
+            std::env::temp_dir().join(format!("lcw-graph-rt-cache-{}-{nanos}", std::process::id()));
         let _cache_env = cache::CacheHomeGuard::set(&cache_home);
 
         let report = Engine::new(Config::default())
@@ -713,6 +911,10 @@ mod tests {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
+        // `analyze` creates a bucket under the cache home, which other tests
+        // point elsewhere while holding this lock.
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
+
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -748,6 +950,8 @@ mod tests {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
+
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -755,11 +959,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("lcw-cpp-{}-{nanos}", std::process::id()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
-        fs::write(
-            src.join("main.cpp"),
-            "void a() { b(); }\nvoid b() {}\n",
-        )
-        .unwrap();
+        fs::write(src.join("main.cpp"), "void a() { b(); }\nvoid b() {}\n").unwrap();
 
         let rust = Engine::new(Config::default());
         assert!(matches!(rust.analyze(&root), Err(EngineError::NoFiles(_))));

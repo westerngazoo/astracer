@@ -12,6 +12,9 @@
 //! * *How does control get from here to there?* — [`shortest_paths`].
 //! * *What does this trigger / who can trigger this?* — [`call_tree`],
 //!   [`reachable`].
+//! * *What breaks if I change this?* — [`impact`] (transitive callers).
+//! * *Exactly which lines define it?* — [`span`].
+//! * *Which symbol did they mean?* — [`resolve`], [`lookup`], [`suggest`].
 //!
 //! It depends only on `lcw-core` + `serde` and does no I/O, so it compiles for
 //! the CLI, the native `winit` viewer **and** the `wasm32` webview alike
@@ -26,21 +29,25 @@ pub mod card;
 pub mod entries;
 pub mod flow;
 pub mod groups;
+pub mod impact;
 pub mod outline;
 pub mod reach;
 pub mod resolve;
 pub mod roots;
+pub mod span;
 
 pub use card::{edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard};
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
 pub use flow::{connection, shortest_path, shortest_paths, Connection, FlowPaths};
 pub use groups::{crate_groups, Group, Groups, EXTERNAL_GROUP};
+pub use impact::{impact, Impact, ImpactCaller};
 pub use outline::{outline, Outline, OutlineKind, OutlineNode};
 pub use reach::{
     call_tree, reach_count, reachable, CallTreeNode, CallTreeOptions, Direction, Reached,
 };
-pub use resolve::{best_match, resolve};
+pub use resolve::{best_match, lookup, resolve, suggest, Lookup};
 pub use roots::{branches, run_roots, Branch, RootKind, RunRoot};
+pub use span::{span, SymbolSpan};
 
 /// Shared test fixtures: small hand-built graphs used across the module tests.
 #[cfg(test)]

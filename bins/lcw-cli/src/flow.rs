@@ -1,11 +1,13 @@
 //! Flow **rendering** for the CLI: the traced path(s) as an indented text
-//! tree, as a JSON slice (optionally with each hop's source), and as the
-//! renderer-side layered diagram. Traversal itself — resolving symbols and the
-//! breadth-first shortest-path search — lives in `lcw-query`, shared with the
-//! native viewer and the desktop app so the three can never disagree.
+//! tree and as the renderer-side layered diagram (the JSON slice lives in
+//! `lcw-agent`, shared with `lcw-mcp`). Traversal itself — resolving symbols
+//! and the breadth-first shortest-path search — lives in `lcw-query`, shared
+//! with the native viewer and the desktop app so the three can never disagree.
 
-use lcw_core::{CodeGraph, Node, NodeId};
-use lcw_query::{kind_str, FlowPaths};
+#[cfg(feature = "viewer")]
+use lcw_core::NodeId;
+use lcw_core::{CodeGraph, Node};
+use lcw_query::FlowPaths;
 
 /// `file:line` for a node (best-effort; `<external>` for external nodes).
 pub fn location(graph: &CodeGraph, n: &Node) -> String {
@@ -62,51 +64,6 @@ pub fn format_text(graph: &CodeGraph, fp: &FlowPaths) -> String {
         }
     }
     out
-}
-
-
-/// Serialize a traced flow to JSON — a scoped, LLM-friendly slice: the endpoints
-/// plus each shortest path as an ordered list of nodes with `file:line` (and,
-/// when `snippets`, the source of each hop).
-pub fn to_json(graph: &CodeGraph, fp: &FlowPaths, snippets: bool) -> serde_json::Value {
-    let node_json = |id: NodeId| -> serde_json::Value {
-        let n = graph.node(id);
-        let file = graph
-            .file_path(n.span.file())
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let mut obj = serde_json::json!({
-            "qualified_name": n.qualified_name,
-            "name": n.name,
-            "kind": kind_str(n.kind),
-            "file": file,
-            "line": n.span.start_line,
-        });
-        if snippets {
-            if let Some(snip) = lcw_core::read_snippet(&file, n.span.start_line, n.span.end_line, 0, 10_000) {
-                let code = snip
-                    .lines
-                    .iter()
-                    .map(|l| l.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                obj["code"] = serde_json::Value::String(code);
-            }
-        }
-        obj
-    };
-    let paths: Vec<serde_json::Value> = fp
-        .paths
-        .iter()
-        .map(|p| serde_json::Value::Array(p.iter().map(|&id| node_json(id)).collect()))
-        .collect();
-    serde_json::json!({
-        "source": graph.node(fp.source).qualified_name,
-        "target": graph.node(fp.target).qualified_name,
-        "hops": fp.hops(),
-        "path_count": fp.paths.len(),
-        "paths": paths,
-    })
 }
 
 /// Build the renderer-side [`lcw_render::FlowGraph`] from a traced flow.

@@ -72,10 +72,25 @@ When adding or changing code, keep an eye on:
   `lcw-query` or `lcw-render`, run
   `cargo check --target wasm32-unknown-unknown` in `apps/desktop/frontend`.
 
+## Navigating code with lcw (agents)
+Prefer Livewalk over reading whole files (see [`docs/agents.md`](docs/agents.md)):
+
+```sh
+lcw span "Engine::analyze"
+lcw explain "Engine::analyze" --json --compact
+lcw impact "Engine::analyze" --depth 3
+```
+
+`span` gives `file:start-end` (read or edit only that range), `explain` the
+callers/callees with call sites, `impact` the blast radius before a change.
+Exit code 2 means the symbol was ambiguous or unknown; pick a qualified name
+from the printed candidates. The `lcw-mcp` server exposes the same tools.
+
 ## Layout
 - `crates/` - the library crates (core, config, telemetry, adapters, analysis,
-  suggest, query, layout, render, engine).
+  suggest, query, agent, layout, render, engine).
 - `bins/lcw-cli` - the standalone CLI.
+- `bins/lcw-mcp` - the MCP (stdio) server for AI coding agents.
 - `apps/desktop` - the Tauri v2 shell + Rust/WASM UI.
 - `docs/` - CI notes and the architecture review (`ARCHITECTURE_REVIEW.md`).
 

@@ -575,6 +575,305 @@ mod tests {
         );
     }
 
+    // --- method receivers: precision over name matching ----------------------
+
+    /// Qualified names of the internal (non-external) callees of `from`.
+    fn internal_callees(g: &CodeGraph, from: &str) -> Vec<String> {
+        let f = g.node_by_qualified(from).expect(from);
+        let mut out: Vec<String> = g
+            .neighbors_out(f)
+            .filter(|&t| g.node(t).kind != NodeKind::External)
+            .map(|t| g.node(t).qualified_name.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn callers_of(g: &CodeGraph, to: &str) -> Vec<String> {
+        let t = g.node_by_qualified(to).expect(to);
+        let mut out: Vec<String> = g
+            .edges()
+            .filter(|(_, dst, _)| *dst == t)
+            .map(|(src, _, _)| g.node(src).qualified_name.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn self_expect_binds_only_to_its_own_impl() {
+        let g = parse(
+            r#"
+            struct Parser;
+            impl Parser {
+                fn expect(&mut self, c: char) -> Result<(), ()> { Ok(()) }
+                fn atom(&mut self) -> Result<(), ()> {
+                    self.expect('(')?;
+                    self.expect(')')
+                }
+            }
+            fn load(s: &str) -> u32 {
+                let n: Option<u32> = s.parse().ok();
+                let r: Result<u32, ()> = Ok(1);
+                n.expect("n") + r.expect("r") + s.len().checked_add(1).expect("x")
+            }
+            "#,
+        );
+        assert_eq!(
+            callers_of(&g, "crate::Parser::expect"),
+            vec!["crate::Parser::atom"]
+        );
+        assert!(internal_callees(&g, "crate::load").is_empty());
+    }
+
+    #[test]
+    fn ubiquitous_methods_on_unknown_receivers_stay_external() {
+        let g = parse(
+            r#"
+            struct Camera;
+            impl Camera { fn map(&self, p: u32) -> u32 { p } }
+            struct Client;
+            impl Client {
+                fn get(&self, path: &str) -> u32 { 0 }
+                fn expect(&self) {}
+            }
+            fn run(xs: Vec<u32>, m: std::collections::HashMap<u32, u32>) -> u32 {
+                let a: Vec<u32> = xs.iter().map(|x| x + 1).collect();
+                let b = m.get(&1).copied().unwrap_or(0);
+                let c = std::env::var("X").ok().map(|s| s.len()).expect("set");
+                b + c as u32
+            }
+            "#,
+        );
+        assert!(
+            internal_callees(&g, "crate::run").is_empty(),
+            "{:?}",
+            internal_callees(&g, "crate::run")
+        );
+        let ext = edges_from(&g, "crate::run");
+        for name in ["map", "get", "expect"] {
+            assert!(
+                ext.contains(&(name.into(), EdgeKind::Unresolved)),
+                "`.{name}()` on an unknown receiver is external: {ext:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_typed_receiver_binds_to_its_type_even_for_common_names() {
+        let g = parse(
+            r#"
+            struct Camera { zoom: u32 }
+            impl Camera {
+                fn new() -> Self { Camera { zoom: 1 } }
+                fn map(&self, p: u32) -> u32 { p * self.zoom }
+            }
+            struct Grid;
+            impl Grid { fn map(&self, p: u32) -> u32 { p } }
+            struct Scene { cam: Camera }
+            impl Scene {
+                fn by_field(&self) -> u32 { self.cam.map(1) }
+            }
+            fn by_param(cam: &Camera) -> u32 { cam.map(1) }
+            fn by_ctor() -> u32 { let c = Camera::new(); c.map(1) }
+            fn by_literal() -> u32 { let c = Camera { zoom: 2 }; c.map(1) }
+            fn by_annotation(x: u32) -> u32 { let g: Grid = Grid; g.map(x) }
+            fn in_closure(cam: &Camera, xs: &[u32]) -> u32 {
+                xs.iter().map(|p| cam.map(*p)).sum()
+            }
+            fn shadowed(cam: &Camera) -> u32 { let cam = Grid; cam.map(1) }
+            "#,
+        );
+        for f in [
+            "Scene::by_field",
+            "by_param",
+            "by_ctor",
+            "by_literal",
+            "in_closure",
+        ] {
+            let f = format!("crate::{f}");
+            assert!(
+                internal_callees(&g, &f).contains(&"crate::Camera::map".to_string()),
+                "{f}: {:?}",
+                internal_callees(&g, &f)
+            );
+            assert!(!internal_callees(&g, &f).contains(&"crate::Grid::map".to_string()));
+        }
+        assert_eq!(
+            internal_callees(&g, "crate::by_annotation"),
+            vec!["crate::Grid::map"]
+        );
+        assert!(
+            internal_callees(&g, "crate::shadowed").is_empty(),
+            "a name bound with two types is unknown, and `map` is too common to guess"
+        );
+    }
+
+    #[test]
+    fn a_path_qualified_receiver_type_is_not_the_repos_same_named_type() {
+        // Akademos' shape: the repo's `Client` wraps `reqwest::Client`.
+        let g = parse(
+            r#"
+            pub struct Client { http: reqwest::Client, me: crate::Client2 }
+            pub struct Client2;
+            impl Client2 { fn ping(&self) {} }
+            impl Client {
+                fn new() -> Self { Client { http: reqwest::Client::new(), me: Client2 } }
+                fn get(&self, p: &str) -> u32 { 0 }
+                fn status(&self) { self.http.get("x"); self.me.ping(); }
+                fn fetch(&self) -> u32 { self.get("/a") }
+                fn fresh() { let c = reqwest::Client::new(); c.get("y"); }
+            }
+            "#,
+        );
+        assert_eq!(
+            callers_of(&g, "crate::Client::get"),
+            vec!["crate::Client::fetch"]
+        );
+        assert_eq!(
+            internal_callees(&g, "crate::Client::status"),
+            vec!["crate::Client2::ping"]
+        );
+    }
+
+    #[test]
+    fn a_unique_uncommon_method_still_binds_without_a_receiver_type() {
+        let g = parse(
+            r#"
+            struct Engine;
+            impl Engine { fn analyze_with_progress(&self) {} }
+            fn make() -> Engine { Engine }
+            fn go() { make().analyze_with_progress(); }
+            "#,
+        );
+        assert_eq!(
+            internal_callees(&g, "crate::go"),
+            vec!["crate::Engine::analyze_with_progress", "crate::make"]
+        );
+    }
+
+    #[test]
+    fn self_assoc_calls_bind_to_the_impl_type_only() {
+        let g = parse(
+            r#"
+            struct A;
+            impl A { fn make() -> Self { A } fn go() { Self::make(); Self::other(); } }
+            struct B;
+            impl B { fn other() {} }
+            "#,
+        );
+        assert_eq!(internal_callees(&g, "crate::A::go"), vec!["crate::A::make"]);
+    }
+
+    #[test]
+    fn calls_inside_macro_arguments_create_edges() {
+        let g = parse(
+            r#"
+            pub fn slugify(s: &str) -> String { s.into() }
+            mod util { pub fn norm(s: &str) -> String { s.into() } }
+            struct P;
+            impl P {
+                fn peek(&self) -> u8 { 0 }
+                fn check(&self) {
+                    debug_assert!(self.peek() == 0, "{}", crate::util::norm("x"));
+                }
+            }
+            #[test]
+            fn slugs() {
+                assert_eq!(slugify("A b"), "a-b");
+                assert!(vec![util::norm("x")].len() == 1);
+                println!("{}", format!("{}", slugify("nested")));
+            }
+            "#,
+        );
+        assert_eq!(
+            internal_callees(&g, "crate::slugs"),
+            vec!["crate::slugify", "crate::util::norm"]
+        );
+        assert_eq!(
+            internal_callees(&g, "crate::P::check"),
+            vec!["crate::P::peek", "crate::util::norm"]
+        );
+        let (_, _, e) = g
+            .edges()
+            .find(|(f, t, _)| {
+                g.node(*f).qualified_name == "crate::slugs"
+                    && g.node(*t).qualified_name == "crate::slugify"
+            })
+            .unwrap();
+        assert_eq!(e.kind, EdgeKind::DirectCall);
+        assert_eq!(e.count, 2, "both macro call sites, nested macros included");
+    }
+
+    #[test]
+    fn macro_argument_methods_on_unknown_receivers_stay_external() {
+        let g = parse(
+            r#"
+            struct Camera;
+            impl Camera { fn map(&self, p: u32) -> u32 { p } }
+            fn show(xs: Vec<u32>) {
+                println!("{:?}", xs.iter().map(|x| x + 1).collect::<Vec<_>>());
+            }
+            "#,
+        );
+        assert!(internal_callees(&g, "crate::show").is_empty());
+    }
+
+    #[test]
+    fn a_unique_method_in_a_macro_needs_a_known_receiver() {
+        // `assert_eq!(res.status(), 200)` is about an HTTP response, not the
+        // repo's one `Client::status`.
+        let g = parse(
+            r#"
+            struct Client;
+            impl Client { fn status_code(&self) -> u16 { 200 } }
+            fn check(res: Response, c: &Client) {
+                assert_eq!(res.status_code(), 200);
+                assert_eq!(c.status_code(), 200);
+            }
+            fn other(res: Response) { assert_eq!(res.status_code(), 200); }
+            "#,
+        );
+        assert_eq!(
+            internal_callees(&g, "crate::check"),
+            vec!["crate::Client::status_code"]
+        );
+        assert!(internal_callees(&g, "crate::other").is_empty());
+    }
+
+    #[test]
+    fn calling_a_local_closure_is_not_calling_a_same_named_fn() {
+        let g = parse(
+            r#"
+            mod far { pub fn at(n: u32) -> u32 { n } }
+            fn at(n: u32) -> u32 { n }
+            fn closure() {
+                let at = |n: u32| n + 1;
+                assert_eq!(at(1), 2);
+                at(2);
+            }
+            fn param(at: impl Fn(u32) -> u32) { at(1); }
+            fn item() { at(1); }
+            "#,
+        );
+        assert!(internal_callees(&g, "crate::closure").is_empty());
+        assert!(internal_callees(&g, "crate::param").is_empty());
+        assert_eq!(internal_callees(&g, "crate::item"), vec!["crate::at"]);
+    }
+
+    #[test]
+    fn fragments_without_a_receiver_field_still_deserialize() {
+        // Fragments cached before receivers existed lack the field.
+        let raw = r#"{"caller":"crate::f","kind":"method","path":"m","short":"m",
+            "call_site":{"file":0,"start_line":1,"start_col":0,"end_line":1,"end_col":1}}"#;
+        let rc: lcw_core::RawCall = serde_json::from_str(raw).unwrap();
+        assert_eq!(rc.receiver, None);
+        let back = serde_json::to_string(&rc).unwrap();
+        assert!(!back.contains("receiver"), "None is omitted: {back}");
+    }
+
     #[test]
     fn nested_and_same_line_spawns_get_distinct_nodes() {
         let g = parse(

@@ -9,7 +9,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use lcw_core::{CodeGraph, NodeId, NodeKind};
+use lcw_core::{CodeGraph, NodeId, NodeKind, SourceSpan};
 use serde::{Deserialize, Serialize};
 
 /// Which way to walk the call edges.
@@ -114,6 +114,11 @@ pub struct CallTreeNode {
     /// This node was already expanded elsewhere in the tree (or is an ancestor
     /// on the current path, i.e. a cycle); it is shown as a leaf.
     pub repeat: bool,
+    /// Call site of the edge that links this node to its parent (in the
+    /// caller's file: the parent's for callees, this node's for callers).
+    /// `None` for the root.
+    #[serde(default)]
+    pub site: Option<SourceSpan>,
 }
 
 impl CallTreeNode {
@@ -128,13 +133,14 @@ impl CallTreeNode {
 /// children by qualified name; internal nodes come before externals.
 pub fn call_tree(graph: &CodeGraph, root: NodeId, opts: &CallTreeOptions) -> CallTreeNode {
     let mut expanded: HashSet<NodeId> = HashSet::new();
-    expand(graph, root, 0, opts, &mut expanded)
+    expand(graph, root, 0, None, opts, &mut expanded)
 }
 
 fn expand(
     graph: &CodeGraph,
     id: NodeId,
     depth: u32,
+    site: Option<SourceSpan>,
     opts: &CallTreeOptions,
     expanded: &mut HashSet<NodeId>,
 ) -> CallTreeNode {
@@ -145,19 +151,24 @@ fn expand(
         children: Vec::new(),
         truncated: 0,
         repeat,
+        site,
     };
     if repeat || depth >= opts.max_depth {
         return node;
     }
 
-    let mut kids: Vec<(NodeId, u32)> = match opts.direction {
+    // (neighbor, sort line, call site)
+    let mut kids: Vec<(NodeId, u32, SourceSpan)> = match opts.direction {
         Direction::Callees => graph
             .edges_out(id)
-            .map(|(to, e)| (to, e.call_site.start_line))
+            .map(|(to, e)| (to, e.call_site.start_line, e.call_site))
             .collect(),
-        Direction::Callers => graph.edges_in(id).map(|(from, _)| (from, 0)).collect(),
+        Direction::Callers => graph
+            .edges_in(id)
+            .map(|(from, e)| (from, 0, e.call_site))
+            .collect(),
     };
-    kids.retain(|(k, _)| opts.include_external || graph.node(*k).kind != NodeKind::External);
+    kids.retain(|(k, _, _)| opts.include_external || graph.node(*k).kind != NodeKind::External);
     // Merged edges of different kinds list the same neighbor twice; keep one.
     kids.sort_by(|a, b| {
         let (na, nb) = (graph.node(a.0), graph.node(b.0));
@@ -170,9 +181,9 @@ fn expand(
     kids.dedup_by_key(|k| k.0);
 
     let total = kids.len();
-    for (k, _) in kids.into_iter().take(opts.max_children) {
+    for (k, _, s) in kids.into_iter().take(opts.max_children) {
         node.children
-            .push(expand(graph, k, depth + 1, opts, expanded));
+            .push(expand(graph, k, depth + 1, Some(s), opts, expanded));
     }
     node.truncated = total.saturating_sub(node.children.len());
     node
@@ -272,5 +283,10 @@ mod tests {
             .collect();
         assert_eq!(callers, vec!["app::core::tests::test_parse", "app::run"]);
         assert_eq!(tree.children[1].children[0].id, id(&g, "app::main"));
+        // Each caller carries its own call site; the root has none.
+        assert!(tree.site.is_none());
+        assert_eq!(tree.children[0].site.unwrap().start_line, 81);
+        assert_eq!(tree.children[1].site.unwrap().start_line, 22);
+        assert_eq!(tree.children[1].children[0].site.unwrap().start_line, 11);
     }
 }

@@ -1558,6 +1558,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcw-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lcw-config",
+ "lcw-core",
+ "lcw-engine",
+ "lcw-query",
+ "serde_json",
+]
+
+[[package]]
 name = "lcw-analysis"
 version = "0.1.0"
 dependencies = [
@@ -1572,6 +1584,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lcw-agent",
  "lcw-config",
  "lcw-core",
  "lcw-engine",
@@ -1656,6 +1669,20 @@ dependencies = [
  "pollster",
  "rayon",
  "wgpu",
+]
+
+[[package]]
+name = "lcw-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lcw-agent",
+ "lcw-config",
+ "lcw-core",
+ "lcw-engine",
+ "lcw-query",
+ "lcw-telemetry",
+ "serde_json",
 ]
 
 [[package]]

@@ -2,8 +2,10 @@
 //!
 //! A standalone front end over `lcw-engine`, driven by `livewalk.toml`
 //! (Manifesto: CLI guided by config files). The navigation commands
-//! (`explain`, `flow`, `outline`, `entries`, `calls`) are thin text renderers
-//! over `lcw-query`, the same traversal code the viewers use.
+//! (`explain`, `flow`, `outline`, `entries`, `calls`, `callers`, `impact`,
+//! `span`, `search`) are thin renderers over `lcw-query`, the same traversal
+//! code the viewers use; their `--json` is the schema-1 contract from
+//! `lcw-agent`, shared with the `lcw-mcp` server.
 
 mod cache_cmd;
 mod export;
@@ -11,13 +13,15 @@ mod flow;
 mod nav;
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use lcw_agent::{json as aj, LoadOptions, PathStyle, Repo};
 use lcw_config::{Config, Language};
-use lcw_core::AnalysisReport;
-use lcw_engine::Engine;
-use lcw_query::{CallTreeOptions, Direction, EntryKind};
+use lcw_core::{AnalysisReport, CodeGraph, NodeId};
+use lcw_engine::{Engine, GraphSource};
+use lcw_query::{CallTreeOptions, Direction, EntryKind, Lookup};
 
 /// Live Code Walk & Analysis.
 #[derive(Debug, Parser)]
@@ -27,9 +31,61 @@ struct Cli {
     #[arg(long, global = true)]
     log: Option<String>,
 
+    /// Approximate token budget for query output: lists (callers, callees,
+    /// paths, entries...) shrink until the output fits, ending in a
+    /// `+N more` marker (`<list>_more` in JSON).
+    #[arg(long, global = true, value_name = "TOKENS")]
+    budget: Option<usize>,
+
+    /// Compact output for agents: a budget of 1500 tokens unless `--budget`
+    /// is given.
+    #[arg(long, global = true)]
+    compact: bool,
+
+    /// Pretty-print JSON (indented, multi-line). JSON is single-line by
+    /// default to keep agent context small.
+    #[arg(long, global = true)]
+    pretty: bool,
+
     #[command(subcommand)]
     command: Command,
 }
+
+/// Default budget behind `--compact`.
+const COMPACT_BUDGET: usize = 1500;
+
+/// Output settings shared by every query command.
+#[derive(Debug, Clone, Copy)]
+struct Out {
+    budget: Option<usize>,
+    compact_json: bool,
+}
+
+impl Out {
+    fn print_json(&self, v: &serde_json::Value) -> Result<()> {
+        let s = if self.compact_json {
+            serde_json::to_string(v)
+        } else {
+            serde_json::to_string_pretty(v)
+        }
+        .context("serializing JSON")?;
+        println!("{s}");
+        Ok(())
+    }
+}
+
+/// A failure already reported on stdout (e.g. symbol candidates): exit 2
+/// without printing anything else.
+#[derive(Debug)]
+struct Reported;
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("reported")
+    }
+}
+
+impl std::error::Error for Reported {}
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -46,6 +102,18 @@ enum Command {
     Entries(EntriesArgs),
     /// Print the call tree below (or above) a symbol: what it triggers.
     Calls(CallsArgs),
+    /// Direct callers of a symbol with the call-site `file:line` of each call
+    /// (`--depth` for callers of callers).
+    Callers(CallersArgs),
+    /// Blast radius: transitive callers up to `--depth`, with counts per
+    /// depth, files touched and entry points reached.
+    Impact(ImpactArgs),
+    /// Exact definition range `file:start-end` (attributes and docs
+    /// included); `--code` prints just those lines.
+    Span(SpanArgs),
+    /// Find symbols by name: substring matches best-first, or fuzzy
+    /// suggestions when nothing matches.
+    Search(SearchArgs),
     /// Write a default `livewalk.toml` to the current directory.
     Init(InitArgs),
     /// Show the on-disk graph store for a repository (if present).
@@ -193,6 +261,88 @@ struct RepoArgs {
     /// Fast-mode source language for this run (overrides `livewalk.toml` `[adapter].language`).
     #[arg(long, value_parser = clap::value_parser!(Language))]
     language: Option<Language>,
+
+    /// Always re-analyze. By default a fresh cached graph (`graph.sqlite`,
+    /// written after the newest source file changed) is loaded instead.
+    #[arg(long)]
+    no_cache: bool,
+}
+
+#[derive(Debug, Args)]
+struct CallersArgs {
+    /// Symbol whose callers to list (substring of a qualified name).
+    symbol: String,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Levels of callers to expand (1 = direct callers only).
+    #[arg(long, default_value_t = 1)]
+    depth: u32,
+
+    /// Max callers shown per node.
+    #[arg(long, default_value_t = 50)]
+    width: usize,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ImpactArgs {
+    /// Symbol about to change (substring of a qualified name).
+    symbol: String,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// How many caller hops to follow.
+    #[arg(long, default_value_t = 3)]
+    depth: u32,
+
+    /// Max callers / entry points listed in the text view.
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SpanArgs {
+    /// Symbol to locate (substring of a qualified name).
+    symbol: String,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Print the definition's source lines instead of the range (with
+    /// `--json`, add them as `code`).
+    #[arg(long)]
+    code: bool,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SearchArgs {
+    /// Name or part of one.
+    query: String,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Max matches.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -211,6 +361,11 @@ struct ExplainArgs {
     /// instead of the text view.
     #[arg(long)]
     json: bool,
+
+    /// List external / unresolved callees (`Ok`, std methods...) too;
+    /// by default they are only counted.
+    #[arg(long)]
+    external: bool,
 }
 
 #[derive(Debug, Args)]
@@ -388,16 +543,34 @@ struct LoadArgs {
     view: bool,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.is::<Reported>() => ExitCode::from(2),
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     let log = cli.log.as_deref();
+    let out = Out {
+        budget: cli.budget.or(cli.compact.then_some(COMPACT_BUDGET)),
+        compact_json: !cli.pretty,
+    };
     match cli.command {
         Command::Analyze(args) => run_analyze(args, log),
-        Command::Explain(args) => run_explain(args, log),
-        Command::Flow(args) => run_flow(args, log),
-        Command::Outline(args) => run_outline(args, log),
-        Command::Entries(args) => run_entries(args, log),
-        Command::Calls(args) => run_calls(args, log),
+        Command::Explain(args) => run_explain(args, log, out),
+        Command::Flow(args) => run_flow(args, log, out),
+        Command::Outline(args) => run_outline(args, log, out),
+        Command::Entries(args) => run_entries(args, log, out),
+        Command::Calls(args) => run_calls(args, log, out),
+        Command::Callers(args) => run_callers(args, log, out),
+        Command::Impact(args) => run_impact(args, log, out),
+        Command::Span(args) => run_span(args, log, out),
+        Command::Search(args) => run_search(args, log, out),
         Command::Init(args) => run_init(args),
         Command::Graph(args) => run_graph_info(args),
         Command::Load(args) => run_load(args, log),
@@ -446,21 +619,74 @@ fn analyze_path(
     }
 }
 
-fn analyze_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<AnalysisReport> {
-    analyze_path(
-        &repo.path,
-        repo.config.as_deref(),
-        repo.semantic,
-        false,
-        repo.language,
-        log_override,
-    )
+/// Load the graph for a navigation command: a fresh cached `graph.sqlite`
+/// when there is one (unless `--no-cache`), else a full analysis. Paths are
+/// shown relative to the current directory. stdout stays untouched; a stale
+/// cache gets one note on stderr.
+fn load_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<Repo> {
+    lcw_telemetry::init(log_override.unwrap_or("warn"));
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    let opts = LoadOptions {
+        config: repo.config.clone(),
+        semantic: repo.semantic,
+        language: repo.language,
+        use_cache: !repo.no_cache,
+        paths: PathStyle::RelativeTo(cwd),
+    };
+    let loaded = lcw_agent::load(&repo.path, &opts)?;
+    if let GraphSource::Analyzed(reason) = &loaded.source {
+        if !repo.no_cache && *reason != lcw_engine::Staleness::Missing {
+            eprintln!("note: re-analyzed ({reason})");
+        }
+    }
+    Ok(loaded)
+}
+
+/// Strict symbol lookup. On ambiguity or a miss, print the candidates (text
+/// or JSON) to stdout and fail with [`Reported`] (exit code 2).
+fn find_symbol(g: &CodeGraph, query: &str, json: bool, out: Out) -> Result<NodeId> {
+    let l = lcw_query::lookup(g, query, lcw_agent::MAX_CANDIDATES);
+    if let Lookup::Found(id) = l {
+        return Ok(id);
+    }
+    if json {
+        if let Some(v) = aj::lookup_error(g, query, &l) {
+            out.print_json(&v)?;
+        }
+    } else {
+        print!("{}", nav::format_lookup_error(g, query, &l));
+    }
+    Err(Reported.into())
+}
+
+/// Every match for a flow endpoint (a set); a miss prints fuzzy candidates.
+fn find_all(g: &CodeGraph, query: &str, json: bool, out: Out) -> Result<Vec<NodeId>> {
+    let hits = lcw_query::resolve(g, query);
+    if !hits.is_empty() {
+        return Ok(hits);
+    }
+    let l = Lookup::NotFound(lcw_query::suggest(g, query, lcw_agent::MAX_CANDIDATES));
+    if json {
+        if let Some(v) = aj::lookup_error(g, query, &l) {
+            out.print_json(&v)?;
+        }
+    } else {
+        print!("{}", nav::format_lookup_error(g, query, &l));
+    }
+    Err(Reported.into())
 }
 
 #[cfg(feature = "viewer")]
 fn run_shot(args: ShotArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let report = analyze_path(&path, args.config.as_deref(), false, false, None, log_override)?;
+    let report = analyze_path(
+        &path,
+        args.config.as_deref(),
+        false,
+        false,
+        None,
+        log_override,
+    )?;
 
     match args.view_kind {
         ViewKind::Module => {
@@ -626,7 +852,14 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
 
 fn run_load(args: LoadArgs, log_override: Option<&str>) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let report = analyze_path(&path, args.config.as_deref(), false, true, None, log_override)?;
+    let report = analyze_path(
+        &path,
+        args.config.as_deref(),
+        false,
+        true,
+        None,
+        log_override,
+    )?;
     let s = report.summary();
     println!(
         "loaded cached graph: {} nodes, {} edges, {} files",
@@ -668,8 +901,7 @@ fn emit_store_paths(repo: &Path, cfg: &Config) {
         eprintln!("fragment cache: {}", p.display());
     }
     if cfg.graph_store.enabled {
-        if let Some(p) =
-            lcw_engine::cache::graph_db_file(repo, &cfg.cache.dir, cfg.cache_variant())
+        if let Some(p) = lcw_engine::cache::graph_db_file(repo, &cfg.cache.dir, cfg.cache_variant())
         {
             eprintln!("graph store:    {}", p.display());
         }
@@ -678,46 +910,123 @@ fn emit_store_paths(repo: &Path, cfg: &Config) {
     }
 }
 
-fn run_explain(args: ExplainArgs, log_override: Option<&str>) -> Result<()> {
-    let report = analyze_repo(&args.repo, log_override)?;
-    let g = &report.graph;
-
-    let hits = lcw_query::resolve(g, &args.symbol);
-    let Some(&id) = hits.first() else {
-        anyhow::bail!("no internal symbol matches {:?}", args.symbol);
-    };
-    if hits.len() > 1 && !args.json {
-        eprintln!(
-            "note: {} symbols match {:?}; showing the closest",
-            hits.len(),
-            args.symbol
-        );
-    }
-    let card = lcw_query::node_card(g, id).context("building node card")?;
+fn run_explain(args: ExplainArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let id = find_symbol(g, &args.symbol, args.json, out)?;
+    let mut card = lcw_query::node_card(g, id).context("building node card")?;
 
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&card).context("serializing explain card")?
-        );
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            aj::explain(g, id, l, args.external).unwrap_or(serde_json::Value::Null)
+        });
+        out.print_json(&v)?;
     } else {
-        print!("{}", nav::format_card(&card, args.limit));
+        if !args.external {
+            card.outputs.retain(|c| !c.external);
+        }
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.limit, |l| nav::format_card(&card, l))
+        );
     }
     Ok(())
 }
 
-fn run_flow(args: FlowArgs, log_override: Option<&str>) -> Result<()> {
-    let report = analyze_repo(&args.repo, log_override)?;
-    let g = &report.graph;
+fn run_callers(args: CallersArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let root = find_symbol(g, &args.symbol, args.json, out)?;
+    let tree = |width: usize| {
+        let opts = CallTreeOptions {
+            direction: Direction::Callers,
+            max_depth: args.depth,
+            max_children: width.max(1),
+            include_external: false,
+        };
+        lcw_query::call_tree(g, root, &opts)
+    };
+    if args.json {
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            aj::call_tree(g, &tree(args.width.min(l)), Direction::Callers, args.depth)
+        });
+        out.print_json(&v)?;
+    } else {
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.width, |w| {
+                nav::format_call_tree(g, &tree(w), Direction::Callers)
+            })
+        );
+    }
+    Ok(())
+}
 
-    let from = lcw_query::resolve(g, &args.from);
-    let to = lcw_query::resolve(g, &args.to);
-    if from.is_empty() {
-        anyhow::bail!("no entry symbol matches {:?}", args.from);
+fn run_impact(args: ImpactArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let root = find_symbol(g, &args.symbol, args.json, out)?;
+    let imp = lcw_query::impact(g, root, args.depth).context("computing impact")?;
+    if args.json {
+        let v = lcw_agent::fit_json(out.budget, |l| aj::impact(g, &imp, l));
+        out.print_json(&v)?;
+    } else {
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.limit, |l| nav::format_impact(g, &imp, l))
+        );
     }
-    if to.is_empty() {
-        anyhow::bail!("no target symbol matches {:?}", args.to);
+    Ok(())
+}
+
+fn run_span(args: SpanArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let id = find_symbol(g, &args.symbol, args.json, out)?;
+    let Some(s) = lcw_query::span(g, id) else {
+        anyhow::bail!("{} has no source location", g.node(id).qualified_name);
+    };
+    // Displayed paths are relative to the current directory, so they read as-is.
+    let code = if args.code {
+        Some(aj::span_code("", &s).with_context(|| format!("reading {}", s.file))?)
+    } else {
+        None
+    };
+    if args.json {
+        out.print_json(&aj::span(&s, code.as_deref()))?;
+    } else if let Some(code) = code {
+        println!("{code}");
+    } else {
+        println!("{}", s.range());
     }
+    Ok(())
+}
+
+fn run_search(args: SearchArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let v = lcw_agent::fit_json(out.budget, |l| {
+        aj::search(g, &args.query, args.limit.min(l))
+    });
+    if args.json {
+        out.print_json(&v)?;
+    } else {
+        print!("{}", nav::format_search(&v));
+    }
+    // No real match (only fuzzy suggestions, or nothing): fail like a lookup.
+    if v.get("fuzzy").is_some() || v["matches"].as_array().map_or(true, |m| m.is_empty()) {
+        return Err(Reported.into());
+    }
+    Ok(())
+}
+
+fn run_flow(args: FlowArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let json = args.json || args.snippets;
+
+    let from = find_all(g, &args.from, json, out)?;
+    let to = find_all(g, &args.to, json, out)?;
 
     let Some(fp) = lcw_query::shortest_paths(g, &from, &to, args.max_paths.max(1), args.max_depth)
     else {
@@ -728,14 +1037,18 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>) -> Result<()> {
         );
     };
 
-    if args.json || args.snippets {
-        let value = flow::to_json(g, &fp, args.snippets);
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value).context("serializing flow to JSON")?
-        );
+    if json {
+        let v = lcw_agent::fit_json(out.budget, |l| aj::flow(g, &fp, args.snippets, "", l));
+        out.print_json(&v)?;
     } else {
-        print!("{}", flow::format_text(g, &fp));
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, fp.paths.len(), |l| {
+                let mut cut = fp.clone();
+                cut.paths.truncate(l);
+                flow::format_text(g, &cut)
+            })
+        );
     }
 
     if let Some(out) = args.output.as_ref() {
@@ -759,112 +1072,110 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn run_outline(args: OutlineArgs, log_override: Option<&str>) -> Result<()> {
-    let report = analyze_repo(&args.repo, log_override)?;
-    let g = &report.graph;
+fn run_outline(args: OutlineArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
     let mut outline = lcw_query::outline(g);
     if let Some(filter) = args.filter.as_deref() {
         outline = outline.prune(filter);
     }
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&outline).context("serializing outline")?
-        );
-    } else {
-        let style = nav::OutlineStyle {
+        let opts = aj::OutlineOpts {
             max_depth: args.depth,
             scopes_only: args.scopes_only,
         };
-        print!("{}", nav::format_outline(&outline, g, &style));
+        let v = lcw_agent::fit_json(out.budget, |l| aj::outline(g, &outline, &opts, l));
+        out.print_json(&v)?;
+    } else {
+        // Over budget: collapse deeper and deeper scopes until it fits.
+        let render = |max_depth| {
+            let style = nav::OutlineStyle {
+                max_depth,
+                scopes_only: args.scopes_only,
+            };
+            nav::format_outline(&outline, g, &style)
+        };
+        let mut text = render(args.depth);
+        if let Some(b) = out.budget {
+            let mut d = args.depth.unwrap_or(4).min(4);
+            while lcw_agent::estimate_tokens(&text) > b && d > 0 {
+                d -= 1;
+                text = render(Some(d));
+            }
+        }
+        print!("{text}");
     }
     Ok(())
 }
 
-fn run_entries(args: EntriesArgs, log_override: Option<&str>) -> Result<()> {
-    let report = analyze_repo(&args.repo, log_override)?;
-    let g = &report.graph;
+fn run_entries(args: EntriesArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
 
     let mut entries = lcw_query::entry_points(g);
     if let Some(kind) = args.kind {
         let kind: EntryKind = kind.into();
         entries.retain(|e| e.kind == kind);
     }
-
-    // Program entries and foreign-ABI exports always get their reach: on a
-    // bare-metal or WASM codebase those *are* the starting points, and "drives
-    // N functions" is what separates the real one from a build script.
-    let mut rows: Vec<(lcw_query::EntryPoint, Option<usize>)> = entries
-        .into_iter()
-        .map(|e| {
-            let always = matches!(e.kind, EntryKind::Main | EntryKind::Exported);
-            let reach =
-                (args.reach || always).then(|| lcw_query::reach_count(g, e.id, Direction::Callees));
-            (e, reach)
-        })
-        .collect();
-    // Rank within a kind by how much code each entry drives, so the most
-    // substantial one leads. Ties (and entries with no reach computed) fall
-    // back to the name, keeping the output deterministic.
-    rows.sort_by(|(ea, ra), (eb, rb)| {
-        ea.kind
-            .cmp(&eb.kind)
-            .then_with(|| rb.cmp(ra))
-            .then_with(|| {
-                g.node(ea.id)
-                    .qualified_name
-                    .cmp(&g.node(eb.id).qualified_name)
-            })
-    });
-    // Cap per kind so a library with thousands of public roots stays readable.
-    let mut per_kind = std::collections::HashMap::new();
-    rows.retain(|(e, _)| {
-        let n = per_kind.entry(e.kind).or_insert(0usize);
-        *n += 1;
-        *n <= args.limit
-    });
-    let (entries, reach): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+    // Ranked by kind, then by how much code each entry drives (always
+    // computed for `main`s and foreign-ABI exports: on bare-metal or WASM code
+    // those are the real starting points), capped per kind.
+    let rows = |limit: usize| aj::rank_entries(g, entries.clone(), args.reach, limit);
 
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&nav::entries_json(g, &entries, &reach))
-                .context("serializing entries")?
-        );
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            let (r, more) = rows(args.limit.min(l));
+            aj::entries(g, &r, more)
+        });
+        out.print_json(&v)?;
     } else {
-        print!("{}", nav::format_entries(g, &entries, &reach));
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.limit, |l| {
+                let (r, more) = rows(l);
+                let (e, reach): (Vec<_>, Vec<_>) = r.into_iter().unzip();
+                let mut s = nav::format_entries(g, &e, &reach);
+                if more > 0 {
+                    s.push_str(&format!("\n... +{more} more\n"));
+                }
+                s
+            })
+        );
     }
     Ok(())
 }
 
-fn run_calls(args: CallsArgs, log_override: Option<&str>) -> Result<()> {
-    let report = analyze_repo(&args.repo, log_override)?;
-    let g = &report.graph;
-
-    let Some(root) = lcw_query::best_match(g, &args.symbol) else {
-        anyhow::bail!("no internal symbol matches {:?}", args.symbol);
-    };
+fn run_calls(args: CallsArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let g = &repo.graph;
+    let root = find_symbol(g, &args.symbol, args.json, out)?;
     let direction = if args.callers {
         Direction::Callers
     } else {
         Direction::Callees
     };
-    let opts = CallTreeOptions {
-        direction,
-        max_depth: args.depth,
-        max_children: args.width.max(1),
-        include_external: args.external,
+    let tree = |width: usize| {
+        let opts = CallTreeOptions {
+            direction,
+            max_depth: args.depth,
+            max_children: width.max(1),
+            include_external: args.external,
+        };
+        lcw_query::call_tree(g, root, &opts)
     };
-    let tree = lcw_query::call_tree(g, root, &opts);
 
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&nav::call_tree_json(g, &tree))
-                .context("serializing call tree")?
-        );
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            aj::call_tree(g, &tree(args.width.min(l)), direction, args.depth)
+        });
+        out.print_json(&v)?;
     } else {
-        print!("{}", nav::format_call_tree(g, &tree, direction));
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.width, |w| {
+                nav::format_call_tree(g, &tree(w), direction)
+            })
+        );
     }
     Ok(())
 }
@@ -886,13 +1197,7 @@ fn run_init(args: InitArgs) -> Result<()> {
 
 /// Directory from which to search upward for a config file.
 fn config_search_dir(path: &Path) -> PathBuf {
-    if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
-    }
+    lcw_agent::config_search_dir(path)
 }
 
 const DEFAULT_CONFIG: &str = r#"# Live Code Walk & Analysis - project configuration.

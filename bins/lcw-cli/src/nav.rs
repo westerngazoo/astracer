@@ -1,13 +1,14 @@
-//! Text and JSON renderers for the navigation commands (`explain`, `outline`,
-//! `entries`, `calls`). Pure functions over `lcw-query` results, so they are
-//! unit-tested without running the engine.
+//! Text renderers for the navigation commands (`explain`, `outline`,
+//! `entries`, `calls`, `callers`, `impact`, `search`). Pure functions over
+//! `lcw-query` results, so they are unit-tested without running the engine.
+//! The JSON views live in `lcw-agent` (shared with `lcw-mcp`).
 
 use std::fmt::Write as _;
 
 use lcw_core::{CodeGraph, NodeId, NodeKind};
 use lcw_query::{
-    edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryKind, EntryPoint, NodeCard,
-    Outline, OutlineNode,
+    edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryKind, EntryPoint, Impact,
+    Lookup, NodeCard, Outline, OutlineNode,
 };
 
 /// `file:line` for a node, or `<external>`.
@@ -69,7 +70,7 @@ pub fn format_card(card: &NodeCard, limit: usize) -> String {
         let _ = writeln!(out, "    <- {}   {}", c.qualified_name, call_tag(c));
     }
     if card.inputs.len() > limit {
-        let _ = writeln!(out, "    ... {} more", card.inputs.len() - limit);
+        let _ = writeln!(out, "    ... +{} more", card.inputs.len() - limit);
     }
 
     let _ = writeln!(out, "\n  outputs — {} callee(s):", card.outputs.len());
@@ -78,7 +79,7 @@ pub fn format_card(card: &NodeCard, limit: usize) -> String {
         let _ = writeln!(out, "    -> {}{}   {}", c.qualified_name, ext, call_tag(c));
     }
     if card.outputs.len() > limit {
-        let _ = writeln!(out, "    ... {} more", card.outputs.len() - limit);
+        let _ = writeln!(out, "    ... +{} more", card.outputs.len() - limit);
     }
     out
 }
@@ -222,32 +223,6 @@ pub fn format_entries(
     out
 }
 
-/// JSON view of the entry list (with optional reach counts).
-pub fn entries_json(
-    graph: &CodeGraph,
-    entries: &[EntryPoint],
-    reach: &[Option<usize>],
-) -> serde_json::Value {
-    let rows: Vec<serde_json::Value> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let n = graph.node(e.id);
-            let mut obj = serde_json::json!({
-                "qualified_name": n.qualified_name,
-                "name": n.name,
-                "kind": e.kind.as_str(),
-                "location": location(graph, e.id),
-            });
-            if let Some(r) = reach.get(i).copied().flatten() {
-                obj["reach"] = serde_json::json!(r);
-            }
-            obj
-        })
-        .collect();
-    serde_json::Value::Array(rows)
-}
-
 // ---------------------------------------------------------------------------
 // calls
 // ---------------------------------------------------------------------------
@@ -272,9 +247,20 @@ pub fn format_call_tree(graph: &CodeGraph, tree: &CallTreeNode, dir: Direction) 
         write_call_node(&mut out, graph, c, "", i + 1 == n, dir);
     }
     if tree.truncated > 0 {
-        let _ = writeln!(out, "└── … {} more", tree.truncated);
+        let _ = writeln!(out, "└── … +{} more", tree.truncated);
     }
     out
+}
+
+/// `  calls @ file:line` for a caller-tree row (where the caller makes the call).
+fn caller_site(graph: &CodeGraph, node: &CallTreeNode, dir: Direction) -> String {
+    match (dir, node.site) {
+        (Direction::Callers, Some(s)) => match graph.file_path(s.file()) {
+            Some(p) if s.start_line > 0 => format!("  calls @ {}:{}", p.display(), s.start_line),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
 }
 
 fn write_call_node(
@@ -299,9 +285,10 @@ fn write_call_node(
     let repeat = if node.repeat { "  ↺" } else { "" };
     let _ = writeln!(
         out,
-        "{prefix}{connector}{arrow} {}{ext}{repeat}   [{}]",
+        "{prefix}{connector}{arrow} {}{ext}{repeat}   [{}]{}",
         n.qualified_name,
-        location(graph, node.id)
+        location(graph, node.id),
+        caller_site(graph, node, dir)
     );
     let child_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
     let count = node.children.len() + usize::from(node.truncated > 0);
@@ -309,23 +296,145 @@ fn write_call_node(
         write_call_node(out, graph, c, &child_prefix, i + 1 == count, dir);
     }
     if node.truncated > 0 {
-        let _ = writeln!(out, "{child_prefix}└── … {} more", node.truncated);
+        let _ = writeln!(out, "{child_prefix}└── … +{} more", node.truncated);
     }
 }
 
-/// JSON view of a call tree (nested).
-pub fn call_tree_json(graph: &CodeGraph, tree: &CallTreeNode) -> serde_json::Value {
-    let n = graph.node(tree.id);
-    serde_json::json!({
-        "qualified_name": n.qualified_name,
-        "name": n.name,
-        "kind": kind_str(n.kind),
-        "location": location(graph, tree.id),
-        "depth": tree.depth,
-        "repeat": tree.repeat,
-        "truncated": tree.truncated,
-        "children": tree.children.iter().map(|c| call_tree_json(graph, c)).collect::<Vec<_>>(),
-    })
+// ---------------------------------------------------------------------------
+// impact
+// ---------------------------------------------------------------------------
+
+fn site_of(graph: &CodeGraph, s: lcw_core::SourceSpan) -> String {
+    match graph.file_path(s.file()) {
+        Some(p) if s.start_line > 0 => format!("{}:{}", p.display(), s.start_line),
+        _ => "?".to_string(),
+    }
+}
+
+/// The `impact` text view: summary line, entry points reached, then every
+/// caller (`limit` per list) as `[depth] name  def  calls via @ site`.
+pub fn format_impact(graph: &CodeGraph, imp: &Impact, limit: usize) -> String {
+    let root = graph.node(imp.root);
+    let mut out = format!(
+        "impact of {}   [{}]\n",
+        root.qualified_name,
+        location(graph, imp.root)
+    );
+    let hist = imp
+        .by_depth
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("d{} {n}", i + 1))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let _ = writeln!(
+        out,
+        "  {} caller(s) in {} file(s) within depth {}{}{}",
+        imp.callers.len(),
+        imp.files,
+        imp.max_depth,
+        if hist.is_empty() {
+            String::new()
+        } else {
+            format!(": {hist}")
+        },
+        if imp.beyond_depth {
+            "  (more beyond this depth)"
+        } else {
+            ""
+        }
+    );
+
+    let entries: Vec<_> = imp.entry_points().collect();
+    if !entries.is_empty() {
+        let _ = writeln!(out, "\n  entry points reached ({}):", entries.len());
+        for c in entries.iter().take(limit) {
+            let kind = c.entry.map(EntryKind::as_str).unwrap_or("");
+            let _ = writeln!(
+                out,
+                "    {kind:<8} {}   [{}]",
+                graph.node(c.id).qualified_name,
+                location(graph, c.id)
+            );
+        }
+        if entries.len() > limit {
+            let _ = writeln!(out, "    ... +{} more", entries.len() - limit);
+        }
+    }
+
+    if !imp.callers.is_empty() {
+        let _ = writeln!(out, "\n  callers:");
+    }
+    for c in imp.callers.iter().take(limit) {
+        let _ = writeln!(
+            out,
+            "    [{}] {}   [{}]  calls {} @ {}",
+            c.depth,
+            graph.node(c.id).qualified_name,
+            location(graph, c.id),
+            graph.node(c.via).name,
+            site_of(graph, c.call_site)
+        );
+    }
+    if imp.callers.len() > limit {
+        let _ = writeln!(out, "    ... +{} more", imp.callers.len() - limit);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// lookup errors and search
+// ---------------------------------------------------------------------------
+
+/// The text shown when a symbol is ambiguous or unknown: the candidates, each
+/// with its location, so the next command can use a qualified name.
+pub fn format_lookup_error(graph: &CodeGraph, query: &str, lookup: &Lookup) -> String {
+    let (head, ids) = match lookup {
+        Lookup::Found(_) => return String::new(),
+        Lookup::Ambiguous(ids) => (
+            format!("{query:?} is ambiguous; candidates (pass a qualified name):"),
+            ids,
+        ),
+        Lookup::NotFound(ids) if ids.is_empty() => {
+            return format!("no symbol matches {query:?}\n");
+        }
+        Lookup::NotFound(ids) => (format!("no symbol matches {query:?}; did you mean:"), ids),
+    };
+    let mut out = format!("{head}\n");
+    for &id in ids {
+        let _ = writeln!(
+            out,
+            "  {}   [{}]",
+            graph.node(id).qualified_name,
+            location(graph, id)
+        );
+    }
+    out
+}
+
+/// Text view of `lcw_agent::json::search` output.
+pub fn format_search(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let matches = v["matches"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if matches.is_empty() {
+        let _ = writeln!(out, "no symbol matches {}", v["query"]);
+        return out;
+    }
+    if v.get("fuzzy").is_some() {
+        let _ = writeln!(out, "no symbol contains {}; closest names:", v["query"]);
+    }
+    for m in matches {
+        let _ = writeln!(
+            out,
+            "  {}   [{}]",
+            m["qualified_name"].as_str().unwrap_or(""),
+            m["at"].as_str().unwrap_or("")
+        );
+    }
+    if let Some(n) = v.get("matches_more") {
+        let _ = writeln!(out, "  ... +{n} more");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -404,8 +513,6 @@ mod tests {
         let text = format_entries(&g, &entries, &[Some(2)]);
         assert!(text.contains("main — where the program starts (1)"));
         assert!(text.contains("  app::main   [src/lib.rs:1]   reaches 2 fn"));
-        let json = entries_json(&g, &entries, &[Some(2)]);
-        assert_eq!(json[0]["reach"], 2);
 
         let main = g.node_by_qualified("app::main").unwrap();
         let tree = call_tree(&g, main, &CallTreeOptions::default());
@@ -413,7 +520,37 @@ mod tests {
         assert!(text.starts_with("calls from app::main"));
         assert!(text.contains("└── → app::core::run"));
         assert!(text.contains("    └── → app::core::step"));
-        let json = call_tree_json(&g, &tree);
-        assert_eq!(json["children"][0]["children"][0]["name"], "step");
+
+        let step = g.node_by_qualified("app::core::step").unwrap();
+        let up = CallTreeOptions {
+            direction: Direction::Callers,
+            ..Default::default()
+        };
+        let text = format_call_tree(&g, &call_tree(&g, step, &up), Direction::Callers);
+        assert!(text.contains("← app::core::run   [src/lib.rs:10]  calls @ src/lib.rs:11"));
+    }
+
+    #[test]
+    fn impact_and_lookup_errors_render() {
+        let mut g = graph();
+        let step = g.node_by_qualified("app::core::step").unwrap();
+        let imp = lcw_query::impact(&g, step, 3).unwrap();
+        let text = format_impact(&g, &imp, 10);
+        assert!(text.starts_with("impact of app::core::step   [src/lib.rs:20]"));
+        assert!(text.contains("2 caller(s) in 1 file(s) within depth 3: d1 1 · d2 1"));
+        assert!(text.contains("main     app::main   [src/lib.rs:1]"));
+        assert!(text.contains("[2] app::main   [src/lib.rs:1]  calls run @ src/lib.rs:2"));
+        assert!(format_impact(&g, &imp, 1).contains("... +1 more"));
+
+        def(&mut g, "app::other::run", 40, false);
+        let l = lcw_query::lookup(&g, "run", 8);
+        let text = format_lookup_error(&g, "run", &l);
+        assert!(text.starts_with("\"run\" is ambiguous"));
+        assert!(text.contains("  app::other::run   [src/lib.rs:40]"));
+        let l = lcw_query::lookup(&g, "zzzz", 8);
+        assert_eq!(
+            format_lookup_error(&g, "zzzz", &l),
+            "no symbol matches \"zzzz\"\n"
+        );
     }
 }

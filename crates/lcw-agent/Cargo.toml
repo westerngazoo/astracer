@@ -1,0 +1,19 @@
+[package]
+name = "lcw-agent"
+description = "Live Code Walk: the agent-facing contract — repo loading with a fresh-graph fast path, token budgets, and the versioned JSON shared by `lcw --json` and the `lcw-mcp` server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lcw-core = { path = "../lcw-core" }
+lcw-config = { path = "../lcw-config" }
+lcw-engine = { path = "../lcw-engine" }
+lcw-query = { path = "../lcw-query" }
+serde_json = "1.0.151"
+anyhow = "1.0.104"

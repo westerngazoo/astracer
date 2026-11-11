@@ -184,25 +184,42 @@ pub const CACHE_HOME_ENV: &str = "LIVEWALK_CACHE_HOME";
 
 /// The user's cache home: [`CACHE_HOME_ENV`], then `$XDG_CACHE_HOME`, then
 /// `$HOME/.cache`, then `%LOCALAPPDATA%` (Windows), finally the OS temp dir.
+/// When the chosen home cannot hold a `livewalk/` folder (read-only home,
+/// agent sandbox), the OS temp dir is used so the graph cache still works.
 pub fn cache_home() -> Option<PathBuf> {
+    let home = preferred_cache_home();
+    if std::fs::create_dir_all(home.join("livewalk")).is_ok() {
+        return Some(home);
+    }
+    let tmp = std::env::temp_dir();
+    lcw_telemetry::debug!(
+        target: "lcw::engine",
+        home = %home.display(),
+        fallback = %tmp.display(),
+        "cache home not writable; using temp dir"
+    );
+    Some(tmp)
+}
+
+fn preferred_cache_home() -> PathBuf {
     if let Ok(v) = std::env::var(CACHE_HOME_ENV) {
         if !v.is_empty() {
-            return Some(PathBuf::from(v));
+            return PathBuf::from(v);
         }
     }
     for var in ["XDG_CACHE_HOME", "HOME", "LOCALAPPDATA"] {
         if let Ok(v) = std::env::var(var) {
             if !v.is_empty() {
                 let base = PathBuf::from(v);
-                return Some(if var == "HOME" {
+                return if var == "HOME" {
                     base.join(".cache")
                 } else {
                     base
-                });
+                };
             }
         }
     }
-    Some(std::env::temp_dir())
+    std::env::temp_dir()
 }
 
 /// Stable-ish hash of a repository root for use as a cache subdirectory name.

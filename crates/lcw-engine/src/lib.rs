@@ -911,6 +911,10 @@ mod tests {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
+        // `analyze` creates a bucket under the cache home, which other tests
+        // point elsewhere while holding this lock.
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
+
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -945,6 +949,8 @@ mod tests {
         use lcw_config::Language;
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _lock = cache::CACHE_HOME_TEST_LOCK.lock().unwrap();
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

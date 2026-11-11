@@ -82,7 +82,14 @@ fn call_ref(graph: &CodeGraph, c: &CallRef) -> Value {
 }
 
 /// `explain`: the node card — location, metrics, callers and callees.
-pub fn explain(graph: &CodeGraph, id: NodeId, limit: usize) -> Option<Value> {
+/// Without `include_external`, external/unresolved callees (`Ok`, std
+/// methods...) are left out and only counted in `callees_external`.
+pub fn explain(
+    graph: &CodeGraph,
+    id: NodeId,
+    limit: usize,
+    include_external: bool,
+) -> Option<Value> {
     let card = lcw_query::node_card(graph, id)?;
     let span = lcw_query::span(graph, id);
     let mut o = Map::new();
@@ -112,9 +119,16 @@ pub fn explain(graph: &CodeGraph, id: NodeId, limit: usize) -> Option<Value> {
     o.insert("fan_in".into(), json!(card.fan_in));
     o.insert("fan_out".into(), json!(card.fan_out));
     let callers = card.inputs.iter().map(|c| call_ref(graph, c)).collect();
-    let callees = card.outputs.iter().map(|c| call_ref(graph, c)).collect();
+    let (shown, hidden): (Vec<&CallRef>, Vec<&CallRef>) = card
+        .outputs
+        .iter()
+        .partition(|c| include_external || !c.external);
+    let callees = shown.iter().map(|c| call_ref(graph, c)).collect();
     put_list(&mut o, "callers", callers, limit);
     put_list(&mut o, "callees", callees, limit);
+    if !hidden.is_empty() {
+        o.insert("callees_external".into(), json!(hidden.len()));
+    }
     Some(with_schema(Value::Object(o)))
 }
 
@@ -467,7 +481,7 @@ mod tests {
     fn every_view_has_schema_and_string_locations() {
         let g = graph();
         let step = g.node_by_qualified("app::core::step").unwrap();
-        let v = explain(&g, step, 20).unwrap();
+        let v = explain(&g, step, 20, false).unwrap();
         assert_eq!(v["schema"], 1);
         assert_eq!(v["at"], "src/lib.rs:20");
         assert_eq!(v["span"], "src/lib.rs:20-22");
@@ -477,9 +491,28 @@ mod tests {
         assert!(v.get("callers_more").is_none());
 
         let main = g.node_by_qualified("app::main").unwrap();
-        let cut = explain(&g, main, 2).unwrap();
+        let cut = explain(&g, main, 2, false).unwrap();
         assert_eq!(cut["callees"].as_array().unwrap().len(), 2);
         assert_eq!(cut["callees_more"], 4);
+    }
+
+    #[test]
+    fn explain_hides_external_callees_unless_asked() {
+        let mut g = graph();
+        let step = g.node_by_qualified("app::core::step").unwrap();
+        let ok = g.add_node(Node::external("Ok"));
+        let f = g.intern_file("src/lib.rs");
+        g.add_edge(
+            step,
+            ok,
+            Edge::new(EdgeKind::Unresolved, SourceSpan::new(f, 21, 0, 21, 2)),
+        );
+        let hidden = explain(&g, step, 20, false).unwrap();
+        assert_eq!(hidden["callees"].as_array().unwrap().len(), 0);
+        assert_eq!(hidden["callees_external"], 1);
+        let shown = explain(&g, step, 20, true).unwrap();
+        assert_eq!(shown["callees"][0]["external"], true);
+        assert!(shown.get("callees_external").is_none());
 
         let rows = rank_entries(&g, entry_points(&g), false, 40).0;
         let e = entries(&g, &rows, 0);

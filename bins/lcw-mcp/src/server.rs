@@ -132,8 +132,9 @@ impl Server {
             "explain" => {
                 let id = find(g, req_str(args, "symbol")?)?;
                 let limit = opt_u64(args, "limit").unwrap_or(u64::MAX) as usize;
+                let external = opt_bool(args, "external").unwrap_or(false);
                 Ok(lcw_agent::fit_json(budget, |l| {
-                    json::explain(g, id, l.min(limit)).unwrap_or(Value::Null)
+                    json::explain(g, id, l.min(limit), external).unwrap_or(Value::Null)
                 }))
             }
             "callers" | "callees" => {
@@ -385,7 +386,7 @@ fn tool_list() -> Vec<Value> {
         tool(
             "explain",
             "One symbol's card: definition location and span, metrics, direct callers and callees with call sites.",
-            json!({ "symbol": symbol, "limit": { "type": "integer", "minimum": 1, "description": "Max callers/callees per side." } }),
+            json!({ "symbol": symbol, "limit": { "type": "integer", "minimum": 1, "description": "Max callers/callees per side." }, "external": { "type": "boolean", "description": "List external/unresolved callees too (otherwise only counted in `callees_external`)." } }),
             &["symbol"],
         ),
         tool(

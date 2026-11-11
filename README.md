@@ -155,8 +155,9 @@ fresh analysis.
 files: `span` gives the exact lines of a definition, `explain` its callers and
 callees with call sites, `impact` the blast radius of a change. Every `--json`
 output carries `"schema": 1`; `--budget <tokens>` (or `--compact`) trims lists
-to fit, marking cuts with `<list>_more`; an ambiguous or unknown symbol prints
-candidates and exits with code 2.
+to fit, marking cuts with `<list>_more`; JSON is single-line unless `--pretty`
+is given; external callees are only counted unless `--external`; an ambiguous
+or unknown symbol prints candidates and exits with code 2.
 
 ```bash
 lcw span "Engine::analyze"
@@ -172,8 +173,13 @@ command answers which question: [`docs/agents.md`](docs/agents.md).
 
 Disk caches: `lcw cache list` and `lcw cache clean --yes` (or `scripts/livewalk-cache-clean.sh`; honors `LIVEWALK_CACHE_HOME`).
 
-Fast mode (tree-sitter) links calls by name with qualifier checking; method
-calls whose receiver type is unknown may resolve to a same-named method in
+Fast mode (tree-sitter) links calls by name with qualifier checking. For Rust
+method calls it infers the receiver type from the file (`self`, typed
+parameters and `let` bindings, constructors, struct fields) and binds to that
+type's method; common std method names (`map`, `get`, `expect`, `iter`...) on
+an unknown receiver are not linked to repo methods, and calls inside macro
+arguments (`assert_eq!`, `format!`, `vec!`...) are recognized. Other method
+calls with an unknown receiver may still resolve to a same-named method in
 another crate or stay external. `--semantic` resolves them precisely (needs a
 `--features semantic` build). See
 [`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) for the

@@ -33,14 +33,19 @@ struct Cli {
 
     /// Approximate token budget for query output: lists (callers, callees,
     /// paths, entries...) shrink until the output fits, ending in a
-    /// `+N more` marker (`<list>_more` in JSON). Implies compact JSON.
+    /// `+N more` marker (`<list>_more` in JSON).
     #[arg(long, global = true, value_name = "TOKENS")]
     budget: Option<usize>,
 
-    /// Compact output for agents: single-line JSON and, unless `--budget` is
-    /// given, a budget of 1500 tokens.
+    /// Compact output for agents: a budget of 1500 tokens unless `--budget`
+    /// is given.
     #[arg(long, global = true)]
     compact: bool,
+
+    /// Pretty-print JSON (indented, multi-line). JSON is single-line by
+    /// default to keep agent context small.
+    #[arg(long, global = true)]
+    pretty: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -356,6 +361,11 @@ struct ExplainArgs {
     /// instead of the text view.
     #[arg(long)]
     json: bool,
+
+    /// List external / unresolved callees (`Ok`, std methods...) too;
+    /// by default they are only counted.
+    #[arg(long)]
+    external: bool,
 }
 
 #[derive(Debug, Args)]
@@ -548,7 +558,7 @@ fn run(cli: Cli) -> Result<()> {
     let log = cli.log.as_deref();
     let out = Out {
         budget: cli.budget.or(cli.compact.then_some(COMPACT_BUDGET)),
-        compact_json: cli.compact || cli.budget.is_some(),
+        compact_json: !cli.pretty,
     };
     match cli.command {
         Command::Analyze(args) => run_analyze(args, log),
@@ -904,14 +914,17 @@ fn run_explain(args: ExplainArgs, log_override: Option<&str>, out: Out) -> Resul
     let repo = load_repo(&args.repo, log_override)?;
     let g = &repo.graph;
     let id = find_symbol(g, &args.symbol, args.json, out)?;
-    let card = lcw_query::node_card(g, id).context("building node card")?;
+    let mut card = lcw_query::node_card(g, id).context("building node card")?;
 
     if args.json {
         let v = lcw_agent::fit_json(out.budget, |l| {
-            aj::explain(g, id, l).unwrap_or(serde_json::Value::Null)
+            aj::explain(g, id, l, args.external).unwrap_or(serde_json::Value::Null)
         });
         out.print_json(&v)?;
     } else {
+        if !args.external {
+            card.outputs.retain(|c| !c.external);
+        }
         print!(
             "{}",
             lcw_agent::fit_text(out.budget, args.limit, |l| nav::format_card(&card, l))

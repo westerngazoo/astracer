@@ -41,8 +41,12 @@ before changing a signature. Read the returned range, not the whole file.
   leading attributes and doc comments.
 - `--budget <tokens>` shrinks lists until the output fits (about 4 bytes per
   token); a cut list gets a sibling `"<list>_more": N` in JSON and
-  `... +N more` in text. `--compact` = single-line JSON plus a 1500-token
-  budget. Both are global flags: `lcw --compact explain X --json`.
+  `... +N more` in text. `--compact` = a 1500-token budget. Both are global
+  flags: `lcw --compact explain X --json`.
+- JSON is single-line; add the global `--pretty` to indent it for humans.
+- External / unresolved callees (`Ok`, std methods, other crates) are left
+  out of `explain` and only counted in `callees_external`; `--external`
+  (MCP: `"external": true`) lists them.
 - An ambiguous or unknown symbol prints candidates instead of failing silently,
   and the command exits with code 2:
   `{"schema":1,"error":"ambiguous","query":"new","candidates":[{"qualified_name":…,"at":…}]}`.

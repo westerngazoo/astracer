@@ -152,11 +152,7 @@ pub fn repo_cache_dir(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> 
     }
     let home = cache_home()?;
     let key = repo_cache_key(root);
-    Some(
-        home
-            .join("livewalk")
-            .join(format!("{key:016x}-{variant}")),
-    )
+    Some(home.join("livewalk").join(format!("{key:016x}-{variant}")))
 }
 
 pub fn cache_file(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> {
@@ -303,8 +299,7 @@ pub fn clean_cache_dirs(opts: &CacheCleanOptions) -> std::io::Result<CacheCleanR
     }
 
     let cutoff = opts.older_than_days.map(|days| {
-        std::time::SystemTime::now()
-            - std::time::Duration::from_secs(days.saturating_mul(86_400))
+        std::time::SystemTime::now() - std::time::Duration::from_secs(days.saturating_mul(86_400))
     });
 
     if !opts.yes {
@@ -320,10 +315,7 @@ pub fn clean_cache_dirs(opts: &CacheCleanOptions) -> std::io::Result<CacheCleanR
         let remove = if opts.legacy_only {
             is_legacy_cache_dir_name(&entry.name)
         } else if let Some(cutoff) = cutoff {
-            entry
-                .modified
-                .is_some_and(|m| m < cutoff)
-                || (entry.modified.is_none() && opts.yes)
+            entry.modified.is_some_and(|m| m < cutoff) || (entry.modified.is_none() && opts.yes)
         } else {
             true
         };
@@ -525,10 +517,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "lcw-cache-clean-{}-{nanos}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("lcw-cache-clean-{}-{nanos}", std::process::id()));
         let root = base.join("livewalk");
         let bucket = root.join("deadbeef00000000-rust");
         std::fs::create_dir_all(&bucket).unwrap();
@@ -560,15 +550,17 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "lcw-ensure-cache-{}-{nanos}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("lcw-ensure-cache-{}-{nanos}", std::process::id()));
         let repo = base.join("repo");
         let cache_dir = base.join("cache-root");
         std::fs::create_dir_all(&repo).unwrap();
-        assert!(!cache_dir.exists(), "precondition: cache dir must not exist yet");
-        ensure_repo_cache_dir(&repo, &cache_dir.to_string_lossy(), "rust").expect("create cache dir");
+        assert!(
+            !cache_dir.exists(),
+            "precondition: cache dir must not exist yet"
+        );
+        ensure_repo_cache_dir(&repo, &cache_dir.to_string_lossy(), "rust")
+            .expect("create cache dir");
         assert!(cache_dir.join("rust").is_dir());
         let _ = std::fs::remove_dir_all(&base);
     }

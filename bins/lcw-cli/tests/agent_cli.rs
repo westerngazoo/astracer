@@ -124,6 +124,25 @@ fn paths_are_repo_relative_from_any_cwd() {
 }
 
 #[test]
+fn flow_snippets_are_text_unless_json() {
+    let f = Fixture::new("flow");
+    let o = f.lcw(&["flow", "hub", "--from", "inc", "--snippets"]);
+    assert!(o.status.success());
+    let text = stdout(&o);
+    assert!(text.starts_with("flow: "), "{text}");
+    assert!(text.contains("repo::inc   [src/lib.rs:1]"), "{text}");
+    assert!(text.contains(" 3 |     hub(x) + 1\n"), "{text}");
+    assert!(text.contains(" 6 | fn hub(x: i32) -> i32 {\n"), "{text}");
+
+    let (v, code) = f.json(&["flow", "hub", "--from", "inc", "--snippets", "--json"]);
+    assert_eq!(code, 0);
+    assert!(v["paths"][0][1]["code"]
+        .as_str()
+        .unwrap()
+        .starts_with("fn hub"));
+}
+
+#[test]
 fn impact_callers_and_budget() {
     let f = Fixture::new("impact");
     let (v, _) = f.json(&["impact", "hub", "--json"]);

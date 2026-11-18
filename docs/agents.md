@@ -49,6 +49,9 @@ before changing a signature. Read the returned range, not the whole file.
   `... +N more` in text. `--compact` = a 1500-token budget. Both are global
   flags: `lcw --compact explain X --json`.
 - JSON is single-line; add the global `--pretty` to indent it for humans.
+- `lcw flow X --from main --snippets` prints each hop's source under it,
+  numbered and clipped to `--snippet-lines` (default 15); add `--json` to get
+  each hop's full source as a `code` field instead.
 - External / unresolved callees (`Ok`, std methods, other crates) are left
   out of `explain` and only counted in `callees_external`; `--external`
   (MCP: `"external": true`) lists them.

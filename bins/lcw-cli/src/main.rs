@@ -398,9 +398,14 @@ struct FlowArgs {
     #[arg(long)]
     json: bool,
 
-    /// Include each hop's source code in the JSON output (implies --json).
+    /// Include each hop's source code: numbered and clipped to
+    /// `--snippet-lines` in text, in full as `code` with --json.
     #[arg(long)]
     snippets: bool,
+
+    /// Max source lines shown per hop by `--snippets` in text output.
+    #[arg(long, default_value_t = 15)]
+    snippet_lines: usize,
 
     /// Also render the flow to this PNG (requires a `--features viewer` build).
     #[arg(short, long)]
@@ -1034,7 +1039,7 @@ fn run_search(args: SearchArgs, log_override: Option<&str>, out: Out) -> Result<
 fn run_flow(args: FlowArgs, log_override: Option<&str>, out: Out) -> Result<()> {
     let repo = load_repo(&args.repo, log_override)?;
     let g = &repo.graph;
-    let json = args.json || args.snippets;
+    let json = args.json;
 
     let from = find_all(g, &args.from, json, out)?;
     let to = find_all(g, &args.to, json, out)?;
@@ -1048,18 +1053,26 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>, out: Out) -> Result<()> 
         );
     };
 
+    let root = lcw_agent::repo_dir(&repo.root);
+    let root = root.to_string_lossy();
     if json {
-        let root = lcw_agent::repo_dir(&repo.root);
-        let root = root.to_string_lossy();
         let v = lcw_agent::fit_json(out.budget, |l| aj::flow(g, &fp, args.snippets, &root, l));
         out.print_json(&v)?;
     } else {
+        let code = |id: NodeId| {
+            let s = lcw_query::span(g, id)?;
+            Some((s.start_line, aj::span_code(&root, &s)?))
+        };
         print!(
             "{}",
             lcw_agent::fit_text(out.budget, fp.paths.len(), |l| {
                 let mut cut = fp.clone();
                 cut.paths.truncate(l);
-                flow::format_text(g, &cut)
+                if args.snippets {
+                    flow::format_text_with_snippets(g, &cut, &code, args.snippet_lines)
+                } else {
+                    flow::format_text(g, &cut)
+                }
             })
         );
     }

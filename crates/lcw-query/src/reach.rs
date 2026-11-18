@@ -119,6 +119,10 @@ pub struct CallTreeNode {
     /// `None` for the root.
     #[serde(default)]
     pub site: Option<SourceSpan>,
+    /// Every call site behind that link, one per line (see
+    /// [`crate::call_sites`]); empty for the root.
+    #[serde(default)]
+    pub sites: Vec<SourceSpan>,
 }
 
 impl CallTreeNode {
@@ -133,14 +137,14 @@ impl CallTreeNode {
 /// children by qualified name; internal nodes come before externals.
 pub fn call_tree(graph: &CodeGraph, root: NodeId, opts: &CallTreeOptions) -> CallTreeNode {
     let mut expanded: HashSet<NodeId> = HashSet::new();
-    expand(graph, root, 0, None, opts, &mut expanded)
+    expand(graph, root, 0, Vec::new(), opts, &mut expanded)
 }
 
 fn expand(
     graph: &CodeGraph,
     id: NodeId,
     depth: u32,
-    site: Option<SourceSpan>,
+    sites: Vec<SourceSpan>,
     opts: &CallTreeOptions,
     expanded: &mut HashSet<NodeId>,
 ) -> CallTreeNode {
@@ -151,21 +155,22 @@ fn expand(
         children: Vec::new(),
         truncated: 0,
         repeat,
-        site,
+        site: sites.first().copied(),
+        sites,
     };
     if repeat || depth >= opts.max_depth {
         return node;
     }
 
-    // (neighbor, sort line, call site)
-    let mut kids: Vec<(NodeId, u32, SourceSpan)> = match opts.direction {
+    // (neighbor, sort line, call sites)
+    let mut kids: Vec<(NodeId, u32, Vec<SourceSpan>)> = match opts.direction {
         Direction::Callees => graph
             .edges_out(id)
-            .map(|(to, e)| (to, e.call_site.start_line, e.call_site))
+            .map(|(to, e)| (to, e.call_site.start_line, e.sites().collect()))
             .collect(),
         Direction::Callers => graph
             .edges_in(id)
-            .map(|(from, e)| (from, 0, e.call_site))
+            .map(|(from, e)| (from, 0, e.sites().collect()))
             .collect(),
     };
     kids.retain(|(k, _, _)| opts.include_external || graph.node(*k).kind != NodeKind::External);
@@ -178,12 +183,19 @@ fn expand(
             .then(a.1.cmp(&b.1))
             .then_with(|| na.qualified_name.cmp(&nb.qualified_name))
     });
-    kids.dedup_by_key(|k| k.0);
+    kids.dedup_by(|dup, kept| {
+        let same = dup.0 == kept.0;
+        if same {
+            kept.2.append(&mut dup.2);
+        }
+        same
+    });
 
     let total = kids.len();
     for (k, _, s) in kids.into_iter().take(opts.max_children) {
+        let sites = crate::call_sites(s);
         node.children
-            .push(expand(graph, k, depth + 1, Some(s), opts, expanded));
+            .push(expand(graph, k, depth + 1, sites, opts, expanded));
     }
     node.truncated = total.saturating_sub(node.children.len());
     node
@@ -286,6 +298,14 @@ mod tests {
         // Each caller carries its own call site; the root has none.
         assert!(tree.site.is_none());
         assert_eq!(tree.children[0].site.unwrap().start_line, 81);
+        // run calls parse on two lines: both are kept.
+        let lines: Vec<u32> = tree.children[1]
+            .sites
+            .iter()
+            .map(|s| s.start_line)
+            .collect();
+        assert_eq!(lines, vec![22, 23]);
+        assert!(tree.sites.is_empty());
         assert_eq!(tree.children[1].site.unwrap().start_line, 22);
         assert_eq!(tree.children[1].children[0].site.unwrap().start_line, 11);
     }

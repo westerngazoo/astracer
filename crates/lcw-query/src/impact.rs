@@ -15,15 +15,18 @@ use serde::{Deserialize, Serialize};
 use crate::entries::{classify_entry, EntryKind};
 
 /// One transitive caller of the impact root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImpactCaller {
     pub id: NodeId,
     /// Hops from the root (direct callers are depth 1).
     pub depth: u32,
     /// The node this caller calls on its shortest way to the root.
     pub via: NodeId,
-    /// Call site of `id -> via`, in the caller's file.
+    /// First call site of `id -> via`, in the caller's file.
     pub call_site: SourceSpan,
+    /// Every call site of `id -> via`, one per line (see [`crate::call_sites`]).
+    #[serde(default)]
+    pub sites: Vec<SourceSpan>,
     /// Set when this caller is itself an entry point.
     pub entry: Option<EntryKind>,
 }
@@ -67,7 +70,14 @@ pub fn impact(graph: &CodeGraph, root: NodeId, max_depth: u32) -> Option<Impact>
         let mut next: Vec<ImpactCaller> = Vec::new();
         for &via in &level {
             for (from, e) in graph.edges_in(via) {
-                if graph.node(from).kind == NodeKind::External || !seen.insert(from) {
+                if graph.node(from).kind == NodeKind::External {
+                    continue;
+                }
+                if !seen.insert(from) {
+                    // Another edge kind between the same pair: merge its sites.
+                    if let Some(c) = next.iter_mut().find(|c| c.id == from && c.via == via) {
+                        c.sites = crate::call_sites(c.sites.drain(..).chain(e.sites()));
+                    }
                     continue;
                 }
                 next.push(ImpactCaller {
@@ -75,6 +85,7 @@ pub fn impact(graph: &CodeGraph, root: NodeId, max_depth: u32) -> Option<Impact>
                     depth,
                     via,
                     call_site: e.call_site,
+                    sites: crate::call_sites(e.sites()),
                     entry: None,
                 });
             }
@@ -150,6 +161,8 @@ mod tests {
             .unwrap();
         assert_eq!(run.via, id(&g, "app::core::parse"));
         assert_eq!(run.call_site.start_line, 22);
+        let lines: Vec<u32> = run.sites.iter().map(|s| s.start_line).collect();
+        assert_eq!(lines, vec![22, 23]);
         // core.rs (next, parse, test) + main.rs (run, main).
         assert_eq!(imp.files, 2);
         assert!(!imp.beyond_depth);

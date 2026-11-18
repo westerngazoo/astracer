@@ -24,17 +24,41 @@ fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// Call sites as `file:263, 269, 271` (a new `; file:` per file), or `None`
+/// when no site has a known file. `short` prints base names only.
+fn site_list(graph: &CodeGraph, sites: &[lcw_core::SourceSpan], short: bool) -> Option<String> {
+    let mut out = String::new();
+    let mut file = None;
+    for s in sites.iter().filter(|s| s.start_line > 0) {
+        let Some(p) = graph.file_path(s.file()) else {
+            continue;
+        };
+        if file == Some(s.file()) {
+            let _ = write!(out, ", {}", s.start_line);
+            continue;
+        }
+        let shown = p.display().to_string();
+        let shown = if short { base_name(&shown) } else { &shown };
+        let sep = if file.is_some() { "; " } else { "" };
+        let _ = write!(out, "{sep}{shown}:{}", s.start_line);
+        file = Some(s.file());
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 // ---------------------------------------------------------------------------
 // explain
 // ---------------------------------------------------------------------------
 
-/// `[direct x2 @ main.rs:32]` — the edge behind a caller/callee line.
-fn call_tag(c: &CallRef) -> String {
+/// `[direct x2 @ main.rs:32, 40]` — the edge behind a caller/callee line.
+fn call_tag(graph: &CodeGraph, c: &CallRef) -> String {
     let mut s = format!("[{}", edge_kind_str(c.kind));
     if c.count > 1 {
         let _ = write!(s, " x{}", c.count);
     }
-    if !c.site_file.is_empty() {
+    if let Some(list) = site_list(graph, &c.sites, true) {
+        let _ = write!(s, " @ {list}");
+    } else if !c.site_file.is_empty() {
         let _ = write!(
             s,
             " @ {}:{}",
@@ -47,7 +71,7 @@ fn call_tag(c: &CallRef) -> String {
 }
 
 /// The `explain` text view of a node card.
-pub fn format_card(card: &NodeCard, limit: usize) -> String {
+pub fn format_card(graph: &CodeGraph, card: &NodeCard, limit: usize) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}", card.qualified_name);
     let _ = writeln!(out, "  kind:    {}", kind_str(card.kind));
@@ -67,7 +91,7 @@ pub fn format_card(card: &NodeCard, limit: usize) -> String {
 
     let _ = writeln!(out, "\n  inputs — {} caller(s):", card.inputs.len());
     for c in card.inputs.iter().take(limit) {
-        let _ = writeln!(out, "    <- {}   {}", c.qualified_name, call_tag(c));
+        let _ = writeln!(out, "    <- {}   {}", c.qualified_name, call_tag(graph, c));
     }
     if card.inputs.len() > limit {
         let _ = writeln!(out, "    ... +{} more", card.inputs.len() - limit);
@@ -76,7 +100,13 @@ pub fn format_card(card: &NodeCard, limit: usize) -> String {
     let _ = writeln!(out, "\n  outputs — {} callee(s):", card.outputs.len());
     for c in card.outputs.iter().take(limit) {
         let ext = if c.external { "  (external)" } else { "" };
-        let _ = writeln!(out, "    -> {}{}   {}", c.qualified_name, ext, call_tag(c));
+        let _ = writeln!(
+            out,
+            "    -> {}{}   {}",
+            c.qualified_name,
+            ext,
+            call_tag(graph, c)
+        );
     }
     if card.outputs.len() > limit {
         let _ = writeln!(out, "    ... +{} more", card.outputs.len() - limit);
@@ -252,15 +282,15 @@ pub fn format_call_tree(graph: &CodeGraph, tree: &CallTreeNode, dir: Direction) 
     out
 }
 
-/// `  calls @ file:line` for a caller-tree row (where the caller makes the call).
+/// `  calls @ file:263, 269` for a caller-tree row: every line where the
+/// caller makes the call.
 fn caller_site(graph: &CodeGraph, node: &CallTreeNode, dir: Direction) -> String {
-    match (dir, node.site) {
-        (Direction::Callers, Some(s)) => match graph.file_path(s.file()) {
-            Some(p) if s.start_line > 0 => format!("  calls @ {}:{}", p.display(), s.start_line),
-            _ => String::new(),
-        },
-        _ => String::new(),
+    if dir != Direction::Callers {
+        return String::new();
     }
+    site_list(graph, &node.sites, false)
+        .map(|l| format!("  calls @ {l}"))
+        .unwrap_or_default()
 }
 
 fn write_call_node(
@@ -304,11 +334,8 @@ fn write_call_node(
 // impact
 // ---------------------------------------------------------------------------
 
-fn site_of(graph: &CodeGraph, s: lcw_core::SourceSpan) -> String {
-    match graph.file_path(s.file()) {
-        Some(p) if s.start_line > 0 => format!("{}:{}", p.display(), s.start_line),
-        _ => "?".to_string(),
-    }
+fn sites_of(graph: &CodeGraph, c: &lcw_query::ImpactCaller) -> String {
+    site_list(graph, &c.sites, false).unwrap_or_else(|| "?".to_string())
 }
 
 /// The `impact` text view: summary line, entry points reached, then every
@@ -373,7 +400,7 @@ pub fn format_impact(graph: &CodeGraph, imp: &Impact, limit: usize) -> String {
             graph.node(c.id).qualified_name,
             location(graph, c.id),
             graph.node(c.via).name,
-            site_of(graph, c.call_site)
+            sites_of(graph, c)
         );
     }
     if imp.callers.len() > limit {
@@ -477,10 +504,10 @@ mod tests {
     fn card_text_shows_edges_with_kind_and_site() {
         let g = graph();
         let step = g.node_by_qualified("app::core::step").unwrap();
-        let text = format_card(&node_card(&g, step).unwrap(), 20);
+        let text = format_card(&g, &node_card(&g, step).unwrap(), 20);
         assert!(text.starts_with("app::core::step\n"));
         assert!(text.contains("where:   src/lib.rs:20"));
-        assert!(text.contains("<- app::core::run   [direct x2 @ lib.rs:11]"));
+        assert!(text.contains("<- app::core::run   [direct x2 @ lib.rs:11, 12]"));
         assert!(text.contains("outputs — 0 callee(s)"));
     }
 
@@ -527,7 +554,7 @@ mod tests {
             ..Default::default()
         };
         let text = format_call_tree(&g, &call_tree(&g, step, &up), Direction::Callers);
-        assert!(text.contains("← app::core::run   [src/lib.rs:10]  calls @ src/lib.rs:11"));
+        assert!(text.contains("← app::core::run   [src/lib.rs:10]  calls @ src/lib.rs:11, 12"));
     }
 
     #[test]

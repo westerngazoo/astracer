@@ -36,7 +36,9 @@ pub mod resolve;
 pub mod roots;
 pub mod span;
 
-pub use card::{edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard};
+pub use card::{
+    call_sites, edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard,
+};
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
 pub use flow::{connection, shortest_path, shortest_paths, Connection, FlowPaths};
 pub use groups::{crate_groups, Group, Groups, EXTERNAL_GROUP};

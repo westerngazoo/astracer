@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 /// On-disk file name inside the per-repo cache directory.
 pub const DB_FILENAME: &str = "graph.sqlite";
 
-/// Bump when table layout or serialization changes.
-const STORE_VERSION: u32 = 1;
+/// Bump when table layout or serialization changes. Stores of another
+/// version are refused on read (the engine re-analyzes) and rebuilt on write.
+pub const STORE_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -62,11 +63,12 @@ pub fn write_with_meta(
     let mut conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     let tx = conn.transaction()?;
+    // Recreate rather than clear, so a store with an older layout is upgraded.
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS edges; DROP TABLE IF EXISTS nodes;
+         DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS meta;",
+    )?;
     init_schema(&tx)?;
-    tx.execute("DELETE FROM edges", [])?;
-    tx.execute("DELETE FROM nodes", [])?;
-    tx.execute("DELETE FROM files", [])?;
-    tx.execute("DELETE FROM meta", [])?;
     tx.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
         params!["version", STORE_VERSION.to_string()],
@@ -114,12 +116,17 @@ pub fn write_with_meta(
     }
     for e in &snapshot.edges {
         let span = &e.call_site;
+        let extra_sites = if e.extra_sites.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&e.extra_sites)?)
+        };
         tx.execute(
             "INSERT INTO edges (
                 from_id, to_id, kind,
                 file_id, start_line, start_col, end_line, end_col,
-                count
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                count, extra_sites_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 e.from.0 as i64,
                 e.to.0 as i64,
@@ -130,6 +137,7 @@ pub fn write_with_meta(
                 span.end_line as i64,
                 span.end_col as i64,
                 e.count as i64,
+                extra_sites,
             ],
         )?;
     }
@@ -228,6 +236,7 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
             end_line INTEGER NOT NULL,
             end_col INTEGER NOT NULL,
             count INTEGER NOT NULL,
+            extra_sites_json TEXT,
             PRIMARY KEY (from_id, to_id, kind)
         );
         ",
@@ -315,12 +324,14 @@ fn load_nodes(conn: &Connection) -> Result<Vec<Node>, StoreError> {
 
 fn load_edges(conn: &Connection) -> Result<Vec<EdgeExport>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT from_id, to_id, kind, file_id, start_line, start_col, end_line, end_col, count
+        "SELECT from_id, to_id, kind, file_id, start_line, start_col, end_line, end_col, count,
+                extra_sites_json
          FROM edges",
     )?;
     let rows = stmt.query_map([], |r| {
         let kind: String = r.get(2)?;
-        Ok(EdgeExport {
+        let extra_sites: Option<String> = r.get(9)?;
+        let edge = EdgeExport {
             from: lcw_core::NodeId(r.get::<_, i64>(0)? as u32),
             to: lcw_core::NodeId(r.get::<_, i64>(1)? as u32),
             kind: parse_edge_kind(&kind)?,
@@ -332,11 +343,17 @@ fn load_edges(conn: &Connection) -> Result<Vec<EdgeExport>, StoreError> {
                 end_col: r.get::<_, i64>(7)? as u32,
             },
             count: r.get::<_, i64>(8)? as u32,
-        })
+            extra_sites: Vec::new(),
+        };
+        Ok((edge, extra_sites))
     })?;
     let mut edges = Vec::new();
     for row in rows {
-        edges.push(row?);
+        let (mut edge, extra_sites) = row?;
+        if let Some(json) = extra_sites {
+            edge.extra_sites = serde_json::from_str(&json)?;
+        }
+        edges.push(edge);
     }
     Ok(edges)
 }
@@ -443,6 +460,11 @@ mod tests {
             b,
             lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 2, 4, 2, 5)),
         );
+        g.add_edge(
+            a,
+            b,
+            lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 3, 4, 3, 5)),
+        );
 
         let snap = g.snapshot();
         let path = temp_db();
@@ -453,6 +475,9 @@ mod tests {
         let g2 = CodeGraph::from_snapshot(back);
         assert_eq!(g2.node_count(), 2);
         assert_eq!(g2.edge_count(), 1);
+        let (_, e) = g2.edges_out(a).next().unwrap();
+        let lines: Vec<u32> = e.sites().map(|s| s.start_line).collect();
+        assert_eq!(lines, vec![2, 3]);
         let sum = summary(&path).unwrap();
         assert_eq!(sum.nodes, 2);
         assert_eq!(sum.edges, 1);
@@ -484,6 +509,31 @@ mod tests {
         );
         assert_eq!(read_meta(&path, "missing").unwrap(), None);
         // `version` is not overridable, so the store still opens.
+        assert!(read(&path).is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn older_store_is_refused_then_rebuilt_on_write() {
+        let path = temp_db();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta VALUES ('version', '1');
+                 CREATE TABLE edges (from_id INTEGER NOT NULL, to_id INTEGER NOT NULL,
+                     kind TEXT NOT NULL, file_id INTEGER NOT NULL, start_line INTEGER NOT NULL,
+                     start_col INTEGER NOT NULL, end_line INTEGER NOT NULL,
+                     end_col INTEGER NOT NULL, count INTEGER NOT NULL,
+                     PRIMARY KEY (from_id, to_id, kind));",
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            read(&path),
+            Err(StoreError::VersionMismatch { found: 1 })
+        ));
+        write(&path, &GraphSnapshot::default()).unwrap();
         assert!(read(&path).is_ok());
         let _ = std::fs::remove_file(path);
     }

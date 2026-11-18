@@ -2,7 +2,8 @@
 //! across commands so an agent learns them once:
 //!
 //! * locations are strings: `"at": "file:line"` (definition), `"site":
-//!   "file:line"` (call site, in the caller's file), `"span": "file:a-b"`;
+//!   "file:line"` (first call site, in the caller's file), `"span": "file:a-b"`;
+//!   `"sites": [{"file", "line"}]` lists every call site, one per line;
 //! * a list cut by a limit or budget gets a sibling `"<list>_more": N`;
 //! * optional fields are omitted rather than `null` / `false`.
 
@@ -30,6 +31,20 @@ pub fn site(graph: &CodeGraph, span: SourceSpan) -> Option<String> {
         .file_path(span.file())
         .filter(|_| span.start_line > 0)
         .map(|p| format!("{}:{}", p.display(), span.start_line))
+}
+
+/// `[{"file": …, "line": …}]` for call sites with a known file, or `None`
+/// when there are none.
+pub fn sites(graph: &CodeGraph, spans: &[SourceSpan]) -> Option<Value> {
+    let list: Vec<Value> = spans
+        .iter()
+        .filter(|s| s.start_line > 0)
+        .filter_map(|s| {
+            let p = graph.file_path(s.file())?;
+            Some(json!({ "file": p.display().to_string(), "line": s.start_line }))
+        })
+        .collect();
+    (!list.is_empty()).then_some(Value::Array(list))
 }
 
 /// `{"schema": 1, ...fields}`.
@@ -77,6 +92,9 @@ fn call_ref(graph: &CodeGraph, c: &CallRef) -> Value {
     }
     if let Some(s) = site(graph, c.call_site) {
         o.insert("site".into(), json!(s));
+    }
+    if let Some(s) = sites(graph, &c.sites) {
+        o.insert("sites".into(), s);
     }
     Value::Object(o)
 }
@@ -144,6 +162,9 @@ fn tree_node(graph: &CodeGraph, t: &CallTreeNode) -> Value {
     if let Some(s) = t.site.and_then(|s| site(graph, s)) {
         o.insert("site".into(), json!(s));
     }
+    if let Some(s) = sites(graph, &t.sites) {
+        o.insert("sites".into(), s);
+    }
     if t.repeat {
         o.insert("repeat".into(), json!(true));
     }
@@ -205,6 +226,9 @@ pub fn impact(graph: &CodeGraph, imp: &Impact, limit: usize) -> Value {
             r.insert("at".into(), json!(at(graph, c.id)));
             if let Some(s) = site(graph, c.call_site) {
                 r.insert("site".into(), json!(s));
+            }
+            if let Some(s) = sites(graph, &c.sites) {
+                r.insert("sites".into(), s);
             }
             r.insert("via".into(), json!(graph.node(c.via).qualified_name));
             Value::Object(r)
@@ -488,6 +512,10 @@ mod tests {
         assert_eq!(v["callers"][0]["qualified_name"], "app::core::run");
         assert_eq!(v["callers"][0]["count"], 2);
         assert_eq!(v["callers"][0]["site"], "src/lib.rs:11");
+        assert_eq!(
+            v["callers"][0]["sites"],
+            json!([{"file": "src/lib.rs", "line": 11}, {"file": "src/lib.rs", "line": 12}])
+        );
         assert!(v.get("callers_more").is_none());
 
         let main = g.node_by_qualified("app::main").unwrap();

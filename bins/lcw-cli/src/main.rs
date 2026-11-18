@@ -940,7 +940,7 @@ fn run_explain(args: ExplainArgs, log_override: Option<&str>, out: Out) -> Resul
         }
         print!(
             "{}",
-            lcw_agent::fit_text(out.budget, args.limit, |l| nav::format_card(&card, l))
+            lcw_agent::fit_text(out.budget, args.limit, |l| nav::format_card(g, &card, l))
         );
     }
     Ok(())

@@ -6,7 +6,7 @@
 //! This is the one record every front end renders (CLI `explain`, the native
 //! HUD panel, the desktop detail pane), so the three can never disagree.
 
-use lcw_core::{CodeGraph, EdgeKind, Node, NodeId, NodeKind, SourceSpan};
+use lcw_core::{CodeGraph, Edge, EdgeKind, Node, NodeId, NodeKind, SourceSpan};
 use serde::{Deserialize, Serialize};
 
 use crate::entries::{classify_entry, EntryKind};
@@ -22,6 +22,10 @@ pub struct CallRef {
     pub count: u32,
     /// First recorded call site (in the *caller's* file).
     pub call_site: SourceSpan,
+    /// Every call site of this edge, one per line, in file/line order
+    /// (see [`call_sites`]).
+    #[serde(default)]
+    pub sites: Vec<SourceSpan>,
     /// Path of the file that contains `call_site` (empty when unknown).
     pub site_file: String,
     /// The neighbor is an unresolved / external target.
@@ -92,11 +96,11 @@ pub fn node_card(graph: &CodeGraph, id: NodeId) -> Option<NodeCard> {
 
     let mut inputs: Vec<CallRef> = graph
         .edges_in(id)
-        .map(|(from, e)| call_ref(graph, from, e.kind, e.count, e.call_site))
+        .map(|(from, e)| call_ref(graph, from, e))
         .collect();
     let mut outputs: Vec<CallRef> = graph
         .edges_out(id)
-        .map(|(to, e)| call_ref(graph, to, e.kind, e.count, e.call_site))
+        .map(|(to, e)| call_ref(graph, to, e))
         .collect();
     let by_name = |a: &CallRef, b: &CallRef| {
         a.external
@@ -135,24 +139,29 @@ pub fn node_card(graph: &CodeGraph, id: NodeId) -> Option<NodeCard> {
     })
 }
 
-fn call_ref(
-    graph: &CodeGraph,
-    other: NodeId,
-    kind: EdgeKind,
-    count: u32,
-    site: SourceSpan,
-) -> CallRef {
+fn call_ref(graph: &CodeGraph, other: NodeId, e: &Edge) -> CallRef {
     let o = graph.node(other);
     CallRef {
         id: other,
         name: o.name.clone(),
         qualified_name: o.qualified_name.clone(),
-        kind,
-        count,
-        call_site: site,
-        site_file: file_of(graph, site.file()),
+        kind: e.kind,
+        count: e.count,
+        call_site: e.call_site,
+        sites: call_sites(e.sites()),
+        site_file: file_of(graph, e.call_site.file()),
         external: o.kind == NodeKind::External,
     }
+}
+
+/// Call sites sorted by file, line and column, keeping one per line (several
+/// calls on one line read as one place to look). Unknown sites (line 0) are
+/// dropped.
+pub fn call_sites(sites: impl IntoIterator<Item = SourceSpan>) -> Vec<SourceSpan> {
+    let mut v: Vec<SourceSpan> = sites.into_iter().filter(|s| s.start_line > 0).collect();
+    v.sort_by_key(|s| (s.file, s.start_line, s.start_col));
+    v.dedup_by_key(|s| (s.file, s.start_line));
+    v
 }
 
 fn file_of(graph: &CodeGraph, file: lcw_core::FileId) -> String {

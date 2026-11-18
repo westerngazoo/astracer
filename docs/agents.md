@@ -39,6 +39,10 @@ before changing a signature. Read the returned range, not the whole file.
 - Locations are strings: `at` = definition `file:line`, `site` = call site
   `file:line` (in the caller's file), `span` = `file:start-end`. Spans include
   leading attributes and doc comments.
+- A caller that makes the same call on several lines has one entry: `site` is
+  the first call site and `sites: [{"file":…,"line":…}]` lists every one (one
+  per line) in `callers`, `calls`, `explain` and `impact`. Text shows them
+  as `calls @ src/cas.rs:263, 269, 271`.
 - CLI paths (text and JSON) are relative to the analyzed repository root,
   whatever the current directory: `lcw span X --path /abs/repo` prints
   `src/lib.rs:10-20`, not an absolute or `../`-prefixed path. Pass

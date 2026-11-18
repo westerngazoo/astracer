@@ -122,6 +122,8 @@ pub enum Staleness {
     RootChanged,
     /// The store was built by another adapter or extraction version.
     ExtractorChanged,
+    /// The store was written in another on-disk format version.
+    StoreFormatChanged,
     /// Source files were added or removed since the store was written.
     FileSetChanged { before: usize, now: usize },
     /// This many source files were modified after the store was written.
@@ -137,6 +139,9 @@ impl std::fmt::Display for Staleness {
             Staleness::RootChanged => f.write_str("cached graph was built for another root path"),
             Staleness::ExtractorChanged => {
                 f.write_str("cached graph was built by another extractor version")
+            }
+            Staleness::StoreFormatChanged => {
+                f.write_str("cached graph uses another store format version")
             }
             Staleness::FileSetChanged { before, now } => {
                 write!(f, "source files changed ({before} -> {now})")
@@ -252,6 +257,11 @@ impl Engine {
         };
         if !path.is_file() {
             return Ok(Some(Staleness::Missing));
+        }
+        if let Err(lcw_graph_store::StoreError::VersionMismatch { .. }) =
+            lcw_graph_store::read_meta(&path, META_ROOT)
+        {
+            return Ok(Some(Staleness::StoreFormatChanged));
         }
         let meta = |key: &str| lcw_graph_store::read_meta(&path, key).ok().flatten();
         let (Some(written), Some(stored_root), Some(count)) = (

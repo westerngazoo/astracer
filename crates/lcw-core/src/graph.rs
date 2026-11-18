@@ -180,12 +180,16 @@ impl Node {
 }
 
 /// A directed call edge with a call site and a multiplicity `count`
-/// (repeated identical calls are merged and counted).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// (repeated identical calls are merged and counted). `call_site` is the
+/// first recorded site; the sites of the calls merged into it after that are
+/// kept in `extra_sites`, in the order they were added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub kind: EdgeKind,
     pub call_site: SourceSpan,
     pub count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_sites: Vec<SourceSpan>,
 }
 
 impl Edge {
@@ -194,7 +198,13 @@ impl Edge {
             kind,
             call_site,
             count: 1,
+            extra_sites: Vec::new(),
         }
+    }
+
+    /// Every recorded call site: `call_site`, then `extra_sites`.
+    pub fn sites(&self) -> impl Iterator<Item = SourceSpan> + '_ {
+        std::iter::once(self.call_site).chain(self.extra_sites.iter().copied())
     }
 }
 
@@ -380,12 +390,15 @@ impl CodeGraph {
     // -- edges ------------------------------------------------------------
 
     /// Add a call edge, merging with an identical existing edge (same
-    /// endpoints and kind) by incrementing its `count`.
+    /// endpoints and kind) by incrementing its `count` and keeping the new
+    /// edge's call sites in `extra_sites`.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, edge: Edge) {
         let key = (from.0, to.0, edge.kind.tag());
         if let Some(&eidx) = self.edge_index.get(&key) {
             if let Some(w) = self.graph.edge_weight_mut(eidx) {
                 w.count = w.count.saturating_add(edge.count);
+                w.extra_sites.push(edge.call_site);
+                w.extra_sites.extend(edge.extra_sites);
                 return;
             }
         }
@@ -452,13 +465,7 @@ impl CodeGraph {
     pub fn export(&self) -> GraphExport<'_> {
         let edges = self
             .edges()
-            .map(|(from, to, e)| EdgeExport {
-                from,
-                to,
-                kind: e.kind,
-                call_site: e.call_site,
-                count: e.count,
-            })
+            .map(|(from, to, e)| EdgeExport::new(from, to, e))
             .collect();
         GraphExport {
             files: self.files.iter().map(|p| p.as_path()).collect(),
@@ -480,13 +487,7 @@ impl CodeGraph {
             nodes: self.graph.node_weights().cloned().collect(),
             edges: self
                 .edges()
-                .map(|(from, to, e)| EdgeExport {
-                    from,
-                    to,
-                    kind: e.kind,
-                    call_site: e.call_site,
-                    count: e.count,
-                })
+                .map(|(from, to, e)| EdgeExport::new(from, to, e))
                 .collect(),
         }
     }
@@ -526,6 +527,7 @@ impl CodeGraph {
                         kind: e.kind,
                         call_site: e.call_site,
                         count: e.count,
+                        extra_sites: e.extra_sites,
                     },
                 );
                 g.edge_index.insert(key, eidx);
@@ -553,13 +555,29 @@ pub struct GraphSnapshot {
 }
 
 /// An edge flattened with explicit endpoints (edges alone don't store them).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeExport {
     pub from: NodeId,
     pub to: NodeId,
     pub kind: EdgeKind,
     pub call_site: SourceSpan,
     pub count: u32,
+    /// Absent in snapshots written before multi-site edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_sites: Vec<SourceSpan>,
+}
+
+impl EdgeExport {
+    fn new(from: NodeId, to: NodeId, e: &Edge) -> Self {
+        EdgeExport {
+            from,
+            to,
+            kind: e.kind,
+            call_site: e.call_site,
+            count: e.count,
+            extra_sites: e.extra_sites.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +651,8 @@ mod tests {
         assert_eq!(out[0].1.kind, EdgeKind::MethodCall);
         assert_eq!(out[0].1.count, 2);
         assert_eq!(out[0].1.call_site.start_line, 7);
+        let lines: Vec<u32> = out[0].1.sites().map(|s| s.start_line).collect();
+        assert_eq!(lines, vec![7, 9]);
         let inc: Vec<_> = g.edges_in(b).collect();
         assert_eq!(inc.len(), 1);
         assert_eq!(inc[0].0, a);
@@ -650,9 +670,26 @@ mod tests {
             b,
             Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 1, 0, 1, 1)),
         );
+        g.add_edge(
+            a,
+            b,
+            Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 4, 0, 4, 1)),
+        );
         let g2 = CodeGraph::from_snapshot(g.snapshot());
         assert_eq!(g2.node_count(), 2);
         assert_eq!(g2.edge_count(), 1);
         assert_eq!(g2.node_by_qualified("m::b"), Some(b));
+        let (_, e) = g2.edges_out(a).next().unwrap();
+        assert_eq!(e.count, 2);
+        assert_eq!(e.extra_sites, vec![SourceSpan::new(f, 4, 0, 4, 1)]);
+    }
+
+    #[test]
+    fn snapshots_without_extra_sites_still_load() {
+        let json = r#"{"files":["src/lib.rs"],"nodes":[],"edges":[{"from":0,"to":0,"kind":"direct_call","call_site":{"file":0,"start_line":3,"start_col":0,"end_line":3,"end_col":1},"count":2}]}"#;
+        let snap: GraphSnapshot = serde_json::from_str(json).unwrap();
+        assert!(snap.edges[0].extra_sites.is_empty());
+        let out = serde_json::to_string(&snap).unwrap();
+        assert!(!out.contains("extra_sites"));
     }
 }

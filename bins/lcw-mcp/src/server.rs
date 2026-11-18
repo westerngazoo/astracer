@@ -177,12 +177,28 @@ impl Server {
             }
             "flow" => {
                 let to_q = req_str(args, "to")?;
-                let from_q = args.get("from").and_then(Value::as_str).unwrap_or("main");
-                let from = find_all(g, from_q)?;
                 let to = find_all(g, to_q)?;
                 let max_paths = opt_u64(args, "max_paths").map_or(6, |n| n as usize).max(1);
                 let max_depth = opt_u64(args, "max_depth").map_or(24, |n| n as u32);
                 let snippets = opt_bool(args, "snippets").unwrap_or(false);
+                let Some(from_q) = args.get("from").and_then(Value::as_str) else {
+                    let all = opt_bool(args, "all_entries").unwrap_or(false);
+                    let flows = lcw_query::flows_from_entries(g, &to, max_paths, max_depth, all);
+                    if flows.is_empty() {
+                        return Err(ToolError(json::error(
+                            "no_path",
+                            &json::no_entry_message(to_q, max_depth, "`from`", "`max_depth`"),
+                        )));
+                    }
+                    return Ok(lcw_agent::fit_json(budget, |l| {
+                        if all {
+                            json::entry_flows(g, &flows, snippets, &root, l)
+                        } else {
+                            json::entry_flow(g, &flows[0], snippets, &root, l)
+                        }
+                    }));
+                };
+                let from = find_all(g, from_q)?;
                 let fp = lcw_query::shortest_paths(g, &from, &to, max_paths, max_depth)
                     .ok_or_else(|| {
                         ToolError(json::error(
@@ -415,10 +431,11 @@ fn tool_list() -> Vec<Value> {
         ),
         tool(
             "flow",
-            "Shortest call path(s) from an entry (default `main`) to a target symbol; `snippets: true` adds each hop's code.",
+            "Shortest call path(s) from an entry to a target symbol; `snippets: true` adds each hop's code. Without `from`, every entry point is tried (program mains, then exports, spawned threads, uncalled roots such as handlers/API, then tests): the result names the `source` used and its `entry_kind`, and `test_only: true` when only tests reach the target.",
             json!({
                 "to": { "type": "string", "description": "Target symbol." },
-                "from": { "type": "string", "description": "Start symbol (default `main`)." },
+                "from": { "type": "string", "description": "Start symbol (default: the best entry point that reaches `to`)." },
+                "all_entries": { "type": "boolean", "description": "Without `from`: one shortest path per entry point that reaches `to` (`flows`), best first." },
                 "max_paths": { "type": "integer", "minimum": 1 },
                 "max_depth": { "type": "integer", "minimum": 1 },
                 "snippets": { "type": "boolean" },

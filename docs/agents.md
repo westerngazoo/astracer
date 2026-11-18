@@ -24,7 +24,7 @@ Binaries: `target/release/lcw` and `target/release/lcw-mcp`.
 | Who calls `X`, and on which line? | `lcw callers X` | `callers` |
 | What does `X` call, in order? | `lcw calls X` | `callees` |
 | What can break if I change `X`? | `lcw impact X --depth 3` | `impact` |
-| How does control get from `main` to `X`? | `lcw flow X --from main` | `flow` |
+| How does control get to `X` (from which entry)? | `lcw flow X` / `--from main` | `flow` |
 | Where does the program start? | `lcw entries` | `entries` |
 | How is the code organized? | `lcw outline --depth 1` | `outline` |
 | What is the symbol actually called? | `lcw search name` | `search_symbol` |
@@ -53,9 +53,15 @@ before changing a signature. Read the returned range, not the whole file.
   `... +N more` in text. `--compact` = a 1500-token budget. Both are global
   flags: `lcw --compact explain X --json`.
 - JSON is single-line; add the global `--pretty` to indent it for humans.
-- `lcw flow X --from main --snippets` prints each hop's source under it,
+- `lcw flow X --snippets` prints each hop's source under it,
   numbered and clipped to `--snippet-lines` (default 15); add `--json` to get
   each hop's full source as a `code` field instead.
+- `lcw flow X` without `--from` tries every entry point — program mains, then
+  foreign-ABI exports, spawned threads, uncalled roots (framework handlers,
+  public API), then tests — and prints the one it used (JSON: `source`,
+  `entry_kind`, and `test_only: true` when only tests reach `X`).
+  `--all-entries` (MCP: `"all_entries": true`) gives one shortest path per
+  entry. When nothing reaches `X` it says so and points at `lcw impact X`.
 - External / unresolved callees (`Ok`, std methods, other crates) are left
   out of `explain` and only counted in `callees_external`; `--external`
   (MCP: `"external": true`) lists them.

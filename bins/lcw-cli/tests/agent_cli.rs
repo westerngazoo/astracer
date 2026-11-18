@@ -143,6 +143,68 @@ fn flow_snippets_are_text_unless_json() {
 }
 
 #[test]
+fn flow_without_from_tries_every_entry_and_says_which() {
+    let f = Fixture::new("flow-auto");
+    // Two binaries' mains, only one of which reaches `hub`; a function only a
+    // test reaches; and a cycle nothing reaches.
+    std::fs::write(
+        f.repo.join("src/lib.rs"),
+        "pub fn inc(x: i32) -> i32 {\n    hub(x) + 1\n}\n\nfn hub(x: i32) -> i32 {\n    x\n}\n\n\
+         pub mod tool {\n    pub fn main() {\n        helper();\n    }\n    fn helper() {}\n}\n\n\
+         pub mod app {\n    pub fn main() {\n        crate::inc(1);\n    }\n}\n\n\
+         fn only_tested() {}\n\n\
+         fn ping() {\n    pong();\n}\n\nfn pong() {\n    ping();\n}\n\n\
+         #[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        super::only_tested();\n    }\n}\n",
+    )
+    .unwrap();
+
+    let o = f.lcw(&["flow", "hub"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = stdout(&o);
+    assert!(text.starts_with("entry: repo::app::main"), "{text}");
+    assert!(
+        text.contains("program entry; picked automatically"),
+        "{text}"
+    );
+    assert!(
+        text.contains("flow: repo::app::main  →  repo::hub"),
+        "{text}"
+    );
+
+    let (v, code) = f.json(&["flow", "hub", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(v["source"], "repo::app::main");
+    assert_eq!(v["entry_kind"], "program");
+    assert!(v.get("test_only").is_none());
+
+    let o = f.lcw(&["flow", "only_tested"]);
+    assert!(o.status.success());
+    let text = stdout(&o);
+    assert!(text.contains("TEST-ONLY entry"), "{text}");
+    assert!(text.contains("test-only: no program main"), "{text}");
+    assert!(text.contains("repo::tests::t"), "{text}");
+    let (v, _) = f.json(&["flow", "only_tested", "--json"]);
+    assert_eq!(v["test_only"], true);
+    assert_eq!(v["entry_kind"], "test");
+
+    let (v, _) = f.json(&["flow", "hub", "--all-entries", "--json"]);
+    let sources: Vec<&str> = v["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources[0], "repo::app::main");
+    assert!(!sources.contains(&"repo::tool::main"), "{sources:?}");
+
+    let o = f.lcw(&["flow", "ping"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("no entry point"), "{err}");
+    assert!(err.contains("lcw impact ping"), "{err}");
+}
+
+#[test]
 fn impact_callers_and_budget() {
     let f = Fixture::new("impact");
     let (v, _) = f.json(&["impact", "hub", "--json"]);

@@ -5,7 +5,7 @@
 //! with the native viewer and the desktop app so the three can never disagree.
 
 use lcw_core::{CodeGraph, Node, NodeId};
-use lcw_query::FlowPaths;
+use lcw_query::{EntryFlow, EntryTier, FlowPaths};
 
 /// `file:line` for a node (best-effort; `<external>` for external nodes).
 pub fn location(graph: &CodeGraph, n: &Node) -> String {
@@ -55,7 +55,98 @@ pub fn format_text_with_snippets(
     format_hops(graph, fp, Some((code, max_lines)))
 }
 
-type SnippetSource<'a> = (&'a dyn Fn(NodeId) -> Option<HopCode>, usize);
+/// Source of every hop's code and the per-hop line limit, for `--snippets`.
+pub type SnippetSource<'a> = (&'a dyn Fn(NodeId) -> Option<HopCode>, usize);
+
+/// Render a flow whose entry was chosen automatically: which entry, why, and
+/// the path(s). With `all`, one block per entry that reaches the target.
+pub fn format_entry_flows(
+    graph: &CodeGraph,
+    flows: &[EntryFlow],
+    all: bool,
+    snippets: Option<SnippetSource>,
+) -> String {
+    let Some(best) = flows.first() else {
+        return String::new();
+    };
+    let target = &graph.node(best.flow.target).qualified_name;
+    let mut out = String::new();
+    if all {
+        out.push_str(&format!(
+            "{target} is reached from {} entry point(s): {}\n",
+            flows.len(),
+            tier_counts(flows)
+        ));
+        if let Some(note) = fallback_note(best.tier, target) {
+            out.push_str(&format!("  {note}\n"));
+        }
+        for (i, ef) in flows.iter().enumerate() {
+            out.push_str(&format!(
+                "\n── [{}/{}] {}  {}  ({} hop(s))\n",
+                i + 1,
+                flows.len(),
+                tier_label(ef.tier),
+                graph.node(ef.entry()).qualified_name,
+                ef.flow.hops()
+            ));
+            out.push_str(&format_hops(graph, &ef.flow, snippets));
+        }
+        return out;
+    }
+    let entry = graph.node(best.entry());
+    out.push_str(&format!(
+        "entry: {}   [{}]\n  {}; picked automatically (--from overrides, --all-entries lists every entry)\n",
+        entry.qualified_name,
+        location(graph, entry),
+        tier_label(best.tier)
+    ));
+    if let Some(note) = fallback_note(best.tier, target) {
+        out.push_str(&format!("  {note}\n"));
+    }
+    out.push('\n');
+    out.push_str(&format_hops(graph, &best.flow, snippets));
+    out
+}
+
+fn tier_label(tier: EntryTier) -> &'static str {
+    match tier {
+        EntryTier::Program => "program entry",
+        EntryTier::Exported => "exported entry (foreign ABI)",
+        EntryTier::Spawned => "thread/task root",
+        EntryTier::Root => "uncalled root (a registered handler, callback or API)",
+        EntryTier::Test => "TEST-ONLY entry",
+    }
+}
+
+/// Why the chosen entry is not a program `main`, when it is not.
+fn fallback_note(tier: EntryTier, target: &str) -> Option<String> {
+    match tier {
+        EntryTier::Program => None,
+        EntryTier::Test => Some(format!(
+            "test-only: no program main, export, thread or handler reaches {target}; \
+             only tests do, so this path runs under the test harness"
+        )),
+        _ => Some(format!(
+            "no program main reaches {target}; this is the best entry that does"
+        )),
+    }
+}
+
+/// `2 program · 1 root · 3 test`, in tier order.
+fn tier_counts(flows: &[EntryFlow]) -> String {
+    let mut counts: Vec<(EntryTier, usize)> = Vec::new();
+    for f in flows {
+        match counts.iter_mut().find(|(t, _)| *t == f.tier) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((f.tier, 1)),
+        }
+    }
+    counts
+        .iter()
+        .map(|(t, n)| format!("{n} {}", t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
 
 fn format_hops(graph: &CodeGraph, fp: &FlowPaths, snippets: Option<SnippetSource>) -> String {
     let src = graph.node(fp.source);

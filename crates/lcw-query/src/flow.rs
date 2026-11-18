@@ -10,6 +10,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use lcw_core::{CodeGraph, NodeId};
+use serde::{Deserialize, Serialize};
+
+use crate::entries::{entry_points, EntryKind};
+use crate::roots::{run_roots, RootKind};
 
 /// A traced set of shortest paths from `source` to `target`.
 #[derive(Debug, Clone)]
@@ -93,7 +97,6 @@ pub fn shortest_paths(
     }
 
     let target = reached?;
-    let source = sources.iter().copied().find(|s| dist.get(s) == Some(&0))?;
 
     let mut paths: Vec<Vec<NodeId>> = Vec::new();
     let mut stack: Vec<NodeId> = Vec::new();
@@ -105,9 +108,9 @@ pub fn shortest_paths(
         &mut paths,
         max_paths.max(1),
     );
-    if paths.is_empty() {
-        return None;
-    }
+    // With several sources (every `main`), the source is the one the
+    // shortest path actually starts from, not whichever was listed first.
+    let source = *paths.first()?.first()?;
     Some(FlowPaths {
         source,
         target,
@@ -179,6 +182,153 @@ pub fn connection(graph: &CodeGraph, source: NodeId, target: NodeId, max_depth: 
         return Connection::Upstream(p);
     }
     Connection::Unconnected
+}
+
+/// The kind of entry a flow starts from when none was named. Ordered by
+/// preference: a path from the program's own entry explains the most, a path
+/// that only a test takes explains the least.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryTier {
+    /// A program entry ([`RootKind::Program`]): `main`, `_start`.
+    Program,
+    /// Exported across a foreign ABI and uncalled in-graph.
+    Exported,
+    /// Started on a thread or task by non-test code.
+    Spawned,
+    /// Uncalled in the analyzed code, public or not: a handler a framework
+    /// registers (an HTTP route, a command), a callback, or API surface.
+    Root,
+    /// A test, or a thread only tests start.
+    Test,
+}
+
+impl EntryTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryTier::Program => "program",
+            EntryTier::Exported => "exported",
+            EntryTier::Spawned => "spawned",
+            EntryTier::Root => "root",
+            EntryTier::Test => "test",
+        }
+    }
+
+    pub fn is_test(self) -> bool {
+        self == EntryTier::Test
+    }
+}
+
+/// A flow traced from an automatically chosen entry; `flow.source` is it.
+#[derive(Debug, Clone)]
+pub struct EntryFlow {
+    pub tier: EntryTier,
+    pub flow: FlowPaths,
+}
+
+impl EntryFlow {
+    pub fn entry(&self) -> NodeId {
+        self.flow.source
+    }
+}
+
+/// Every place a flow may start, each once with its best tier: the roots of
+/// execution ([`run_roots`]) first, then uncalled roots and tests.
+pub fn entry_tiers(graph: &CodeGraph) -> Vec<(NodeId, EntryTier)> {
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut out: Vec<(NodeId, EntryTier)> = Vec::new();
+    for r in run_roots(graph) {
+        let tier = match r.kind {
+            RootKind::Program => EntryTier::Program,
+            RootKind::Exported => EntryTier::Exported,
+            RootKind::Spawned if r.test_only => EntryTier::Test,
+            RootKind::Spawned => EntryTier::Spawned,
+        };
+        if seen.insert(r.node) {
+            out.push((r.node, tier));
+        }
+    }
+    for e in entry_points(graph) {
+        let tier = match e.kind {
+            EntryKind::PublicRoot | EntryKind::Root => EntryTier::Root,
+            EntryKind::Test => EntryTier::Test,
+            EntryKind::Main | EntryKind::Exported => continue,
+        };
+        if seen.insert(e.id) {
+            out.push((e.id, tier));
+        }
+    }
+    out
+}
+
+/// Trace a flow to `targets` without being told where it starts.
+///
+/// "From `main`" is ambiguous in a workspace with several binaries, and wrong
+/// when the target runs only under a handler a framework registers or only
+/// under tests. So every entry is tried: the best [`EntryTier`] that reaches a
+/// target wins, and within it the entry with the fewest hops. The result is
+/// that one entry's flow (up to `max_paths` equally short paths), or with
+/// `all` one shortest path per entry that reaches a target, best first.
+/// Empty when no entry reaches any target within `max_depth` hops.
+///
+/// One backward search from the targets ranks every entry at once, so the
+/// cost is a single `O(n + e)` pass plus a forward search per reported entry.
+pub fn flows_from_entries(
+    graph: &CodeGraph,
+    targets: &[NodeId],
+    max_paths: usize,
+    max_depth: u32,
+    all: bool,
+) -> Vec<EntryFlow> {
+    let to_target = distances_to(graph, targets, max_depth);
+    let mut reaching: Vec<(EntryTier, u32, NodeId)> = entry_tiers(graph)
+        .into_iter()
+        .filter_map(|(id, tier)| to_target.get(&id).map(|&d| (tier, d, id)))
+        .collect();
+    reaching.sort_by(|a, b| {
+        (a.0, a.1).cmp(&(b.0, b.1)).then_with(|| {
+            graph
+                .node(a.2)
+                .qualified_name
+                .cmp(&graph.node(b.2).qualified_name)
+        })
+    });
+    if !all {
+        reaching.truncate(1);
+    }
+    let per_entry = if all { 1 } else { max_paths.max(1) };
+    reaching
+        .into_iter()
+        .filter_map(|(tier, _, id)| {
+            shortest_paths(graph, &[id], targets, per_entry, max_depth)
+                .map(|flow| EntryFlow { tier, flow })
+        })
+        .collect()
+}
+
+/// Hops from every node that reaches a target to the nearest one, following
+/// calls backward; the mirror of the forward search in [`shortest_paths`].
+fn distances_to(graph: &CodeGraph, targets: &[NodeId], max_depth: u32) -> HashMap<NodeId, u32> {
+    let mut dist: HashMap<NodeId, u32> = HashMap::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    for &t in targets {
+        if dist.insert(t, 0).is_none() {
+            queue.push_back(t);
+        }
+    }
+    while let Some(u) = queue.pop_front() {
+        let du = dist[&u];
+        if du >= max_depth {
+            continue;
+        }
+        for v in graph.neighbors_in(u) {
+            if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(v) {
+                e.insert(du + 1);
+                queue.push_back(v);
+            }
+        }
+    }
+    dist
 }
 
 /// Walk predecessors backward from `node` to every source, emitting each
@@ -319,6 +469,141 @@ mod tests {
         // Too shallow a search misses a 3-hop path.
         assert!(shortest_path(&g, main, next, 2).is_none());
         assert_eq!(shortest_path(&g, main, main, 16), Some(vec![main]));
+    }
+
+    /// A workspace with several binaries, shaped like the one that broke
+    /// `flow` without `--from`:
+    ///
+    /// ```text
+    /// tool::main  ──▶ tool::helper                       (never reaches lib)
+    /// cli::main   ──▶ cli::run ──▶ lib::load ──▶ lib::parse ──▶ lib::expect
+    /// bench::main ──▶ lib::parse ──▶ lib::expect
+    /// srv::create ──▶ lib::expect      srv::create ──▶ lib::validate
+    /// tests::t    ──▶ lib::expect      tests::t    ──▶ lib::fixture
+    /// lib::a ⇄ lib::b                                    (nothing reaches them)
+    /// ```
+    fn workspace() -> CodeGraph {
+        let mut g = CodeGraph::new();
+        let tool = plain(&mut g, "tool::main", "tool/src/main.rs", 1);
+        let helper = plain(&mut g, "tool::helper", "tool/src/main.rs", 9);
+        let cli = plain(&mut g, "cli::main", "cli/src/main.rs", 1);
+        let run = plain(&mut g, "cli::run", "cli/src/main.rs", 9);
+        let bench = plain(&mut g, "bench::main", "benches/b.rs", 1);
+        let load = plain(&mut g, "lib::load", "lib/src/lib.rs", 1);
+        let parse = plain(&mut g, "lib::parse", "lib/src/lib.rs", 9);
+        let expect = plain(&mut g, "lib::expect", "lib/src/lib.rs", 19);
+        let validate = plain(&mut g, "lib::validate", "lib/src/lib.rs", 29);
+        let fixture = plain(&mut g, "lib::fixture", "lib/src/lib.rs", 39);
+        let a = plain(&mut g, "lib::a", "lib/src/lib.rs", 49);
+        let b = plain(&mut g, "lib::b", "lib/src/lib.rs", 59);
+        let create = crate::fixtures::def(
+            &mut g,
+            "srv::create",
+            "srv/src/main.rs",
+            20,
+            lcw_core::NodeFlags::default(),
+        );
+        let test = crate::fixtures::def(
+            &mut g,
+            "tests::t",
+            "lib/tests/t.rs",
+            1,
+            lcw_core::NodeFlags {
+                is_test: true,
+                ..Default::default()
+            },
+        );
+        let edges = [
+            (tool, helper),
+            (cli, run),
+            (run, load),
+            (load, parse),
+            (parse, expect),
+            (bench, parse),
+            (create, expect),
+            (create, validate),
+            (test, expect),
+            (test, fixture),
+            (a, b),
+            (b, a),
+        ];
+        for (i, (from, to)) in edges.into_iter().enumerate() {
+            call(&mut g, from, to, EdgeKind::DirectCall, i as u32 + 2);
+        }
+        g
+    }
+
+    #[test]
+    fn several_sources_report_the_one_the_path_starts_from() {
+        let g = workspace();
+        let (tool, bench) = (id(&g, "tool::main"), id(&g, "bench::main"));
+        let fp = shortest_paths(&g, &[tool, bench], &[id(&g, "lib::expect")], 4, 16).unwrap();
+        assert_eq!(fp.source, bench, "tool::main reaches nothing in lib");
+        assert_eq!(fp.paths[0][0], bench);
+    }
+
+    #[test]
+    fn without_a_start_a_program_entry_wins_over_a_shorter_root() {
+        let g = workspace();
+        let expect = id(&g, "lib::expect");
+        let flows = flows_from_entries(&g, &[expect], 4, 16, false);
+        assert_eq!(flows.len(), 1);
+        // srv::create is 1 hop away, but a binary's main explains more; of
+        // the mains, bench is the nearest.
+        assert_eq!(flows[0].tier, EntryTier::Program);
+        assert_eq!(flows[0].entry(), id(&g, "bench::main"));
+        assert_eq!(flows[0].flow.hops(), 2);
+    }
+
+    #[test]
+    fn all_entries_lists_one_path_per_entry_best_tier_first() {
+        let g = workspace();
+        let flows = flows_from_entries(&g, &[id(&g, "lib::expect")], 4, 16, true);
+        let got: Vec<(&str, EntryTier, usize)> = flows
+            .iter()
+            .map(|f| {
+                (
+                    g.node(f.entry()).qualified_name.as_str(),
+                    f.tier,
+                    f.flow.hops(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("bench::main", EntryTier::Program, 2),
+                ("cli::main", EntryTier::Program, 4),
+                ("srv::create", EntryTier::Root, 1),
+                ("tests::t", EntryTier::Test, 1),
+            ]
+        );
+        assert!(flows.iter().all(|f| f.flow.paths.len() == 1));
+    }
+
+    #[test]
+    fn a_target_no_main_reaches_falls_back_to_its_root_then_to_tests() {
+        let g = workspace();
+        let only_root = flows_from_entries(&g, &[id(&g, "lib::validate")], 4, 16, false);
+        assert_eq!(only_root[0].tier, EntryTier::Root);
+        assert_eq!(only_root[0].entry(), id(&g, "srv::create"));
+
+        let only_test = flows_from_entries(&g, &[id(&g, "lib::fixture")], 4, 16, false);
+        assert_eq!(only_test[0].tier, EntryTier::Test);
+        assert!(only_test[0].tier.is_test());
+        assert_eq!(only_test[0].entry(), id(&g, "tests::t"));
+    }
+
+    #[test]
+    fn nothing_is_returned_when_no_entry_reaches_the_target() {
+        let g = workspace();
+        // A cycle with no caller from outside: neither node is an entry.
+        assert!(flows_from_entries(&g, &[id(&g, "lib::a")], 4, 16, true).is_empty());
+        // The depth bound applies: every entry is at least one hop away.
+        assert!(flows_from_entries(&g, &[id(&g, "lib::expect")], 4, 0, true).is_empty());
+        let near = flows_from_entries(&g, &[id(&g, "lib::expect")], 4, 1, true);
+        assert!(near.iter().all(|f| f.tier != EntryTier::Program));
+        assert!(flows_from_entries(&g, &[], 4, 16, true).is_empty());
     }
 
     #[test]

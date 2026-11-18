@@ -379,8 +379,16 @@ struct FlowArgs {
     to: String,
 
     /// Entry point where the flow starts (substring of a qualified name).
-    #[arg(long, default_value = "main")]
-    from: String,
+    /// Omitted: every entry point is tried — program mains first, then
+    /// exports, spawned threads, uncalled roots (handlers, API) and tests —
+    /// and the one used is printed.
+    #[arg(long)]
+    from: Option<String>,
+
+    /// Without --from: one shortest path per entry point that reaches the
+    /// target, instead of only the best one.
+    #[arg(long, conflicts_with = "from")]
+    all_entries: bool,
 
     #[command(flatten)]
     repo: RepoArgs,
@@ -1036,46 +1044,132 @@ fn run_search(args: SearchArgs, log_override: Option<&str>, out: Out) -> Result<
     Ok(())
 }
 
+/// Print flows whose entry was chosen automatically, as JSON or text.
+#[allow(clippy::too_many_arguments)]
+fn print_entry_flows(
+    g: &CodeGraph,
+    flows: &[lcw_query::EntryFlow],
+    all: bool,
+    snippets: Option<flow::SnippetSource>,
+    root: &str,
+    json_snippets: bool,
+    json: bool,
+    out: Out,
+) -> Result<()> {
+    if json {
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            if all {
+                aj::entry_flows(g, flows, json_snippets, root, l)
+            } else {
+                aj::entry_flow(g, &flows[0], json_snippets, root, l)
+            }
+        });
+        return out.print_json(&v);
+    }
+    let start = if all {
+        flows.len()
+    } else {
+        flows[0].flow.paths.len()
+    };
+    let text = lcw_agent::fit_text(out.budget, start, |l| {
+        if all {
+            let mut text =
+                flow::format_entry_flows(g, &flows[..l.min(flows.len())], true, snippets);
+            if l < flows.len() {
+                text.push_str(&format!(
+                    "\n… +{} more entry point(s) cut by --budget\n",
+                    flows.len() - l
+                ));
+            }
+            text
+        } else {
+            let mut cut = flows[0].clone();
+            cut.flow.paths.truncate(l);
+            flow::format_entry_flows(g, std::slice::from_ref(&cut), false, snippets)
+        }
+    });
+    print!("{text}");
+    Ok(())
+}
+
 fn run_flow(args: FlowArgs, log_override: Option<&str>, out: Out) -> Result<()> {
     let repo = load_repo(&args.repo, log_override)?;
     let g = &repo.graph;
     let json = args.json;
 
-    let from = find_all(g, &args.from, json, out)?;
     let to = find_all(g, &args.to, json, out)?;
-
-    let Some(fp) = lcw_query::shortest_paths(g, &from, &to, args.max_paths.max(1), args.max_depth)
-    else {
-        anyhow::bail!(
-            "no call path from {:?} to {:?} (try a different entry, or raise --max-depth)",
-            args.from,
-            args.to
-        );
-    };
-
     let root = lcw_agent::repo_dir(&repo.root);
     let root = root.to_string_lossy();
-    if json {
-        let v = lcw_agent::fit_json(out.budget, |l| aj::flow(g, &fp, args.snippets, &root, l));
-        out.print_json(&v)?;
-    } else {
-        let code = |id: NodeId| {
-            let s = lcw_query::span(g, id)?;
-            Some((s.start_line, aj::span_code(&root, &s)?))
-        };
-        print!(
-            "{}",
-            lcw_agent::fit_text(out.budget, fp.paths.len(), |l| {
-                let mut cut = fp.clone();
-                cut.paths.truncate(l);
-                if args.snippets {
-                    flow::format_text_with_snippets(g, &cut, &code, args.snippet_lines)
-                } else {
-                    flow::format_text(g, &cut)
-                }
-            })
-        );
-    }
+    let code = |id: NodeId| {
+        let s = lcw_query::span(g, id)?;
+        Some((s.start_line, aj::span_code(&root, &s)?))
+    };
+    let snippets: Option<flow::SnippetSource> = args.snippets.then_some((
+        &code as &dyn Fn(NodeId) -> Option<flow::HopCode>,
+        args.snippet_lines,
+    ));
+
+    let fp = match args.from.as_deref() {
+        Some(from_q) => {
+            let from = find_all(g, from_q, json, out)?;
+            let Some(fp) =
+                lcw_query::shortest_paths(g, &from, &to, args.max_paths.max(1), args.max_depth)
+            else {
+                anyhow::bail!(
+                    "no call path from {from_q:?} to {:?} (try a different --from, drop it to \
+                     try every entry point, or raise --max-depth; `lcw impact {}` lists its callers)",
+                    args.to,
+                    args.to
+                );
+            };
+            if json {
+                let v =
+                    lcw_agent::fit_json(out.budget, |l| aj::flow(g, &fp, args.snippets, &root, l));
+                out.print_json(&v)?;
+            } else {
+                print!(
+                    "{}",
+                    lcw_agent::fit_text(out.budget, fp.paths.len(), |l| {
+                        let mut cut = fp.clone();
+                        cut.paths.truncate(l);
+                        match snippets {
+                            Some((code, n)) => flow::format_text_with_snippets(g, &cut, code, n),
+                            None => flow::format_text(g, &cut),
+                        }
+                    })
+                );
+            }
+            fp
+        }
+        None => {
+            let flows = lcw_query::flows_from_entries(
+                g,
+                &to,
+                args.max_paths,
+                args.max_depth,
+                args.all_entries,
+            );
+            if flows.is_empty() {
+                anyhow::bail!(aj::no_entry_message(
+                    &args.to,
+                    args.max_depth,
+                    "--from",
+                    "--max-depth"
+                ));
+            }
+            print_entry_flows(
+                g,
+                &flows,
+                args.all_entries,
+                snippets,
+                &root,
+                args.snippets,
+                json,
+                out,
+            )?;
+            flows[0].flow.clone()
+        }
+    };
 
     if let Some(out) = args.output.as_ref() {
         #[cfg(feature = "viewer")]
@@ -1089,7 +1183,7 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>, out: Out) -> Result<()> 
         }
         #[cfg(not(feature = "viewer"))]
         {
-            let _ = (out, args.width, args.height);
+            let _ = (out, &fp, args.width, args.height);
             anyhow::bail!(
                 "--output needs the viewer build: cargo build -p lcw-cli --features viewer"
             );

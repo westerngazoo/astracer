@@ -48,6 +48,7 @@ fn initialize_list_and_call_tools_over_stdio() {
         call(5, "impact", json!({ "repo": repo_s, "symbol": "helper" })),
         call(6, "explain", json!({ "repo": repo_s, "symbol": "helpr" })),
         json!({ "jsonrpc": "2.0", "id": 7, "method": "no/such" }),
+        call(8, "flow", json!({ "repo": repo_s, "to": "helper" })),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -63,7 +64,7 @@ fn initialize_list_and_call_tools_over_stdio() {
         .collect();
     assert!(child.wait().unwrap().success());
     // The notification gets no reply.
-    assert_eq!(replies.len(), 7, "{replies:#?}");
+    assert_eq!(replies.len(), 8, "{replies:#?}");
     let by_id = |id: u64| replies.iter().find(|r| r["id"] == id).unwrap();
     let tool_json = |id: u64| -> (Value, bool) {
         let r = &by_id(id)["result"];
@@ -135,6 +136,16 @@ fn initialize_list_and_call_tools_over_stdio() {
         .ends_with("helper"));
 
     assert_eq!(by_id(7)["error"]["code"], -32601);
+
+    // No `main` and no `from`: the uncalled public `twice` is the entry.
+    let (flow, err) = tool_json(8);
+    assert!(!err, "{flow}");
+    assert!(
+        flow["source"].as_str().unwrap().ends_with("twice"),
+        "{flow}"
+    );
+    assert_eq!(flow["entry_kind"], "root");
+    assert_eq!(flow["hops"], 2);
 
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }

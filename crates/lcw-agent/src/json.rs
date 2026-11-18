@@ -9,8 +9,8 @@
 
 use lcw_core::{CodeGraph, NodeId, NodeKind, SourceSpan};
 use lcw_query::{
-    edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryKind, EntryPoint, FlowPaths,
-    Impact, Lookup, Outline, OutlineNode, SymbolSpan,
+    edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryFlow, EntryKind, EntryPoint,
+    FlowPaths, Impact, Lookup, Outline, OutlineNode, SymbolSpan,
 };
 use serde_json::{json, Map, Value};
 
@@ -286,6 +286,91 @@ pub fn flow(
     repo_root: &str,
     limit: usize,
 ) -> Value {
+    with_schema(Value::Object(flow_fields(
+        graph, fp, snippets, repo_root, limit,
+    )))
+}
+
+/// `flow` without `from`: [`flow`] for the entry that was chosen, plus its
+/// `entry_kind` (a [`lcw_query::EntryTier`] name) and `test_only` when only tests reach
+/// the target.
+pub fn entry_flow(
+    graph: &CodeGraph,
+    ef: &EntryFlow,
+    snippets: bool,
+    repo_root: &str,
+    limit: usize,
+) -> Value {
+    with_schema(Value::Object(entry_flow_fields(
+        graph, ef, snippets, repo_root, limit,
+    )))
+}
+
+/// `flow` with `all_entries`: one shortest path per entry that reaches the
+/// target, best entry first; `limit` caps the number of entries.
+pub fn entry_flows(
+    graph: &CodeGraph,
+    flows: &[EntryFlow],
+    snippets: bool,
+    repo_root: &str,
+    limit: usize,
+) -> Value {
+    let mut o = Map::new();
+    if let Some(f) = flows.first() {
+        o.insert(
+            "target".into(),
+            json!(graph.node(f.flow.target).qualified_name),
+        );
+    }
+    if !flows.is_empty() && flows.iter().all(|f| f.tier.is_test()) {
+        o.insert("test_only".into(), json!(true));
+    }
+    let items = flows
+        .iter()
+        .take(limit)
+        .map(|f| Value::Object(entry_flow_fields(graph, f, snippets, repo_root, 1)))
+        .collect();
+    put_list(&mut o, "flows", items, limit);
+    if flows.len() > limit {
+        o.insert("flows_more".into(), json!(flows.len() - limit));
+    }
+    with_schema(Value::Object(o))
+}
+
+/// The answer when no entry point reaches `target`, shared by the CLI and
+/// MCP so both say the same thing; `from` and `depth` name the caller's own
+/// spelling of those options (`--from` / `from`).
+pub fn no_entry_message(target: &str, max_depth: u32, from: &str, depth: &str) -> String {
+    format!(
+        "no entry point (program main, export, spawned thread, uncalled root or test) \
+         reaches {target:?} within {max_depth} hops. It may run only through a dynamic call \
+         (trait object, closure, fn pointer) or be dead code: try `lcw impact {target}` to see \
+         who calls it, set {from} to start somewhere specific, or raise {depth}"
+    )
+}
+
+fn entry_flow_fields(
+    graph: &CodeGraph,
+    ef: &EntryFlow,
+    snippets: bool,
+    repo_root: &str,
+    limit: usize,
+) -> Map<String, Value> {
+    let mut o = flow_fields(graph, &ef.flow, snippets, repo_root, limit);
+    o.insert("entry_kind".into(), json!(ef.tier.as_str()));
+    if ef.tier.is_test() {
+        o.insert("test_only".into(), json!(true));
+    }
+    o
+}
+
+fn flow_fields(
+    graph: &CodeGraph,
+    fp: &FlowPaths,
+    snippets: bool,
+    repo_root: &str,
+    limit: usize,
+) -> Map<String, Value> {
     let hop = |id: NodeId| -> Value {
         let mut v = symbol(graph, id);
         if snippets {
@@ -305,7 +390,7 @@ pub fn flow(
     o.insert("target".into(), json!(graph.node(fp.target).qualified_name));
     o.insert("hops".into(), json!(fp.hops()));
     put_list(&mut o, "paths", paths, limit);
-    with_schema(Value::Object(o))
+    o
 }
 
 /// Outline rendering knobs.

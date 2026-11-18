@@ -40,7 +40,10 @@ pub use card::{
     call_sites, edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard,
 };
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
-pub use flow::{connection, shortest_path, shortest_paths, Connection, FlowPaths};
+pub use flow::{
+    connection, entry_tiers, flows_from_entries, shortest_path, shortest_paths, Connection,
+    EntryFlow, EntryTier, FlowPaths,
+};
 pub use groups::{crate_groups, Group, Groups, EXTERNAL_GROUP};
 pub use impact::{impact, Impact, ImpactCaller};
 pub use outline::{outline, Outline, OutlineKind, OutlineNode};

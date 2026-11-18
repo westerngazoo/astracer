@@ -6,7 +6,7 @@
 //!
 //! * [`load`] — resolve config, then serve the graph from a fresh
 //!   `graph.sqlite` (no parse) or re-analyze when sources changed; paths are
-//!   rewritten once for display (relative to the caller's cwd, or absolute).
+//!   rewritten once for display (relative to the repo root, or absolute).
 //! * [`json`] — the versioned (`"schema": 1`) JSON views of every query.
 //! * [`fit_json`] / [`fit_text`] — token budgets: shrink list limits until the
 //!   output fits, marking cut lists with `<list>_more: N` / `+N more`.
@@ -34,9 +34,11 @@ pub const MAX_CANDIDATES: usize = 8;
 pub enum PathStyle {
     /// Absolute paths (the MCP server: its cwd is unrelated to the repo).
     Absolute,
-    /// Relative to this directory when under it, absolute otherwise (the CLI:
-    /// short paths that still open from the shell the agent is in).
+    /// Relative to this directory when under it, absolute otherwise.
     RelativeTo(PathBuf),
+    /// Relative to the analyzed repository root, whatever the cwd (the CLI:
+    /// short, stable paths that match the repo's own layout).
+    RepoRelative,
 }
 
 /// Where and how to load a repository.
@@ -117,13 +119,27 @@ pub fn load(path: &Path, opts: &LoadOptions) -> Result<Repo> {
             GraphSource::Analyzed(lcw_engine::Staleness::Missing),
         )
     };
-    let graph = display_paths(report.graph, &opts.paths);
+    let style = match &opts.paths {
+        PathStyle::RepoRelative => PathStyle::RelativeTo(repo_dir(&root)),
+        other => other.clone(),
+    };
+    let graph = display_paths(report.graph, &style);
     Ok(Repo {
         root,
         config,
         graph,
         source,
     })
+}
+
+/// The directory a repo path stands for (the parent when it names a file).
+pub fn repo_dir(root: &Path) -> PathBuf {
+    if root.is_file() {
+        root.parent()
+            .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
+    } else {
+        root.to_path_buf()
+    }
 }
 
 /// Rewrite the graph's file table for display (node ids are preserved).

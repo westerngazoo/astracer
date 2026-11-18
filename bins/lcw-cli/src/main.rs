@@ -266,6 +266,11 @@ struct RepoArgs {
     /// written after the newest source file changed) is loaded instead.
     #[arg(long)]
     no_cache: bool,
+
+    /// Print absolute file paths. By default paths are relative to the
+    /// analyzed repository root, whatever the current directory.
+    #[arg(long)]
+    absolute_paths: bool,
 }
 
 #[derive(Debug, Args)]
@@ -621,17 +626,20 @@ fn analyze_path(
 
 /// Load the graph for a navigation command: a fresh cached `graph.sqlite`
 /// when there is one (unless `--no-cache`), else a full analysis. Paths are
-/// shown relative to the current directory. stdout stays untouched; a stale
-/// cache gets one note on stderr.
+/// shown relative to the repository root (absolute with `--absolute-paths`).
+/// stdout stays untouched; a stale cache gets one note on stderr.
 fn load_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<Repo> {
     lcw_telemetry::init(log_override.unwrap_or("warn"));
-    let cwd = std::env::current_dir().context("reading the current directory")?;
     let opts = LoadOptions {
         config: repo.config.clone(),
         semantic: repo.semantic,
         language: repo.language,
         use_cache: !repo.no_cache,
-        paths: PathStyle::RelativeTo(cwd),
+        paths: if repo.absolute_paths {
+            PathStyle::Absolute
+        } else {
+            PathStyle::RepoRelative
+        },
     };
     let loaded = lcw_agent::load(&repo.path, &opts)?;
     if let GraphSource::Analyzed(reason) = &loaded.source {
@@ -986,9 +994,12 @@ fn run_span(args: SpanArgs, log_override: Option<&str>, out: Out) -> Result<()> 
     let Some(s) = lcw_query::span(g, id) else {
         anyhow::bail!("{} has no source location", g.node(id).qualified_name);
     };
-    // Displayed paths are relative to the current directory, so they read as-is.
     let code = if args.code {
-        Some(aj::span_code("", &s).with_context(|| format!("reading {}", s.file))?)
+        let root = lcw_agent::repo_dir(&repo.root);
+        Some(
+            aj::span_code(&root.to_string_lossy(), &s)
+                .with_context(|| format!("reading {}", s.file))?,
+        )
     } else {
         None
     };
@@ -1038,7 +1049,9 @@ fn run_flow(args: FlowArgs, log_override: Option<&str>, out: Out) -> Result<()> 
     };
 
     if json {
-        let v = lcw_agent::fit_json(out.budget, |l| aj::flow(g, &fp, args.snippets, "", l));
+        let root = lcw_agent::repo_dir(&repo.root);
+        let root = root.to_string_lossy();
+        let v = lcw_agent::fit_json(out.budget, |l| aj::flow(g, &fp, args.snippets, &root, l));
         out.print_json(&v)?;
     } else {
         print!(

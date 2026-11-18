@@ -35,9 +35,13 @@ impl Fixture {
     }
 
     fn lcw(&self, args: &[&str]) -> Output {
+        self.lcw_in(&self.repo, args)
+    }
+
+    fn lcw_in(&self, cwd: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_lcw"))
             .args(args)
-            .current_dir(&self.repo)
+            .current_dir(cwd)
             .env("LIVEWALK_CACHE_HOME", &self.cache)
             .output()
             .expect("run lcw")
@@ -78,6 +82,45 @@ fn span_prints_exact_range_and_code() {
     assert_eq!(code, 0);
     assert_eq!(v["schema"], 1);
     assert_eq!(v["span"], "src/lib.rs:6-8");
+}
+
+#[test]
+fn paths_are_repo_relative_from_any_cwd() {
+    let f = Fixture::new("paths");
+    let repo = f.repo.to_string_lossy().into_owned();
+    let elsewhere = f.base.clone();
+
+    let o = f.lcw_in(&elsewhere, &["span", "inc", "--path", &repo]);
+    assert!(o.status.success());
+    assert_eq!(stdout(&o), "src/lib.rs:1-4\n");
+
+    let o = f.lcw_in(&elsewhere, &["span", "inc", "--code", "--path", &repo]);
+    assert!(stdout(&o).starts_with("/// Adds one.\n"), "{}", stdout(&o));
+
+    let o = f.lcw_in(&elsewhere, &["explain", "hub", "--path", &repo]);
+    assert!(
+        stdout(&o).contains("where:   src/lib.rs:6"),
+        "{}",
+        stdout(&o)
+    );
+
+    let out = f.lcw_in(&elsewhere, &["impact", "hub", "--json", "--path", &repo]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["symbol"]["at"], "src/lib.rs:6");
+    assert!(v["callers"][0]["site"]
+        .as_str()
+        .unwrap()
+        .starts_with("src/lib.rs:"));
+
+    let o = f.lcw_in(
+        &elsewhere,
+        &["span", "inc", "--absolute-paths", "--path", &repo],
+    );
+    let canon = f.repo.canonicalize().unwrap();
+    assert_eq!(
+        stdout(&o),
+        format!("{}:1-4\n", canon.join("src/lib.rs").display())
+    );
 }
 
 #[test]

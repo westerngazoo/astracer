@@ -39,6 +39,11 @@ before changing a signature. Read the returned range, not the whole file.
 - Locations are strings: `at` = definition `file:line`, `site` = call site
   `file:line` (in the caller's file), `span` = `file:start-end`. Spans include
   leading attributes and doc comments.
+- CLI paths (text and JSON) are relative to the analyzed repository root,
+  whatever the current directory: `lcw span X --path /abs/repo` prints
+  `src/lib.rs:10-20`, not an absolute or `../`-prefixed path. Pass
+  `--absolute-paths` to get absolute paths instead. (The MCP server always
+  returns absolute paths, see below.)
 - `--budget <tokens>` shrinks lists until the output fits (about 4 bytes per
   token); a cut list gets a sibling `"<list>_more": N` in JSON and
   `... +N more` in text. `--compact` = a 1500-token budget. Both are global

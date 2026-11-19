@@ -10,6 +10,7 @@
 mod cache_cmd;
 mod export;
 mod flow;
+mod host_cmd;
 mod nav;
 
 use std::path::{Path, PathBuf};
@@ -114,6 +115,19 @@ enum Command {
     /// Find symbols by name: substring matches best-first, or fuzzy
     /// suggestions when nothing matches.
     Search(SearchArgs),
+    /// Every definition in one source file (line order) with its fan-in and
+    /// fan-out: one query to annotate a whole file in an editor.
+    Symbols(SymbolsArgs),
+    /// The laid-out graph the desktop UI renders (`GraphView` JSON), for
+    /// hosts other than the Tauri shell (the VS Code extension).
+    ViewData(host_cmd::ViewDataArgs),
+    /// Source lines around a span, as the UI's Code tab shows them.
+    Snippet(host_cmd::SnippetArgs),
+    /// Fast-mode languages detected in a repository (by file extension).
+    Languages(host_cmd::LanguagesArgs),
+    /// The LLM prompt for explaining a function, from an `ExplainContext`
+    /// JSON on stdin (the UI's Explain button, for hosts that call the LLM).
+    ExplainPrompt(host_cmd::ExplainPromptArgs),
     /// Write a default `livewalk.toml` to the current directory.
     Init(InitArgs),
     /// Show the on-disk graph store for a repository (if present).
@@ -327,6 +341,19 @@ struct SpanArgs {
     /// `--json`, add them as `code`).
     #[arg(long)]
     code: bool,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SymbolsArgs {
+    /// Source file: absolute, or relative to the repository root.
+    file: PathBuf,
+
+    #[command(flatten)]
+    repo: RepoArgs,
 
     /// Emit JSON.
     #[arg(long)]
@@ -589,6 +616,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Impact(args) => run_impact(args, log, out),
         Command::Span(args) => run_span(args, log, out),
         Command::Search(args) => run_search(args, log, out),
+        Command::Symbols(args) => run_symbols(args, log, out),
+        Command::ViewData(args) => host_cmd::run_view_data(args, log),
+        Command::Snippet(args) => host_cmd::run_snippet(args),
+        Command::Languages(args) => host_cmd::run_languages(args),
+        Command::ExplainPrompt(args) => host_cmd::run_explain_prompt(args),
         Command::Init(args) => run_init(args),
         Command::Graph(args) => run_graph_info(args),
         Command::Load(args) => run_load(args, log),
@@ -1042,6 +1074,43 @@ fn run_search(args: SearchArgs, log_override: Option<&str>, out: Out) -> Result<
         return Err(Reported.into());
     }
     Ok(())
+}
+
+fn run_symbols(args: SymbolsArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    let repo = load_repo(&args.repo, log_override)?;
+    let file = graph_file_name(&repo, &args.file, args.repo.absolute_paths);
+    let syms = lcw_query::file_symbols(&repo.graph, &file);
+    if args.json {
+        return out.print_json(&aj::file_symbols(&file, &syms));
+    }
+    for s in &syms {
+        println!(
+            "{}-{}\t{}\t{} callers · {} callees",
+            s.start_line, s.end_line, s.qualified_name, s.fan_in, s.fan_out
+        );
+    }
+    Ok(())
+}
+
+/// `file` as the loaded graph names it: repo-relative (or absolute with
+/// `--absolute-paths`), whatever form or working directory it was given in.
+fn graph_file_name(repo: &Repo, file: &Path, absolute: bool) -> String {
+    let root = lcw_agent::repo_dir(&repo.root);
+    let full = if file.is_absolute() {
+        file.to_path_buf()
+    } else if file.exists() {
+        std::env::current_dir().map_or_else(|_| file.to_path_buf(), |d| d.join(file))
+    } else {
+        root.join(file)
+    };
+    let full = full.canonicalize().unwrap_or(full);
+    if absolute {
+        return lcw_core::display_path(&full);
+    }
+    match full.strip_prefix(&root) {
+        Ok(rel) => lcw_core::display_path(rel),
+        Err(_) => lcw_core::display_path(file),
+    }
 }
 
 /// Print flows whose entry was chosen automatically, as JSON or text.

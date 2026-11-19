@@ -2247,7 +2247,10 @@ dependencies = [
 name = "lcw-desktop-api"
 version = "0.1.0"
 dependencies = [
+ "lcw-config",
  "lcw-core",
+ "lcw-engine",
+ "lcw-layout",
  "serde",
 ]
 
@@ -2412,11 +2415,9 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 name = "livewalk-desktop"
 version = "0.1.0"
 dependencies = [
- "lcw-config",
  "lcw-core",
  "lcw-desktop-api",
  "lcw-engine",
- "lcw-layout",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

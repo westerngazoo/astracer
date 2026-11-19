@@ -282,3 +282,110 @@ fn touch_future(p: &Path) {
     file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
         .unwrap();
 }
+
+#[test]
+fn symbols_lists_a_files_definitions_with_fan_in() {
+    let f = Fixture::new("symbols");
+    let (v, code) = f.json(&["symbols", "src/lib.rs", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(v["schema"], 1);
+    assert_eq!(v["file"], "src/lib.rs");
+    let syms = v["symbols"].as_array().unwrap();
+    assert_eq!(syms[0]["name"], "inc");
+    assert_eq!(syms[0]["start_line"], 1);
+    assert_eq!(syms[1]["name"], "hub");
+    assert_eq!(syms[1]["fan_in"], 31);
+    let lines: Vec<u64> = syms
+        .iter()
+        .map(|s| s["start_line"].as_u64().unwrap())
+        .collect();
+    assert!(lines.windows(2).all(|w| w[0] <= w[1]), "{lines:?}");
+
+    let abs = f.repo.join("src/lib.rs").canonicalize().unwrap();
+    let (by_abs, _) = f.json(&["symbols", abs.to_str().unwrap(), "--json"]);
+    assert_eq!(by_abs["symbols"], v["symbols"]);
+    let (none, code) = f.json(&["symbols", "src/missing.rs", "--json"]);
+    assert_eq!(code, 0);
+    assert!(none["symbols"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn view_data_emits_a_laid_out_graph_view() {
+    let f = Fixture::new("viewdata");
+    let out = f.lcw(&["view-data", "--json", "--progress"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let nodes = v["report"]["graph"]["nodes"].as_array().unwrap().len();
+    assert!(nodes >= 33, "{nodes}");
+    assert_eq!(v["positions"].as_array().unwrap().len(), nodes);
+    assert!(!v["groups"].as_array().unwrap().is_empty());
+    let root = f.repo.canonicalize().unwrap();
+    assert_eq!(v["repo_root"], root.to_string_lossy().as_ref());
+    let progress: Vec<Value> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(progress.last().unwrap()["phase"], "done");
+
+    let cached = f.lcw(&["view-data", "--json", "--cached"]);
+    assert!(cached.status.success());
+    let c: Value = serde_json::from_slice(&cached.stdout).unwrap();
+    assert_eq!(
+        c["report"]["graph"]["nodes"].as_array().unwrap().len(),
+        nodes
+    );
+
+    let summary = stdout(&f.lcw(&["view-data"]));
+    assert!(summary.contains(&format!("{nodes} nodes")), "{summary}");
+}
+
+#[test]
+fn snippet_languages_and_explain_prompt() {
+    let f = Fixture::new("hostcmds");
+    let root = f.repo.to_string_lossy().into_owned();
+    let (v, code) = f.json(&[
+        "snippet",
+        "src/lib.rs",
+        "6",
+        "8",
+        "--repo-root",
+        &root,
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(v["highlight_start"], 6);
+    assert_eq!(v["highlight_end"], 8);
+    let line6 = v["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["number"] == 6)
+        .unwrap();
+    assert_eq!(line6["text"], "fn hub(x: i32) -> i32 {");
+    let missing = f.lcw(&["snippet", "nope.rs", "1", "1", "--repo-root", &root]);
+    assert!(!missing.status.success());
+
+    let (langs, _) = f.json(&["languages", "--json"]);
+    assert_eq!(langs[0]["id"], "rust");
+
+    let ctx = r#"{"qualifiedName":"a::run","kind":"function","file":"src/a.rs","startLine":3,"endLine":9,
+        "metrics":{"cyclomatic":2,"lines_of_code":7,"parameters":0,"max_nesting":1,"allocations":0},
+        "fanIn":1,"fanOut":0,"callers":["a::main"],"callees":[],"source":"fn run() {}"}"#;
+    let ctx_file = f.base.join("ctx.json");
+    std::fs::write(&ctx_file, ctx).unwrap();
+    let (p, code) = f.json(&[
+        "explain-prompt",
+        "--json",
+        "--context",
+        ctx_file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(p["system"].as_str().unwrap().contains("call-graph"));
+    let prompt = p["prompt"].as_str().unwrap();
+    assert!(prompt.contains("Location: src/a.rs:3-9"), "{prompt}");
+    assert!(prompt.contains("- a::main"));
+}

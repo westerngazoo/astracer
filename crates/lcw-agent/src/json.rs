@@ -10,7 +10,7 @@
 use lcw_core::{display_path, CodeGraph, NodeId, NodeKind, SourceSpan};
 use lcw_query::{
     edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryFlow, EntryKind, EntryPoint,
-    FlowPaths, Impact, Lookup, Outline, OutlineNode, SymbolSpan,
+    FileSymbol, FlowPaths, Impact, Lookup, Outline, OutlineNode, SymbolSpan,
 };
 use serde_json::{json, Map, Value};
 
@@ -257,6 +257,25 @@ pub fn span(s: &SymbolSpan, code: Option<&str>) -> Value {
         o["code"] = json!(c);
     }
     with_schema(o)
+}
+
+/// `symbols`: every definition in `file`, in line order, with fan-in/out.
+pub fn file_symbols(file: &str, syms: &[FileSymbol]) -> Value {
+    let list: Vec<Value> = syms
+        .iter()
+        .map(|s| {
+            json!({
+                "qualified_name": s.qualified_name,
+                "name": s.name,
+                "kind": kind_str(s.kind),
+                "start_line": s.start_line,
+                "end_line": s.end_line,
+                "fan_in": s.fan_in,
+                "fan_out": s.fan_out,
+            })
+        })
+        .collect();
+    with_schema(json!({ "file": file, "symbols": list }))
 }
 
 /// The exact source lines of a span (`start..=end`), read from disk with

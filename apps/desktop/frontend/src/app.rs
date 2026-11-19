@@ -37,9 +37,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent, WheelEvent};
 
 use crate::flow_diagram::{self, CallTreeLayout, FlowTreeNode};
-use crate::transport::{
-    self, EngineTransport, ExplainContext, ExplainMetrics, FixtureTransport, TauriTransport,
-};
+use crate::transport::{self, EngineTransport, ExplainContext, ExplainMetrics, Host};
 
 /// Bounded call tree shown under the selected node.
 const TREE_DEPTH: u32 = 3;
@@ -894,9 +892,13 @@ pub fn App() -> impl IntoView {
         ..RenderState::default()
     }));
 
-    let path = RwSignal::new(String::new());
+    // VS Code opens on the workspace folder and its saved graph: the panel
+    // should show something on open, and the editor's CodeLens keeps the
+    // cached graph fresh.
+    let initial_repo = transport::initial_repo_path();
+    let use_cache = RwSignal::new(initial_repo.is_some());
+    let path = RwSignal::new(initial_repo.unwrap_or_default());
     let semantic = RwSignal::new(false);
-    let use_cache = RwSignal::new(false);
     let language_choices = RwSignal::new(Vec::<(String, String)>::new());
     let selected_language = RwSignal::new(String::from("rust"));
     let busy = RwSignal::new(false);
@@ -932,7 +934,7 @@ pub fn App() -> impl IntoView {
 
     let refresh_languages: Rc<dyn Fn()> = Rc::new({
         move || {
-            if !transport::has_tauri() {
+            if !transport::has_engine() {
                 language_choices.set(vec![("rust".into(), "Rust".into())]);
                 selected_language.set("rust".into());
                 return;
@@ -974,6 +976,8 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let refresh_languages_on_load = refresh_languages.clone();
+
     let canvas_ref = NodeRef::<Canvas>::new();
     let minimap_ref = NodeRef::<Canvas>::new();
 
@@ -994,7 +998,7 @@ pub fn App() -> impl IntoView {
         let state = state.clone();
         Rc::new(move || {
             let repo = path.get_untracked();
-            let hosted = transport::has_tauri();
+            let hosted = transport::has_engine();
             if hosted && repo.trim().is_empty() {
                 error.set(Some("Please enter a repository path.".into()));
                 return;
@@ -1050,13 +1054,10 @@ pub fn App() -> impl IntoView {
                 .into(),
             );
             spawn_local(async move {
-                // Tauri hosts the engine; a plain browser gets a fixture (see
-                // `transport::FixtureTransport`). Same trait, same UI code.
-                let result = if hosted {
-                    TauriTransport.analyze(repo, sem, cache, lang).await
-                } else {
-                    FixtureTransport.analyze(repo, sem, cache, lang).await
-                };
+                // Tauri or the VS Code extension hosts the engine; a plain
+                // browser gets a fixture (see `transport::FixtureTransport`).
+                // Same trait, same UI code.
+                let result = transport::active().analyze(repo, sem, cache, lang).await;
                 match result {
                     Ok(view) => {
                         let report = view.report;
@@ -1161,8 +1162,9 @@ pub fn App() -> impl IntoView {
     // nothing to ask — and waiting for someone to type its name hid the whole
     // Explorer behind an empty screen. It starts here rather than in a
     // separate effect because presenting a scene needs the canvas this hook
-    // has just recorded; anywhere else could race it. Tauri has no such
-    // default: there the user picks the repository.
+    // has just recorded; anywhere else could race it. VS Code loads the
+    // workspace folder the same way. Tauri has no such default: there the
+    // user picks the repository.
     {
         let state = state.clone();
         let run = run_analysis.clone();
@@ -1171,8 +1173,13 @@ pub fn App() -> impl IntoView {
             state.borrow_mut().canvas = Some(canvas.clone());
             wire_pointer_events(&canvas, state.clone(), nav, labels);
             wire_resize(state.clone(), labels);
-            if !transport::has_tauri() {
-                run();
+            match transport::host() {
+                Host::Browser => run(),
+                Host::VsCode if !path.get_untracked().trim().is_empty() => {
+                    refresh_languages_on_load();
+                    run();
+                }
+                _ => {}
             }
         });
     }
@@ -1263,7 +1270,7 @@ pub fn App() -> impl IntoView {
                 <input
                     class="path"
                     type="text"
-                    placeholder=if transport::has_tauri() { "/path/to/repo" } else { "fixture.json (browser dev mode)" }
+                    placeholder=if transport::has_engine() { "/path/to/repo" } else { "fixture.json (browser dev mode)" }
                     prop:value=move || path.get()
                     on:input=refresh_languages_on_input
                 />
@@ -1271,7 +1278,7 @@ pub fn App() -> impl IntoView {
                     type="button"
                     class="browse"
                     on:click=on_browse
-                    title=if transport::has_tauri() {
+                    title=if transport::has_engine() {
                         "Choose repository folder"
                     } else {
                         "Enter repository path or fixture URL (browser dev mode)"
@@ -1311,7 +1318,7 @@ pub fn App() -> impl IntoView {
                         if transport::semantic_available() {
                             "Use the rust-analyzer backend when available"
                         } else {
-                            "Semantic analysis requires the Tauri desktop app (cargo tauri dev -- --features semantic)"
+                            "Semantic analysis requires the Tauri desktop app or the VS Code extension (needs an lcw/desktop build with --features semantic)"
                         }
                     }
                 >
@@ -1331,7 +1338,7 @@ pub fn App() -> impl IntoView {
                 </label>
                 <label
                     class="mode"
-                    class:disabled=move || !transport::has_tauri()
+                    class:disabled=move || !transport::has_engine()
                     title="Load graph.sqlite from a prior analyze (no parse; may be stale)"
                 >
                     <input
@@ -1344,7 +1351,7 @@ pub fn App() -> impl IntoView {
                                 semantic.set(false);
                             }
                         }
-                        disabled=move || !transport::has_tauri() || semantic.get()
+                        disabled=move || !transport::has_engine() || semantic.get()
                     />
                     "cached"
                 </label>
@@ -2095,12 +2102,32 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
                 }
             };
             let qname = card.qualified_name.clone();
+            let reveal = (transport::can_reveal() && !card.file.is_empty()).then(|| {
+                let file = card.file.clone();
+                let qn = card.qualified_name.clone();
+                let (line, end_line) = (card.line, card.end_line);
+                let on_reveal = move |_| {
+                    let (file, qn) = (file.clone(), qn.clone());
+                    let root = nav.repo_root.get_untracked();
+                    spawn_local(async move {
+                        if let Err(e) =
+                            transport::reveal_in_editor(file, line, end_line, root, qn).await
+                        {
+                            web_sys::console::warn_1(&e.into());
+                        }
+                    });
+                };
+                view! {
+                    <button class="small" on:click=on_reveal title="Open this definition in the editor">"↗"</button>
+                }
+            });
 
             view! {
                 <div class="card detail">
                     <div class="detail-head">
                         <h3>"Node"</h3>
                         <div class="actions">
+                            {reveal}
                             <button class="small" on:click=move |_| back() disabled=move || nav.history.with(|h| h.is_empty()) title="Back to the previous node">"◀"</button>
                             <button class="small" on:click=move |_| locate() title="Center the view on this node">"⌖"</button>
                             <button class="small" on:click=move |_| clear() title="Clear selection">"✕"</button>
@@ -2352,9 +2379,9 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
     let cache_hint = cache_source_hint(nav);
     match nav.source.get() {
         SourcePane::Idle => {
-            if cache_hint.is_some() {
+            if let Some(hint) = cache_hint {
                 view! {
-                    <p class="hint warn code-status">{cache_hint.unwrap()}</p>
+                    <p class="hint warn code-status">{hint}</p>
                 }
                 .into_any()
             } else {
@@ -2438,11 +2465,7 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                 let api = prov.api_name().unwrap().to_string();
                 nav.explanation.set(ExplanationPane::Loading);
                 spawn_local(async move {
-                    let result = if transport::has_tauri() {
-                        TauriTransport.explain_function(ctx, api).await
-                    } else {
-                        FixtureTransport.explain_function(ctx, api).await
-                    };
+                    let result = transport::active().explain_function(ctx, api).await;
                     if nav.selected.get_untracked() != idx {
                         return;
                     }
@@ -2510,7 +2533,7 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
 
 fn explanation_view(nav: Nav) -> AnyView {
     match nav.explanation.get() {
-        ExplanationPane::Idle => view! {}.into_any(),
+        ExplanationPane::Idle => ().into_any(),
         ExplanationPane::Loading => {
             view! { <p class="hint code-status explain-status">"Generating explanation…"</p> }
                 .into_any()
@@ -2699,7 +2722,7 @@ fn Diagnostics(
             let active = lens_filter.get();
             let filtered: Vec<&Diagnostic> = items
                 .iter()
-                .filter(|d| active.as_ref().map_or(true, |l| &d.lens == l))
+                .filter(|d| active.as_ref().is_none_or(|l| &d.lens == l))
                 .collect();
             let total = items.len();
             let shown = filtered.len();

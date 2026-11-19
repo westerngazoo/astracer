@@ -5,18 +5,13 @@
 use std::time::Duration;
 
 pub use lcw_desktop_api::ExplainContext;
-
-const SYSTEM_PROMPT: &str = "You are a code-reading assistant for a call-graph explorer. \
-Explain what the given function does in plain language. \
-Describe its role in the call graph: why its callers matter and what its callees imply. \
-Be concise (3–6 short paragraphs). Use bullet lists for callers/callees when helpful. \
-Do not invent behavior not visible in the source.";
+use lcw_desktop_api::{explain_prompt, EXPLAIN_SYSTEM_PROMPT as SYSTEM_PROMPT};
 
 const TIMEOUT_SECS: u64 = 60;
 
 /// Explain `context` using `provider` (`ollama` or `gemini`).
 pub fn explain_function(context: ExplainContext, provider: &str) -> Result<String, String> {
-    let prompt = build_prompt(&context);
+    let prompt = explain_prompt(&context);
     match provider {
         "ollama" => explain_ollama(&prompt),
         "gemini" => explain_gemini(&prompt),
@@ -24,45 +19,6 @@ pub fn explain_function(context: ExplainContext, provider: &str) -> Result<Strin
             "unknown provider: {other} (expected ollama or gemini)"
         )),
     }
-}
-
-fn build_prompt(ctx: &ExplainContext) -> String {
-    let mut s = format!(
-        "Function: {}\nKind: {}\nLocation: {}:{}-{}\n\
-         Fan-in: {} · Fan-out: {}\n\
-         Metrics: cyclomatic={}, LOC={}, params={}, max_nesting={}, allocations={}\n",
-        ctx.qualified_name,
-        ctx.kind,
-        ctx.file,
-        ctx.start_line,
-        ctx.end_line,
-        ctx.fan_in,
-        ctx.fan_out,
-        ctx.metrics.cyclomatic,
-        ctx.metrics.lines_of_code,
-        ctx.metrics.parameters,
-        ctx.metrics.max_nesting,
-        ctx.metrics.allocations,
-    );
-    if !ctx.callers.is_empty() {
-        s.push_str("\nCallers:\n");
-        for c in &ctx.callers {
-            s.push_str(&format!("- {c}\n"));
-        }
-    }
-    if !ctx.callees.is_empty() {
-        s.push_str("\nCallees:\n");
-        for c in &ctx.callees {
-            s.push_str(&format!("- {c}\n"));
-        }
-    }
-    if let Some(tree) = &ctx.call_tree_summary {
-        s.push_str(&format!("\nCall tree (one level):\n{tree}\n"));
-    }
-    s.push_str("\nSource:\n```\n");
-    s.push_str(&ctx.source);
-    s.push_str("\n```\n");
-    s
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, String> {
@@ -172,7 +128,7 @@ mod tests {
 
     #[test]
     fn prompt_includes_context_fields() {
-        let p = build_prompt(&sample_context());
+        let p = explain_prompt(&sample_context());
         assert!(p.contains("app::run"));
         assert!(p.contains("app::main"));
         assert!(p.contains("app::parse"));

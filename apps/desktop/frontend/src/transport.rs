@@ -9,8 +9,13 @@
 //!   hosted by Tauri (no `window.__TAURI__`), it fetches a JSON produced by
 //!   `lcw analyze --format view`, so the UI can be developed, tested and
 //!   screenshotted in a plain browser without the desktop shell.
-//! * A future `VsCodeTransport` would implement the same trait over
-//!   `acquireVsCodeApi().postMessage` + `window.addEventListener("message")`.
+//! * [`VsCodeTransport`] runs inside a VS Code / Cursor webview: the
+//!   extension installs `window.livewalkVsCode` (see `apps/vscode/webview/
+//!   bridge.js`), which turns each call into an id-tagged
+//!   `acquireVsCodeApi().postMessage` request and resolves it from the
+//!   extension's `response` message. The extension answers by running `lcw`.
+//!
+//! [`host`] detects which one applies at startup; [`active`] picks it.
 
 use lcw_core::SourceSnippet;
 use lcw_desktop_api::{
@@ -72,6 +77,142 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "dialog"], js_name = open, catch)]
     async fn tauri_dialog_open(options: JsValue) -> Result<JsValue, JsValue>;
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = ["window", "livewalkVsCode"], js_name = request, catch)]
+    async fn vscode_request(method: &str, params: JsValue) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["window", "livewalkVsCode"], js_name = onProgress)]
+    fn vscode_on_progress(handler: &Closure<dyn FnMut(JsValue)>);
+}
+
+/// Which process hosts the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    /// The Tauri desktop shell (`window.__TAURI__`).
+    Tauri,
+    /// A VS Code / Cursor webview with the Livewalk bridge installed.
+    VsCode,
+    /// A plain browser: browser dev mode over a fixture.
+    Browser,
+}
+
+/// Global the VS Code extension's bridge script installs before the wasm loads.
+const VSCODE_BRIDGE: &str = "livewalkVsCode";
+
+fn window_has(key: &str) -> bool {
+    web_sys::window()
+        .map(|w| js_sys::Reflect::has(&w, &JsValue::from_str(key)).unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// Detect the host from the globals each one injects.
+pub fn host() -> Host {
+    if window_has("__TAURI__") {
+        Host::Tauri
+    } else if window_has(VSCODE_BRIDGE) {
+        Host::VsCode
+    } else {
+        Host::Browser
+    }
+}
+
+/// Whether a real engine answers requests (Tauri or VS Code), as opposed to
+/// browser dev mode's pre-baked fixture.
+pub fn has_engine() -> bool {
+    host() != Host::Browser
+}
+
+/// The repository the host wants analyzed on load (VS Code: the workspace
+/// folder), if it named one.
+pub fn initial_repo_path() -> Option<String> {
+    if host() != Host::VsCode {
+        return None;
+    }
+    let window = web_sys::window()?;
+    let bridge = js_sys::Reflect::get(&window, &JsValue::from_str(VSCODE_BRIDGE)).ok()?;
+    js_sys::Reflect::get(&bridge, &JsValue::from_str("initialRepo"))
+        .ok()?
+        .as_string()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// The transport for the detected [`host`].
+pub fn active() -> ActiveTransport {
+    match host() {
+        Host::Tauri => ActiveTransport::Tauri(TauriTransport),
+        Host::VsCode => ActiveTransport::VsCode(VsCodeTransport),
+        Host::Browser => ActiveTransport::Fixture(FixtureTransport),
+    }
+}
+
+/// Static dispatch over the hosts, so components call one transport.
+pub enum ActiveTransport {
+    Tauri(TauriTransport),
+    VsCode(VsCodeTransport),
+    Fixture(FixtureTransport),
+}
+
+impl EngineTransport for ActiveTransport {
+    async fn analyze(
+        &self,
+        path: String,
+        semantic: bool,
+        use_cache: bool,
+        language: Option<String>,
+    ) -> Result<GraphView, String> {
+        match self {
+            Self::Tauri(t) => t.analyze(path, semantic, use_cache, language).await,
+            Self::VsCode(t) => t.analyze(path, semantic, use_cache, language).await,
+            Self::Fixture(t) => t.analyze(path, semantic, use_cache, language).await,
+        }
+    }
+
+    async fn discover_languages(&self, path: String) -> Result<Vec<LanguageChoice>, String> {
+        match self {
+            Self::Tauri(t) => t.discover_languages(path).await,
+            Self::VsCode(t) => t.discover_languages(path).await,
+            Self::Fixture(t) => t.discover_languages(path).await,
+        }
+    }
+
+    async fn read_source_snippet(
+        &self,
+        file: String,
+        start_line: u32,
+        end_line: u32,
+        repo_root: String,
+        whole_file: bool,
+    ) -> Result<SourceSnippet, String> {
+        match self {
+            Self::Tauri(t) => {
+                t.read_source_snippet(file, start_line, end_line, repo_root, whole_file)
+                    .await
+            }
+            Self::VsCode(t) => {
+                t.read_source_snippet(file, start_line, end_line, repo_root, whole_file)
+                    .await
+            }
+            Self::Fixture(t) => {
+                t.read_source_snippet(file, start_line, end_line, repo_root, whole_file)
+                    .await
+            }
+        }
+    }
+
+    async fn explain_function(
+        &self,
+        context: ExplainContext,
+        provider: String,
+    ) -> Result<String, String> {
+        match self {
+            Self::Tauri(t) => t.explain_function(context, provider).await,
+            Self::VsCode(t) => t.explain_function(context, provider).await,
+            Self::Fixture(t) => t.explain_function(context, provider).await,
+        }
+    }
 }
 
 /// The Tauri host transport.
@@ -153,6 +294,122 @@ impl EngineTransport for TauriTransport {
     }
 }
 
+/// The VS Code / Cursor webview transport: every call is one request through
+/// the extension's bridge (`window.livewalkVsCode.request(method, params)`),
+/// answered by the extension host running `lcw`.
+pub struct VsCodeTransport;
+
+/// Arguments for the VS Code `reveal` request: open `file` in an editor and
+/// select `line..=end_line` (1-based).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevealArgs {
+    file: String,
+    line: u32,
+    end_line: u32,
+    repo_root: String,
+    qualified_name: String,
+}
+
+/// Arguments for the VS Code `pickRepoFolder` request.
+#[derive(Serialize)]
+struct PickFolderArgs {
+    current: String,
+}
+
+impl VsCodeTransport {
+    async fn call<A: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        args: &A,
+    ) -> Result<R, String> {
+        let params = args
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| format!("serializing {method} args: {e}"))?;
+        let value = vscode_request(method, params)
+            .await
+            .map_err(js_error_to_string)?;
+        serde_wasm_bindgen::from_value(value).map_err(|e| format!("decoding {method} result: {e}"))
+    }
+}
+
+impl EngineTransport for VsCodeTransport {
+    async fn analyze(
+        &self,
+        path: String,
+        semantic: bool,
+        use_cache: bool,
+        language: Option<String>,
+    ) -> Result<GraphView, String> {
+        let args = AnalyzeArgs {
+            path,
+            semantic,
+            use_cache,
+            language,
+        };
+        self.call("analyze", &args).await
+    }
+
+    async fn discover_languages(&self, path: String) -> Result<Vec<LanguageChoice>, String> {
+        self.call("discoverLanguages", &DiscoverLanguagesArgs { path })
+            .await
+    }
+
+    async fn read_source_snippet(
+        &self,
+        file: String,
+        start_line: u32,
+        end_line: u32,
+        repo_root: String,
+        whole_file: bool,
+    ) -> Result<SourceSnippet, String> {
+        let args = ReadSourceSnippetArgs {
+            file,
+            start_line,
+            end_line,
+            repo_root,
+            whole_file,
+        };
+        self.call("readSourceSnippet", &args).await
+    }
+
+    async fn explain_function(
+        &self,
+        context: ExplainContext,
+        provider: String,
+    ) -> Result<String, String> {
+        self.call("explainFunction", &ExplainArgs { context, provider })
+            .await
+    }
+}
+
+/// Whether "open in editor" is available (VS Code / Cursor only).
+pub fn can_reveal() -> bool {
+    host() == Host::VsCode
+}
+
+/// Ask the editor host to open `file` and select the definition span.
+pub async fn reveal_in_editor(
+    file: String,
+    line: u32,
+    end_line: u32,
+    repo_root: String,
+    qualified_name: String,
+) -> Result<(), String> {
+    if !can_reveal() {
+        return Err("open in editor requires the VS Code / Cursor extension".into());
+    }
+    let args = RevealArgs {
+        file,
+        line,
+        end_line,
+        repo_root,
+        qualified_name,
+    };
+    let _: serde::de::IgnoredAny = VsCodeTransport.call("reveal", &args).await?;
+    Ok(())
+}
+
 /// Whether the page is hosted by the Tauri shell (`withGlobalTauri` injects
 /// `window.__TAURI__`). When it is not, the app runs in browser dev mode and
 /// analysis results come from [`FixtureTransport`].
@@ -168,7 +425,7 @@ pub const DEFAULT_FIXTURE: &str = "fixture.json";
 /// Whether the UI can run rust-analyzer-backed analysis. Only the native Tauri
 /// host runs the engine; browser dev mode reloads a pre-baked fixture.
 pub fn semantic_available() -> bool {
-    has_tauri()
+    has_engine()
 }
 
 /// Whether `path` names a host filesystem location rather than a URL the page
@@ -288,6 +545,17 @@ impl EngineTransport for FixtureTransport {
 /// Open a native folder picker (Tauri) or a `prompt()` fallback in browser dev
 /// mode. Returns `Ok(None)` when the user cancels.
 pub async fn pick_repo_folder(current: &str) -> Result<Option<String>, String> {
+    if host() == Host::VsCode {
+        let picked: Option<String> = VsCodeTransport
+            .call(
+                "pickRepoFolder",
+                &PickFolderArgs {
+                    current: current.trim().to_string(),
+                },
+            )
+            .await?;
+        return Ok(picked);
+    }
     if has_tauri() {
         let options = js_sys::Object::new();
         js_sys::Reflect::set(&options, &JsValue::from_str("directory"), &JsValue::TRUE)
@@ -339,11 +607,7 @@ pub async fn pick_repo_folder(current: &str) -> Result<Option<String>, String> {
 
 /// Host-aware language discovery for the toolbar chips.
 pub async fn discover_repo_languages(path: String) -> Result<Vec<LanguageChoice>, String> {
-    if has_tauri() {
-        TauriTransport.discover_languages(path).await
-    } else {
-        FixtureTransport.discover_languages(path).await
-    }
+    active().discover_languages(path).await
 }
 
 /// Host-aware entry point for source reads (delegates to [`EngineTransport`]).
@@ -354,21 +618,26 @@ pub async fn read_source_snippet(
     repo_root: String,
     whole_file: bool,
 ) -> Result<SourceSnippet, String> {
-    if has_tauri() {
-        TauriTransport
-            .read_source_snippet(file, start_line, end_line, repo_root, whole_file)
-            .await
-    } else {
-        FixtureTransport
-            .read_source_snippet(file, start_line, end_line, repo_root, whole_file)
-            .await
-    }
+    active()
+        .read_source_snippet(file, start_line, end_line, repo_root, whole_file)
+        .await
 }
 
 /// Subscribe to backend progress events. The handler runs for the lifetime of
 /// the app (the closure is intentionally leaked, matching the listener's
-/// lifetime). A no-op outside the Tauri shell.
+/// lifetime). A no-op in browser dev mode.
 pub fn on_progress(mut handler: impl FnMut(Progress) + 'static) {
+    if host() == Host::VsCode {
+        // The bridge hands over the `progress` message payload directly.
+        let closure = Closure::wrap(Box::new(move |payload: JsValue| {
+            if let Ok(progress) = serde_wasm_bindgen::from_value::<Progress>(payload) {
+                handler(progress);
+            }
+        }) as Box<dyn FnMut(JsValue)>);
+        vscode_on_progress(&closure);
+        closure.forget();
+        return;
+    }
     if !has_tauri() {
         return;
     }
@@ -389,7 +658,7 @@ pub fn on_progress(mut handler: impl FnMut(Progress) + 'static) {
     });
 }
 
-/// Tauri rejects a command with the `Err` string; surface it verbatim, falling
+/// Tauri (and the VS Code bridge) reject with the `Err` string; surface it verbatim, falling
 /// back to a debug rendering for non-string rejections.
 fn js_error_to_string(value: JsValue) -> String {
     value

@@ -14,6 +14,7 @@
 //!   [`reachable`].
 //! * *What breaks if I change this?* — [`impact`] (transitive callers).
 //! * *Exactly which lines define it?* — [`span`].
+//! * *What is defined in this file?* — [`file_symbols`].
 //! * *Which symbol did they mean?* — [`resolve`], [`lookup`], [`suggest`].
 //!
 //! It depends only on `lcw-core` + `serde` and does no I/O, so it compiles for
@@ -27,6 +28,7 @@
 
 pub mod card;
 pub mod entries;
+pub mod file;
 pub mod flow;
 pub mod groups;
 pub mod impact;
@@ -40,6 +42,7 @@ pub use card::{
     call_sites, edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard,
 };
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
+pub use file::{file_symbols, FileSymbol};
 pub use flow::{
     connection, entry_tiers, flows_from_entries, shortest_path, shortest_paths, Connection,
     EntryFlow, EntryTier, FlowPaths,

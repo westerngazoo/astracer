@@ -1587,12 +1587,14 @@ dependencies = [
  "lcw-agent",
  "lcw-config",
  "lcw-core",
+ "lcw-desktop-api",
  "lcw-engine",
  "lcw-graph-store",
  "lcw-layout",
  "lcw-query",
  "lcw-render",
  "lcw-telemetry",
+ "serde",
  "serde_json",
 ]
 
@@ -1620,7 +1622,10 @@ dependencies = [
 name = "lcw-desktop-api"
 version = "0.1.0"
 dependencies = [
+ "lcw-config",
  "lcw-core",
+ "lcw-engine",
+ "lcw-layout",
  "serde",
  "serde_json",
 ]

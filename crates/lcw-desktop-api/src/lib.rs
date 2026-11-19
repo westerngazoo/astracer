@@ -1,8 +1,16 @@
-//! Shared serde types for the Live Code Walk desktop shell (Tauri backend and
-//! wasm frontend). No Tauri or wasm dependencies — only `lcw-core` + `serde`.
+//! Shared serde types for the Live Code Walk UI hosts (Tauri backend, VS Code
+//! extension via `lcw view-data`) and the wasm frontend. No Tauri or wasm
+//! dependencies — by default only `lcw-core` + `serde`; the `host` feature
+//! adds [`host`], the native operations every host answers the UI with.
 
 use lcw_core::{GroupBox, ReportSnapshot};
 use serde::{Deserialize, Serialize};
+
+mod explain;
+#[cfg(feature = "host")]
+pub mod host;
+
+pub use explain::{explain_prompt, EXPLAIN_SYSTEM_PROMPT};
 
 /// A fully laid-out analysis result returned by `analyze_repo`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

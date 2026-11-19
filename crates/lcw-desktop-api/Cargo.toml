@@ -1,6 +1,6 @@
 [package]
 name = "lcw-desktop-api"
-description = "Live Code Walk: shared serde DTOs for the desktop Tauri ↔ wasm IPC boundary."
+description = "Live Code Walk: shared serde DTOs for the UI host boundary (Tauri, VS Code, CLI) and the wasm frontend."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,18 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Native host operations (analyze into a laid-out `GraphView`, read snippets,
+# discover languages) shared by the Tauri shell and `lcw view-data`/`snippet`.
+# Off by default so the wasm frontend only gets the DTOs.
+host = ["dep:lcw-config", "dep:lcw-engine", "dep:lcw-layout"]
+
 [dependencies]
 lcw-core = { path = "../lcw-core" }
+lcw-config = { path = "../lcw-config", optional = true }
+lcw-engine = { path = "../lcw-engine", optional = true }
+lcw-layout = { path = "../lcw-layout", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

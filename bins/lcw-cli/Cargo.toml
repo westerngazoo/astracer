@@ -26,6 +26,7 @@ semantic = ["lcw-engine/semantic"]
 [dependencies]
 lcw-agent = { path = "../../crates/lcw-agent" }
 lcw-core = { path = "../../crates/lcw-core" }
+lcw-desktop-api = { path = "../../crates/lcw-desktop-api", features = ["host"] }
 lcw-config = { path = "../../crates/lcw-config" }
 lcw-engine = { path = "../../crates/lcw-engine" }
 lcw-graph-store = { path = "../../crates/lcw-graph-store" }
@@ -34,5 +35,6 @@ lcw-telemetry = { path = "../../crates/lcw-telemetry" }
 lcw-layout = { path = "../../crates/lcw-layout", optional = true }
 lcw-render = { path = "../../crates/lcw-render", optional = true }
 clap = { version = "4.5.61", features = ["derive"] }
+serde = "1"
 serde_json = "1.0.151"
 anyhow = "1.0.104"

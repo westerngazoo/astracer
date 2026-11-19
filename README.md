@@ -201,6 +201,27 @@ then click a target, `m` to jump to `main`, `o` to open the code in an editor.
 frontend consumes, which lets the UI run in a plain browser against a fixture —
 see the desktop README's *Browser dev mode*.
 
+## VS Code / Cursor extension
+
+`apps/vscode` hosts the same frontend in an editor webview (graph, Code and
+Flow views, `↗` to open a function in the editor), plus **Show Flow to Here**,
+callers / impact quick picks and an optional `N callers · impact` CodeLens. The
+extension answers the webview by running `lcw view-data`, `lcw snippet` and
+friends, which share `lcw_desktop_api::host` with the Tauri commands. Build
+`lcw`, the frontend bundle and the `.vsix` in one step, then install it:
+
+```sh
+scripts/livewalk-dev.sh vscode
+cursor --install-extension apps/vscode/livewalk-0.1.0.vsix
+```
+
+```sh
+code --install-extension apps/vscode/livewalk-0.1.0.vsix
+```
+
+Set `livewalk.lcwPath` if `lcw` is not on PATH. Details, settings and commands:
+[`apps/vscode/README.md`](apps/vscode/README.md).
+
 ### Optional features
 
 ```bash

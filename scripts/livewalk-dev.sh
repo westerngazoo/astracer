@@ -15,6 +15,7 @@ export PATH="${HOME}/.cargo/bin:${LIVEWALK_ROOT}/target/release:${PATH}"
 
 TAURI_DIR="${LIVEWALK_ROOT}/apps/desktop/src-tauri"
 FRONTEND_DIR="${LIVEWALK_ROOT}/apps/desktop/frontend"
+VSCODE_DIR="${LIVEWALK_ROOT}/apps/vscode"
 LCW_BIN="${LIVEWALK_ROOT}/target/release/lcw"
 
 REBUILD_CLI=0
@@ -95,15 +96,32 @@ run_rebuild() {
   (cd "${FRONTEND_DIR}" && trunk build)
 }
 
+run_vscode() {
+  ensure_wasm_target
+  echo "==> release build: lcw"
+  build_lcw_cli
+  echo "==> desktop frontend: trunk build --release"
+  (cd "${FRONTEND_DIR}" && trunk build --release)
+  echo "==> extension: npm ci, copy frontend dist into media/, package .vsix"
+  (cd "${VSCODE_DIR}" && npm ci --no-audit --no-fund && npm run media && npm run package)
+  local vsix
+  vsix="$(ls -t "${VSCODE_DIR}"/*.vsix | head -n 1)"
+  echo "==> built ${vsix}"
+  echo "    install: cursor --install-extension ${vsix}   (or: code --install-extension ${vsix})"
+  echo "    lcw:     ${LCW_BIN} (set livewalk.lcwPath if it is not on PATH)"
+}
+
 usage() {
   cat <<'EOF'
-Usage: livewalk-dev.sh [--rebuild-cli] [dev|cli|build-all|rebuild] [args...]
+Usage: livewalk-dev.sh [--rebuild-cli] [dev|cli|build-all|rebuild|vscode] [args...]
 
   dev          Run the Tauri desktop app (default).
   cli          Run the release lcw binary (e.g. cli analyze /path/to/repo).
   build-all    Release-build lcw + lcw-mcp, cargo check the desktop backend
                (src-tauri) and the wasm frontend.
   rebuild      Force rebuild lcw release, workspace, and frontend bundle.
+  vscode       Release-build lcw and the frontend (trunk build --release), copy
+               the bundle into apps/vscode/media and package the .vsix.
 
 Environment:
   LIVEWALK_SEMANTIC=1   Enable the semantic Cargo feature (tauri dev / lcw build).
@@ -119,7 +137,7 @@ while [[ $# -gt 0 ]]; do
       REBUILD_CLI=1
       shift
       ;;
-    dev | build-all | rebuild)
+    dev | build-all | rebuild | vscode)
       MODE="$1"
       shift
       break
@@ -156,6 +174,9 @@ case "${MODE}" in
     ;;
   rebuild)
     run_rebuild
+    ;;
+  vscode)
+    run_vscode
     ;;
   *)
     usage >&2

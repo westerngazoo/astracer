@@ -126,6 +126,26 @@ jobs:
       # `cargo check` (not test/build): we only need it to compile, not link.
       - run: cargo check -p lcw-engine --features semantic --locked
 
+  vscode:
+    name: vscode extension (typecheck + unit tests)
+    # The extension is plain TypeScript over the `lcw` CLI; its webview bundle
+    # (the Trunk build of the frontend) is not needed to type-check it or to
+    # test the message protocol and HTML rewrite, so no trunk/wasm here.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/vscode
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/vscode/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
   wasm:
     name: wasm (desktop frontend type-check)
     runs-on: ubuntu-latest

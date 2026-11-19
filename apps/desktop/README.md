@@ -65,8 +65,10 @@ view.
   flow paths, call trees — is answered client-side by `lcw-query` on that same
   graph, so there is no second IPC round trip and no traversal code in the UI.
 - **`EngineTransport`** is the seam that decouples the UI from the host. Today
-  `TauriTransport` uses `invoke`/`listen`; a future VS Code webview would add a
-  `VsCodeTransport` over `postMessage` without touching the components.
+  `TauriTransport` uses `invoke`/`listen`; `VsCodeTransport` serves the same
+  components inside a VS Code / Cursor webview over `postMessage` (see
+  [`apps/vscode`](../vscode/README.md)). The backend work behind both is
+  `lcw_desktop_api::host`, shared with `lcw view-data` / `lcw snippet`.
 
 The graph crosses the process boundary as a serde snapshot, so the backend
 (native, `rayon` layout) and the frontend (wasm, `wgpu`) never share memory or a

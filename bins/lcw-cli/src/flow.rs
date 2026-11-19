@@ -11,7 +11,7 @@ use lcw_query::{EntryFlow, EntryTier, FlowPaths};
 pub fn location(graph: &CodeGraph, n: &Node) -> String {
     let file = graph
         .file_path(n.span.file())
-        .map(|p| p.display().to_string())
+        .map(lcw_core::display_path)
         .unwrap_or_default();
     if file.is_empty() {
         String::from("<external>")

@@ -167,7 +167,7 @@ pub fn call_sites(sites: impl IntoIterator<Item = SourceSpan>) -> Vec<SourceSpan
 fn file_of(graph: &CodeGraph, file: lcw_core::FileId) -> String {
     graph
         .file_path(file)
-        .map(|p| p.display().to_string())
+        .map(lcw_core::display_path)
         .unwrap_or_default()
 }
 

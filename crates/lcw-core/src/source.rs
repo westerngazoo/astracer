@@ -93,6 +93,34 @@ fn snippet_window(
     (lo, hi)
 }
 
+/// A graph file path as shown to users and agents: `/`-separated on every OS,
+/// so CLI text and JSON are byte-identical across platforms. Display only:
+/// files are still opened through the native [`Path`]. On Unix a `\` is a
+/// legal file-name character, so it is only rewritten on Windows.
+pub fn display_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) {
+        slash_path(&s)
+    } else {
+        s.into_owned()
+    }
+}
+
+/// A Windows path string with `/` separators, minus the verbatim prefix
+/// `canonicalize` adds (`\\?\C:\a` -> `C:/a`, `\\?\UNC\srv\share` ->
+/// `//srv/share`); see [`display_path`].
+pub fn slash_path(s: &str) -> String {
+    let unprefixed = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        match s.strip_prefix(r"\\?\") {
+            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+            _ => s.to_string(),
+        }
+    };
+    unprefixed.replace('\\', "/")
+}
+
 /// Resolve a graph file path against the analyzed repository root. Absolute
 /// paths are unchanged; relative paths are joined with `repo_root` when set.
 pub fn resolve_source_path(repo_root: &str, file: &str) -> PathBuf {
@@ -179,6 +207,25 @@ mod tests {
             resolve_source_path("", "src/lib.rs"),
             PathBuf::from("src/lib.rs")
         );
+    }
+
+    #[test]
+    fn slash_path_normalizes_windows_separators() {
+        assert_eq!(slash_path(r"src\lib.rs"), "src/lib.rs");
+        assert_eq!(slash_path(r"src\core/mod.rs"), "src/core/mod.rs");
+        assert_eq!(slash_path(r"C:\repo\src\lib.rs"), "C:/repo/src/lib.rs");
+        assert_eq!(slash_path(r"\\?\C:\repo\src\lib.rs"), "C:/repo/src/lib.rs");
+        assert_eq!(
+            slash_path(r"\\?\UNC\srv\share\src\lib.rs"),
+            "//srv/share/src/lib.rs"
+        );
+        assert_eq!(slash_path("/already/unix.rs"), "/already/unix.rs");
+    }
+
+    #[test]
+    fn display_path_uses_forward_slashes() {
+        let p = Path::new("src").join("core").join("mod.rs");
+        assert_eq!(display_path(&p), "src/core/mod.rs");
     }
 
     #[test]

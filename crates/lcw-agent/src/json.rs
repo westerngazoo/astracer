@@ -7,7 +7,7 @@
 //! * a list cut by a limit or budget gets a sibling `"<list>_more": N`;
 //! * optional fields are omitted rather than `null` / `false`.
 
-use lcw_core::{CodeGraph, NodeId, NodeKind, SourceSpan};
+use lcw_core::{display_path, CodeGraph, NodeId, NodeKind, SourceSpan};
 use lcw_query::{
     edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryFlow, EntryKind, EntryPoint,
     FlowPaths, Impact, Lookup, Outline, OutlineNode, SymbolSpan,
@@ -20,7 +20,9 @@ use crate::SCHEMA;
 pub fn at(graph: &CodeGraph, id: NodeId) -> String {
     let n = graph.node(id);
     match graph.file_path(n.span.file()) {
-        Some(p) if n.kind != NodeKind::External => format!("{}:{}", p.display(), n.span.start_line),
+        Some(p) if n.kind != NodeKind::External => {
+            format!("{}:{}", display_path(p), n.span.start_line)
+        }
         _ => "<external>".to_string(),
     }
 }
@@ -30,7 +32,7 @@ pub fn site(graph: &CodeGraph, span: SourceSpan) -> Option<String> {
     graph
         .file_path(span.file())
         .filter(|_| span.start_line > 0)
-        .map(|p| format!("{}:{}", p.display(), span.start_line))
+        .map(|p| format!("{}:{}", display_path(p), span.start_line))
 }
 
 /// `[{"file": …, "line": …}]` for call sites with a known file, one per line
@@ -43,7 +45,7 @@ pub fn sites(graph: &CodeGraph, spans: &[SourceSpan]) -> Option<Value> {
         .iter()
         .filter_map(|s| {
             let p = graph.file_path(s.file())?;
-            Some(json!({ "file": p.display().to_string(), "line": s.start_line }))
+            Some(json!({ "file": display_path(p), "line": s.start_line }))
         })
         .collect();
     (!list.is_empty()).then_some(Value::Array(list))

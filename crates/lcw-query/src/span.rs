@@ -38,7 +38,7 @@ pub fn span(graph: &CodeGraph, id: NodeId) -> Option<SymbolSpan> {
     if n.kind == NodeKind::External || n.span.start_line == 0 {
         return None;
     }
-    let file = graph.file_path(n.span.file())?.display().to_string();
+    let file = lcw_core::display_path(graph.file_path(n.span.file())?);
     Some(SymbolSpan {
         id,
         qualified_name: n.qualified_name.clone(),

@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use lcw_core::{CodeGraph, NodeId, NodeKind};
+use lcw_core::{display_path, CodeGraph, NodeId, NodeKind};
 use lcw_query::{
     edge_kind_str, kind_str, CallRef, CallTreeNode, Direction, EntryKind, EntryPoint, Impact,
     Lookup, NodeCard, Outline, OutlineNode,
@@ -15,7 +15,9 @@ use lcw_query::{
 pub fn location(graph: &CodeGraph, id: NodeId) -> String {
     let n = graph.node(id);
     match graph.file_path(n.span.file()) {
-        Some(p) if n.kind != NodeKind::External => format!("{}:{}", p.display(), n.span.start_line),
+        Some(p) if n.kind != NodeKind::External => {
+            format!("{}:{}", display_path(p), n.span.start_line)
+        }
         _ => "<external>".to_string(),
     }
 }
@@ -50,7 +52,7 @@ fn site_list(graph: &CodeGraph, sites: &[lcw_core::SourceSpan], short: bool) -> 
             let _ = write!(out, ", {pos}");
             continue;
         }
-        let shown = p.display().to_string();
+        let shown = display_path(p);
         let shown = if short { base_name(&shown) } else { &shown };
         let sep = if file.is_some() { "; " } else { "" };
         let _ = write!(out, "{sep}{shown}:{pos}");

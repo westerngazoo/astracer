@@ -28,7 +28,10 @@ pub use group::{GroupBox, GROUP_HEADER};
 pub use ids::{FileId, NodeId};
 pub use metric::{Metric, MetricKind};
 pub use report::{AnalysisReport, ReportExport, ReportSnapshot, Summary};
-pub use source::{read_snippet, resolve_source_path, SourceFile, SourceLine, SourceSnippet};
+pub use source::{
+    display_path, read_snippet, resolve_source_path, slash_path, SourceFile, SourceLine,
+    SourceSnippet,
+};
 pub use suggestion::{Suggestion, Target};
 pub use vertical::Vertical;
 

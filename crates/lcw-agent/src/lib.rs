@@ -259,7 +259,19 @@ mod tests {
         g.intern_file(base.join("src/lib.rs"));
         g.intern_file("/elsewhere/x.rs");
         let g = display_paths(g, &PathStyle::RelativeTo(base));
-        let files: Vec<String> = g.files().map(|(_, p)| p.display().to_string()).collect();
+        let files: Vec<String> = g.files().map(|(_, p)| lcw_core::display_path(p)).collect();
         assert_eq!(files, vec!["src/lib.rs", "/elsewhere/x.rs"]);
+    }
+
+    #[test]
+    fn json_locations_use_forward_slashes() {
+        let mut g = CodeGraph::new();
+        let file = g.intern_file(Path::new("src").join("core").join("mod.rs"));
+        let span = lcw_core::SourceSpan::new(file, 3, 0, 5, 0);
+        assert_eq!(json::site(&g, span).as_deref(), Some("src/core/mod.rs:3"));
+        assert_eq!(
+            json::sites(&g, &[span]).unwrap()[0]["file"],
+            "src/core/mod.rs"
+        );
     }
 }

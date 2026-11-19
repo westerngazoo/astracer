@@ -119,7 +119,10 @@ fn paths_are_repo_relative_from_any_cwd() {
     let canon = f.repo.canonicalize().unwrap();
     assert_eq!(
         stdout(&o),
-        format!("{}:1-4\n", canon.join("src/lib.rs").display())
+        format!(
+            "{}:1-4\n",
+            lcw_core::display_path(&canon.join("src").join("lib.rs"))
+        )
     );
 }
 

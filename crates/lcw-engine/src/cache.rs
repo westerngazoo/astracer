@@ -138,6 +138,18 @@ pub fn hash_text(text: &str) -> u64 {
 /// `variant` isolates caches by language or adapter mode (e.g. `rust`, `cpp`,
 /// `semantic`). See [`lcw_config::Config::cache_variant`].
 pub fn repo_cache_dir(root: &Path, dir: &str, variant: &str) -> Option<PathBuf> {
+    repo_cache_dir_with(root, dir, variant, cache_home)
+}
+
+/// [`repo_cache_dir`] with the cache-home lookup injected, so callers (and
+/// tests) can resolve paths without reading or mutating the process env.
+/// `cache_home` is only consulted when `dir` is empty.
+fn repo_cache_dir_with(
+    root: &Path,
+    dir: &str,
+    variant: &str,
+    cache_home: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
     let dir = dir.trim();
     let variant = variant.trim();
     let variant = if variant.is_empty() { "rust" } else { variant };
@@ -183,7 +195,7 @@ pub const CACHE_HOME_ENV: &str = "LIVEWALK_CACHE_HOME";
 /// When the chosen home cannot hold a `livewalk/` folder (read-only home,
 /// agent sandbox), the OS temp dir is used so the graph cache still works.
 pub fn cache_home() -> Option<PathBuf> {
-    let home = preferred_cache_home();
+    let home = preferred_cache_home_with(|var| std::env::var(var).ok(), std::env::temp_dir);
     if std::fs::create_dir_all(home.join("livewalk")).is_ok() {
         return Some(home);
     }
@@ -197,25 +209,23 @@ pub fn cache_home() -> Option<PathBuf> {
     Some(tmp)
 }
 
-fn preferred_cache_home() -> PathBuf {
-    if let Ok(v) = std::env::var(CACHE_HOME_ENV) {
-        if !v.is_empty() {
-            return PathBuf::from(v);
+/// The preferred cache home given an env lookup and a temp-dir fallback; pure,
+/// no filesystem access (see [`cache_home`] for the writability fallback).
+fn preferred_cache_home_with(
+    env: impl Fn(&str) -> Option<String>,
+    temp_dir: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    for var in [CACHE_HOME_ENV, "XDG_CACHE_HOME", "HOME", "LOCALAPPDATA"] {
+        if let Some(v) = env(var).filter(|v| !v.is_empty()) {
+            let base = PathBuf::from(v);
+            return if var == "HOME" {
+                base.join(".cache")
+            } else {
+                base
+            };
         }
     }
-    for var in ["XDG_CACHE_HOME", "HOME", "LOCALAPPDATA"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                let base = PathBuf::from(v);
-                return if var == "HOME" {
-                    base.join(".cache")
-                } else {
-                    base
-                };
-            }
-        }
-    }
-    std::env::temp_dir()
+    temp_dir()
 }
 
 /// Stable-ish hash of a repository root for use as a cache subdirectory name.
@@ -266,16 +276,21 @@ pub struct CacheCleanReport {
 
 /// List (and optionally remove) cache buckets under the Livewalk cache root.
 pub fn clean_cache_dirs(opts: &CacheCleanOptions) -> std::io::Result<CacheCleanReport> {
+    match livewalk_cache_root() {
+        Some(root) => clean_cache_dirs_in(&root, opts),
+        None => Ok(CacheCleanReport::default()),
+    }
+}
+
+/// [`clean_cache_dirs`] over an explicit Livewalk cache root.
+fn clean_cache_dirs_in(root: &Path, opts: &CacheCleanOptions) -> std::io::Result<CacheCleanReport> {
     let mut report = CacheCleanReport::default();
-    let Some(root) = livewalk_cache_root() else {
-        return Ok(report);
-    };
     if !root.is_dir() {
         return Ok(report);
     }
 
     let keep_key = opts.keep_repo.as_deref().map(repo_cache_key);
-    let mut names: Vec<String> = std::fs::read_dir(&root)?
+    let mut names: Vec<String> = std::fs::read_dir(root)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| e.file_name().into_string().ok())
@@ -455,11 +470,17 @@ mod tests {
         assert!(f.starts_with("/repo/.livewalk-cache/rust"));
     }
 
+    fn fixed_home() -> Option<PathBuf> {
+        Some(PathBuf::from("/fixed/cache-home"))
+    }
+
     #[test]
     fn default_dir_lives_under_cache_home_not_repo() {
         let repo = Path::new("/tmp/some-analyzed-project");
-        let f = cache_file(repo, "", "rust").unwrap();
-        let home = cache_home().expect("cache home");
+        let f = repo_cache_dir_with(repo, "", "rust", fixed_home)
+            .unwrap()
+            .join(CACHE_FILE);
+        let home = fixed_home().unwrap();
         assert!(
             f.starts_with(home.join("livewalk")),
             "expected {:?} under {:?}/livewalk",
@@ -467,7 +488,9 @@ mod tests {
             home
         );
         assert!(
-            f.to_string_lossy().contains("-rust/"),
+            f.parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n.to_string_lossy().ends_with("-rust")),
             "cache dir should include language variant"
         );
         assert!(
@@ -479,8 +502,8 @@ mod tests {
     #[test]
     fn different_languages_use_distinct_cache_dirs() {
         let repo = Path::new("/tmp/multi-lang-repo");
-        let rust = repo_cache_dir(repo, "", "rust").unwrap();
-        let cpp = repo_cache_dir(repo, "", "cpp").unwrap();
+        let rust = repo_cache_dir_with(repo, "", "rust", fixed_home).unwrap();
+        let cpp = repo_cache_dir_with(repo, "", "cpp", fixed_home).unwrap();
         assert_ne!(rust, cpp);
         assert!(rust.to_string_lossy().ends_with("-rust"));
         assert!(cpp.to_string_lossy().ends_with("-cpp"));
@@ -489,9 +512,61 @@ mod tests {
     #[test]
     fn whitespace_only_dir_uses_cache_home() {
         let repo = Path::new("/tmp/another-repo");
-        let f = cache_file(repo, "  \t  ", "go").unwrap();
-        let home = cache_home().expect("cache home");
-        assert!(f.starts_with(home.join("livewalk")));
+        let d = repo_cache_dir_with(repo, "  \t  ", "go", fixed_home).unwrap();
+        assert!(d.starts_with(fixed_home().unwrap().join("livewalk")));
+    }
+
+    #[test]
+    fn explicit_dir_never_consults_cache_home() {
+        let d = repo_cache_dir_with(Path::new("/repo"), "/abs/cache", "rust", || {
+            panic!("cache home must not be resolved when [cache].dir is set")
+        })
+        .unwrap();
+        assert_eq!(d, PathBuf::from("/abs/cache").join("rust"));
+    }
+
+    #[test]
+    fn cache_home_precedence() {
+        let tmp = || PathBuf::from("/tmp-fallback");
+        let env_of = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+
+        let all = env_of(&[
+            (CACHE_HOME_ENV, "/lw"),
+            ("XDG_CACHE_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+            ("LOCALAPPDATA", "/lad"),
+        ]);
+        assert_eq!(preferred_cache_home_with(all, tmp), PathBuf::from("/lw"));
+
+        let empty_override = env_of(&[(CACHE_HOME_ENV, ""), ("XDG_CACHE_HOME", "/xdg")]);
+        assert_eq!(
+            preferred_cache_home_with(empty_override, tmp),
+            PathBuf::from("/xdg")
+        );
+
+        let home_only = env_of(&[("HOME", "/home/u"), ("LOCALAPPDATA", "/lad")]);
+        assert_eq!(
+            preferred_cache_home_with(home_only, tmp),
+            PathBuf::from("/home/u").join(".cache")
+        );
+
+        let windows = env_of(&[("LOCALAPPDATA", "/lad")]);
+        assert_eq!(
+            preferred_cache_home_with(windows, tmp),
+            PathBuf::from("/lad")
+        );
+
+        assert_eq!(
+            preferred_cache_home_with(env_of(&[]), tmp),
+            PathBuf::from("/tmp-fallback")
+        );
     }
 
     #[test]
@@ -512,7 +587,6 @@ mod tests {
     fn clean_cache_dirs_requires_yes_to_remove() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let _lock = CACHE_HOME_TEST_LOCK.lock().unwrap();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -524,17 +598,18 @@ mod tests {
         std::fs::create_dir_all(&bucket).unwrap();
         std::fs::write(bucket.join("fragments.json"), b"{}").unwrap();
 
-        let _guard = CacheHomeGuard::set(&base);
-
-        let list = clean_cache_dirs(&CacheCleanOptions::default()).unwrap();
+        let list = clean_cache_dirs_in(&root, &CacheCleanOptions::default()).unwrap();
         assert_eq!(list.listed.len(), 1);
         assert!(list.removed.is_empty());
         assert!(bucket.is_dir());
 
-        let wiped = clean_cache_dirs(&CacheCleanOptions {
-            yes: true,
-            ..Default::default()
-        })
+        let wiped = clean_cache_dirs_in(
+            &root,
+            &CacheCleanOptions {
+                yes: true,
+                ..Default::default()
+            },
+        )
         .unwrap();
         assert_eq!(wiped.removed.len(), 1);
         assert!(!bucket.exists());

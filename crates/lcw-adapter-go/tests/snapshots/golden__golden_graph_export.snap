@@ -203,7 +203,16 @@ expression: graph.export()
         "end_line": 30,
         "end_col": 9
       },
-      "count": 2
+      "count": 2,
+      "extra_sites": [
+        {
+          "file": 0,
+          "start_line": 31,
+          "start_col": 1,
+          "end_line": 31,
+          "end_col": 9
+        }
+      ]
     },
     {
       "from": 3,

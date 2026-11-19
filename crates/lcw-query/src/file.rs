@@ -176,11 +176,23 @@ mod tests {
         let main = crate::fixtures::id(&g, "app::main");
         let save = crate::fixtures::id(&g, "app::io::save");
         let load = crate::fixtures::id(&g, "app::io::load");
-        assert_eq!(focus_target(&g, "/repo", "/repo/src/io.rs", Some(31)), Some(save));
-        assert_eq!(focus_target(&g, "/repo", "/repo/src/io.rs", Some(20)), Some(load));
-        assert_eq!(focus_target(&g, "/repo/", "/repo/src/main.rs", None), Some(main));
+        assert_eq!(
+            focus_target(&g, "/repo", "/repo/src/io.rs", Some(31)),
+            Some(save)
+        );
+        assert_eq!(
+            focus_target(&g, "/repo", "/repo/src/io.rs", Some(20)),
+            Some(load)
+        );
+        assert_eq!(
+            focus_target(&g, "/repo/", "/repo/src/main.rs", None),
+            Some(main)
+        );
         assert_eq!(focus_target(&g, "", "src/io.rs", Some(32)), Some(save));
-        assert_eq!(focus_target(&g, "/repo", "/elsewhere/src/io.rs", Some(31)), None);
+        assert_eq!(
+            focus_target(&g, "/repo", "/elsewhere/src/io.rs", Some(31)),
+            None
+        );
     }
 
     #[test]

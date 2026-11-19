@@ -167,7 +167,14 @@ pub fn run(
     crate::groups::draw_groups(&mut scene, groups, true);
     let infos = build_node_infos(graph);
     let labels: Vec<String> = infos.iter().map(|i| i.title.clone()).collect();
-    run_app("Live Code Walk", scene, labels, infos, Some(graph.clone()), groups.to_vec())
+    run_app(
+        "Live Code Walk",
+        scene,
+        labels,
+        infos,
+        Some(graph.clone()),
+        groups.to_vec(),
+    )
 }
 
 /// Open a window on a prebuilt [`SceneData`] with per-node pick `labels`
@@ -175,7 +182,14 @@ pub fn run(
 /// aggregated scene rather than one function node per graph node. Blocks until
 /// the window is closed.
 pub fn run_scene(scene: SceneData, labels: Vec<String>) -> Result<(), RenderError> {
-    run_app("Live Code Walk", scene, labels, Vec::new(), None, Vec::new())
+    run_app(
+        "Live Code Walk",
+        scene,
+        labels,
+        Vec::new(),
+        None,
+        Vec::new(),
+    )
 }
 
 fn run_app(

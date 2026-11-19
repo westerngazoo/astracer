@@ -945,10 +945,8 @@ pub fn App() -> impl IntoView {
             spawn_local(async move {
                 match transport::discover_repo_languages(repo).await {
                     Ok(choices) => {
-                        let pairs: Vec<(String, String)> = choices
-                            .into_iter()
-                            .map(|c| (c.id, c.label))
-                            .collect();
+                        let pairs: Vec<(String, String)> =
+                            choices.into_iter().map(|c| (c.id, c.label)).collect();
                         if pairs.is_empty() {
                             language_choices.set(vec![("rust".into(), "Rust".into())]);
                             selected_language.set("rust".into());
@@ -1028,13 +1026,11 @@ pub fn App() -> impl IntoView {
                     return;
                 }
                 if transport::looks_like_filesystem_path(&repo) {
-                    error.set(Some(
-                        format!(
-                            "Browser dev mode cannot analyze a repository path ({repo}). \
+                    error.set(Some(format!(
+                        "Browser dev mode cannot analyze a repository path ({repo}). \
                              Leave the path empty to reload fixture.json, or run \
                              `lcw-dev ui <repo>` to refresh the fixture."
-                        ),
-                    ));
+                    )));
                     return;
                 }
             }
@@ -1057,9 +1053,7 @@ pub fn App() -> impl IntoView {
                 // Tauri hosts the engine; a plain browser gets a fixture (see
                 // `transport::FixtureTransport`). Same trait, same UI code.
                 let result = if hosted {
-                    TauriTransport
-                        .analyze(repo, sem, cache, lang)
-                        .await
+                    TauriTransport.analyze(repo, sem, cache, lang).await
                 } else {
                     FixtureTransport.analyze(repo, sem, cache, lang).await
                 };
@@ -2225,7 +2219,11 @@ fn DetailPane(nav: Nav, actions: ActionsHandle) -> impl IntoView {
 }
 
 /// Assemble the JSON context sent to the LLM explainer.
-fn build_explain_context(card: &NodeCard, snip: &SourceSnippet, tree: Option<&TreeItem>) -> ExplainContext {
+fn build_explain_context(
+    card: &NodeCard,
+    snip: &SourceSnippet,
+    tree: Option<&TreeItem>,
+) -> ExplainContext {
     let source = snip
         .lines
         .iter()
@@ -2276,7 +2274,11 @@ fn build_explain_context(card: &NodeCard, snip: &SourceSnippet, tree: Option<&Tr
 }
 
 /// Markdown block copied for Claude (frontend-only, no API call).
-fn format_explain_markdown(card: &NodeCard, snip: &SourceSnippet, tree: Option<&TreeItem>) -> String {
+fn format_explain_markdown(
+    card: &NodeCard,
+    snip: &SourceSnippet,
+    tree: Option<&TreeItem>,
+) -> String {
     let m = card.metrics;
     let mut md = format!(
         "# Function: `{}`\n\n\
@@ -2362,18 +2364,16 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
         SourcePane::Loading => {
             view! { <p class="hint code-status">"Loading source…"</p> }.into_any()
         }
-        SourcePane::External => {
-            view! {
-                <p class="hint code-status">"No source file — this node is external or unresolved."</p>
-                {cache_hint.map(|h| view! { <p class="hint warn code-status">{h}</p> })}
-            }.into_any()
+        SourcePane::External => view! {
+            <p class="hint code-status">"No source file — this node is external or unresolved."</p>
+            {cache_hint.map(|h| view! { <p class="hint warn code-status">{h}</p> })}
         }
-        SourcePane::Error(msg) => {
-            view! {
-                <p class="hint warn code-status">{msg.clone()}</p>
-                {cache_hint.map(|h| view! { <p class="hint warn code-status">{h}</p> })}
-            }.into_any()
+        .into_any(),
+        SourcePane::Error(msg) => view! {
+            <p class="hint warn code-status">{msg.clone()}</p>
+            {cache_hint.map(|h| view! { <p class="hint warn code-status">{h}</p> })}
         }
+        .into_any(),
         SourcePane::Ready(snip) => {
             let header = format!(
                 "{}:{}-{}",
@@ -2385,7 +2385,8 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                 .lines
                 .iter()
                 .map(|line| {
-                    let hl = line.number >= snip.highlight_start && line.number <= snip.highlight_end;
+                    let hl =
+                        line.number >= snip.highlight_start && line.number <= snip.highlight_end;
                     let cls = if hl { "code-line hl" } else { "code-line" };
                     view! {
                         <div class=cls>
@@ -2417,7 +2418,11 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                 let tree = nav.tree.get_untracked();
                 let idx = nav.selected.get_untracked();
                 if prov == ExplainProvider::Copy {
-                    let md = format_explain_markdown(&card_for_explain, &snip_for_explain, tree.as_ref());
+                    let md = format_explain_markdown(
+                        &card_for_explain,
+                        &snip_for_explain,
+                        tree.as_ref(),
+                    );
                     spawn_local(async move {
                         match copy_to_clipboard(&md).await {
                             Ok(()) => nav.explanation.set(ExplanationPane::Ready(
@@ -2428,7 +2433,8 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                     });
                     return;
                 }
-                let ctx = build_explain_context(&card_for_explain, &snip_for_explain, tree.as_ref());
+                let ctx =
+                    build_explain_context(&card_for_explain, &snip_for_explain, tree.as_ref());
                 let api = prov.api_name().unwrap().to_string();
                 nav.explanation.set(ExplanationPane::Loading);
                 spawn_local(async move {
@@ -2506,20 +2512,19 @@ fn explanation_view(nav: Nav) -> AnyView {
     match nav.explanation.get() {
         ExplanationPane::Idle => view! {}.into_any(),
         ExplanationPane::Loading => {
-            view! { <p class="hint code-status explain-status">"Generating explanation…"</p> }.into_any()
+            view! { <p class="hint code-status explain-status">"Generating explanation…"</p> }
+                .into_any()
         }
         ExplanationPane::Error(msg) => {
             view! { <p class="hint warn code-status explain-status">{msg}</p> }.into_any()
         }
-        ExplanationPane::Ready(text) => {
-            view! {
-                <div class="explanation-pane">
-                    <h4>"Explanation"</h4>
-                    <pre class="explanation-text">{text}</pre>
-                </div>
-            }
-            .into_any()
+        ExplanationPane::Ready(text) => view! {
+            <div class="explanation-pane">
+                <h4>"Explanation"</h4>
+                <pre class="explanation-text">{text}</pre>
+            </div>
         }
+        .into_any(),
     }
 }
 
@@ -2699,27 +2704,34 @@ fn Diagnostics(
             let total = items.len();
             let shown = filtered.len();
             let lens_chips = lenses.len() > 1;
-            let chips = lenses.into_iter().map(|lens| {
-                let active_here = active.as_ref() == Some(&lens);
-                let class = if active_here { "lens-chip on" } else { "lens-chip" };
-                view! {
-                    <button
-                        type="button"
-                        class=class
-                        on:click=move |_| {
-                            lens_filter.update(|f| {
-                                if f.as_ref() == Some(&lens) {
-                                    *f = None;
-                                } else {
-                                    *f = Some(lens.clone());
-                                }
-                            });
-                        }
-                    >
-                        {lens.clone()}
-                    </button>
-                }
-            }).collect::<Vec<_>>();
+            let chips = lenses
+                .into_iter()
+                .map(|lens| {
+                    let active_here = active.as_ref() == Some(&lens);
+                    let class = if active_here {
+                        "lens-chip on"
+                    } else {
+                        "lens-chip"
+                    };
+                    view! {
+                        <button
+                            type="button"
+                            class=class
+                            on:click=move |_| {
+                                lens_filter.update(|f| {
+                                    if f.as_ref() == Some(&lens) {
+                                        *f = None;
+                                    } else {
+                                        *f = Some(lens.clone());
+                                    }
+                                });
+                            }
+                        >
+                            {lens.clone()}
+                        </button>
+                    }
+                })
+                .collect::<Vec<_>>();
             let rows = filtered
                 .iter()
                 .take(14)

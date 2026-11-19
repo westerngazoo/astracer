@@ -67,7 +67,11 @@ fn subtree_leaves(node: &FlowTreeNode) -> f32 {
     if node.children.is_empty() {
         return 1.0;
     }
-    node.children.iter().map(subtree_leaves).sum::<f32>().max(1.0)
+    node.children
+        .iter()
+        .map(subtree_leaves)
+        .sum::<f32>()
+        .max(1.0)
 }
 
 fn place(

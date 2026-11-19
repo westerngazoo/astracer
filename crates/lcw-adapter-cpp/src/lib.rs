@@ -48,7 +48,9 @@ mod tests {
         let g = parse(
             "void helper(int x) { (void)x; }\n\nvoid run() {\n\thelper(1);\n\thelper(2);\n}\n",
         );
-        let run = g.node_by_qualified("sample::main::run").expect("run present");
+        let run = g
+            .node_by_qualified("sample::main::run")
+            .expect("run present");
         let helper = g
             .node_by_qualified("sample::main::helper")
             .expect("helper present");
@@ -64,9 +66,7 @@ mod tests {
 
     #[test]
     fn class_methods_are_qualified() {
-        let g = parse(
-            "class Counter {\npublic:\n\tvoid bump() {}\n\tvoid run() { bump(); }\n};\n",
-        );
+        let g = parse("class Counter {\npublic:\n\tvoid bump() {}\n\tvoid run() { bump(); }\n};\n");
         let run = g
             .node_by_qualified("sample::main::Counter::run")
             .expect("run method");

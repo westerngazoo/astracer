@@ -159,12 +159,9 @@ mod tests {
     fn advise_sets_vertical_and_builds_suggestions() {
         let mut report = AnalysisReport::new(backend_graph());
         // Pretend Layer 2 flagged some complexity + a cycle.
-        report.diagnostics.push(Diagnostic::new(
-            "complexity",
-            "high_complexity",
-            Severity::Medium,
-            "x",
-        ).at(NodeId(0)));
+        report.diagnostics.push(
+            Diagnostic::new("complexity", "high_complexity", Severity::Medium, "x").at(NodeId(0)),
+        );
         report
             .metrics
             .push(Metric::project(MetricKind::Cyclicity, 0.25));
@@ -175,7 +172,8 @@ mod tests {
         assert!(report
             .suggestions
             .iter()
-            .any(|s| s.codes.contains(&"high_complexity".to_string()) || s.title.contains("complexity")));
+            .any(|s| s.codes.contains(&"high_complexity".to_string())
+                || s.title.contains("complexity")));
         assert!(report
             .suggestions
             .iter()
@@ -194,12 +192,10 @@ mod tests {
     #[test]
     fn config_weights_scale_priority() {
         let mut report = AnalysisReport::new(backend_graph());
-        report.diagnostics.push(Diagnostic::new(
-            "hazards",
-            "unsafe_usage",
-            Severity::Medium,
-            "unsafe in foo",
-        ).at(NodeId(0)));
+        report.diagnostics.push(
+            Diagnostic::new("hazards", "unsafe_usage", Severity::Medium, "unsafe in foo")
+                .at(NodeId(0)),
+        );
 
         let mut config = Config::default();
         config.suggestions.robustness = 0.0; // zero out robustness weight

@@ -13,7 +13,9 @@
 //!   `acquireVsCodeApi().postMessage` + `window.addEventListener("message")`.
 
 use lcw_core::SourceSnippet;
-use lcw_desktop_api::{AnalyzeArgs, DiscoverLanguagesArgs, GraphView, LanguageChoice, Progress, ReadSourceSnippetArgs};
+use lcw_desktop_api::{
+    AnalyzeArgs, DiscoverLanguagesArgs, GraphView, LanguageChoice, Progress, ReadSourceSnippetArgs,
+};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -288,18 +290,10 @@ impl EngineTransport for FixtureTransport {
 pub async fn pick_repo_folder(current: &str) -> Result<Option<String>, String> {
     if has_tauri() {
         let options = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &options,
-            &JsValue::from_str("directory"),
-            &JsValue::TRUE,
-        )
-        .map_err(|_| "building dialog options".to_string())?;
-        js_sys::Reflect::set(
-            &options,
-            &JsValue::from_str("multiple"),
-            &JsValue::FALSE,
-        )
-        .map_err(|_| "building dialog options".to_string())?;
+        js_sys::Reflect::set(&options, &JsValue::from_str("directory"), &JsValue::TRUE)
+            .map_err(|_| "building dialog options".to_string())?;
+        js_sys::Reflect::set(&options, &JsValue::from_str("multiple"), &JsValue::FALSE)
+            .map_err(|_| "building dialog options".to_string())?;
         js_sys::Reflect::set(
             &options,
             &JsValue::from_str("title"),

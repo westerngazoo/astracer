@@ -20,7 +20,9 @@ pub fn explain_function(context: ExplainContext, provider: &str) -> Result<Strin
     match provider {
         "ollama" => explain_ollama(&prompt),
         "gemini" => explain_gemini(&prompt),
-        other => Err(format!("unknown provider: {other} (expected ollama or gemini)")),
+        other => Err(format!(
+            "unknown provider: {other} (expected ollama or gemini)"
+        )),
     }
 }
 

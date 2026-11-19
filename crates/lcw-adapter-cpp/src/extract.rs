@@ -121,15 +121,7 @@ fn collect_defs(
                     join(scope, &name)
                 };
                 let is_method = is_method_def(child);
-                let id = add_function_node(
-                    graph,
-                    child,
-                    text,
-                    file,
-                    &owner,
-                    &qualified,
-                    is_method,
-                );
+                let id = add_function_node(graph, child, text, file, &owner, &qualified, is_method);
                 by_short.entry(name).or_default().push(id);
                 if let Some(body) = child.child_by_field_name("body") {
                     collect_defs(graph, by_short, body, text, file, &qualified);
@@ -578,9 +570,7 @@ pub fn module_path_from(path: &Path) -> String {
 }
 
 fn strip_cpp_ext(name: &str) -> &str {
-    for ext in [
-        ".cpp", ".cxx", ".cc", ".c++", ".hpp", ".hxx", ".hh", ".h",
-    ] {
+    for ext in [".cpp", ".cxx", ".cc", ".c++", ".hpp", ".hxx", ".hh", ".h"] {
         if let Some(stem) = name.strip_suffix(ext) {
             return stem;
         }

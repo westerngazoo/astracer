@@ -92,7 +92,14 @@ impl Advisor for ComplexityAdvisor {
         let targets = [Target::Maintainability, Target::Robustness];
         let priority = cap(60 + n * 3, 90);
         let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
-        if let Some(more) = overflow_summary(n, code, "high-complexity function(s)", FIX, &targets, priority) {
+        if let Some(more) = overflow_summary(
+            n,
+            code,
+            "high-complexity function(s)",
+            FIX,
+            &targets,
+            priority,
+        ) {
             out.push(more);
         }
         out
@@ -140,7 +147,9 @@ impl Advisor for HazardsAdvisor {
         let targets = [Target::Robustness];
         let priority = cap(65 + n * 2, 88);
         let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
-        if let Some(more) = overflow_summary(n, code, "`unsafe` function(s)", FIX, &targets, priority) {
+        if let Some(more) =
+            overflow_summary(n, code, "`unsafe` function(s)", FIX, &targets, priority)
+        {
             out.push(more);
         }
         out
@@ -164,7 +173,14 @@ impl Advisor for AllocationAdvisor {
         let targets = [Target::Performance, Target::Latency];
         let priority = cap(60 + n * 2, 85);
         let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
-        if let Some(more) = overflow_summary(n, code, "allocation-heavy function(s)", FIX, &targets, priority) {
+        if let Some(more) = overflow_summary(
+            n,
+            code,
+            "allocation-heavy function(s)",
+            FIX,
+            &targets,
+            priority,
+        ) {
             out.push(more);
         }
         out
@@ -194,7 +210,10 @@ impl Advisor for LayeringAdvisor {
         if n > PER_NODE_CAP {
             out.push(
                 Suggestion::new(
-                    format!("… and {} more layering violation(s)", n.saturating_sub(PER_NODE_CAP)),
+                    format!(
+                        "… and {} more layering violation(s)",
+                        n.saturating_sub(PER_NODE_CAP)
+                    ),
                     FIX,
                 )
                 .with_targets(targets)
@@ -218,12 +237,14 @@ impl Advisor for PurityAdvisor {
         if n == 0 {
             return Vec::new();
         }
-        const FIX: &str = "Push I/O and mutation to the edges (functional core / imperative shell) \
+        const FIX: &str =
+            "Push I/O and mutation to the edges (functional core / imperative shell) \
                            so the high-fan-in core becomes pure and easy to test.";
         let targets = [Target::Robustness, Target::Maintainability];
         let priority = cap(55 + n * 2, 80);
         let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
-        if let Some(more) = overflow_summary(n, code, "impure hotspot(s)", FIX, &targets, priority) {
+        if let Some(more) = overflow_summary(n, code, "impure hotspot(s)", FIX, &targets, priority)
+        {
             out.push(more);
         }
         out

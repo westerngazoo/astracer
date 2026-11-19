@@ -131,11 +131,7 @@ pub fn read_snippet(
     }
 
     let hl_start = (start as usize).min(file_lines.len()).max(1);
-    let hl_end_line = if end >= start && end > 0 {
-        end
-    } else {
-        start
-    };
+    let hl_end_line = if end >= start && end > 0 { end } else { start };
     let hl_end = (hl_end_line as usize).min(file_lines.len()).max(hl_start);
 
     let (lo, hi) = snippet_window(file_lines.len(), hl_start, hl_end, context, max_lines);
@@ -264,9 +260,6 @@ mod tests {
         assert!(snip.start_line <= start);
         assert!(snip.end_line >= end);
         assert!(snip.lines.len() <= 40);
-        assert_eq!(
-            snip.end_line - snip.start_line + 1,
-            snip.lines.len() as u32
-        );
+        assert_eq!(snip.end_line - snip.start_line + 1, snip.lines.len() as u32);
     }
 }

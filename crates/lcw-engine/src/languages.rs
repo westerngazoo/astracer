@@ -22,6 +22,17 @@ fn extension_to_language(ext: &str) -> Option<Language> {
     }
 }
 
+/// The file extensions [`discover_languages`] attributes to `lang`.
+pub fn language_extensions(lang: Language) -> &'static [&'static str] {
+    match lang {
+        Language::Rust => &["rs"],
+        Language::Typescript => &["ts", "tsx", "mts", "cts"],
+        Language::Python => &["py", "pyi"],
+        Language::Go => &["go"],
+        Language::Cpp => &["cpp", "cc", "cxx", "c++", "h", "hpp", "hh", "hxx"],
+    }
+}
+
 /// Scan `root` for source files and return the distinct languages found, in
 /// [`Language::ALL`] order. Does not read `livewalk.toml`; the UI uses this to
 /// offer a language picker without editing config.
@@ -74,6 +85,15 @@ pub fn discover_languages(root: &Path) -> Result<Vec<Language>, EngineError> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn extensions_round_trip_through_the_language_map() {
+        for lang in Language::ALL {
+            for ext in language_extensions(lang) {
+                assert_eq!(extension_to_language(ext), Some(lang), "{ext}");
+            }
+        }
+    }
 
     #[test]
     fn discovers_rust_and_cpp_in_same_folder() {

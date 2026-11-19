@@ -28,7 +28,7 @@ use lcw_config::{AdapterMode, Config, Language};
 use lcw_core::{AdapterError, AnalysisReport, CodeGraph, LanguageAdapter, SourceFile};
 
 pub use discover::{discover_files, read_sources};
-pub use languages::discover_languages;
+pub use languages::{discover_languages, language_extensions};
 
 /// Errors surfaced by the engine.
 #[derive(Debug, thiserror::Error)]

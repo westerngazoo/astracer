@@ -42,7 +42,7 @@ pub use card::{
     call_sites, edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard,
 };
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
-pub use file::{file_symbols, FileSymbol};
+pub use file::{file_symbols, focus_target, node_at, repo_relative, FileSymbol};
 pub use flow::{
     connection, entry_tiers, flows_from_entries, shortest_path, shortest_paths, Connection,
     EntryFlow, EntryTier, FlowPaths,

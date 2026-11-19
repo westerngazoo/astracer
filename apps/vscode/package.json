@@ -2,7 +2,7 @@
   "name": "livewalk",
   "displayName": "Livewalk (Live Code Walk)",
   "description": "Call graph, Code and Flow views for your workspace, with jump-to-source, caller CodeLens and flow-to-here, powered by the lcw CLI.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "livewalk",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -30,6 +30,21 @@
         "category": "Livewalk"
       },
       {
+        "command": "livewalk.openGraphHere",
+        "title": "Open Graph Here",
+        "category": "Livewalk"
+      },
+      {
+        "command": "livewalk.openGraphHereExplorer",
+        "title": "Open Graph Here",
+        "category": "Livewalk"
+      },
+      {
+        "command": "livewalk.revealInGraph",
+        "title": "Reveal in Graph",
+        "category": "Livewalk"
+      },
+      {
         "command": "livewalk.showFlowToHere",
         "title": "Show Flow to Here",
         "category": "Livewalk"
@@ -48,12 +63,44 @@
     "menus": {
       "editor/context": [
         {
+          "command": "livewalk.openGraphHere",
+          "when": "resourceScheme == file",
+          "group": "navigation@89"
+        },
+        {
+          "command": "livewalk.revealInGraph",
+          "when": "resourceScheme == file",
+          "group": "navigation@89"
+        },
+        {
           "command": "livewalk.showFlowToHere",
           "when": "editorLangId == rust",
           "group": "navigation@90"
         }
       ],
+      "explorer/context": [
+        {
+          "command": "livewalk.openGraphHereExplorer",
+          "when": "resourceScheme == file",
+          "group": "navigation@90"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "livewalk.openGraphHere",
+          "when": "resourceScheme == file",
+          "group": "navigation@90"
+        }
+      ],
       "commandPalette": [
+        {
+          "command": "livewalk.openGraphHereExplorer",
+          "when": "false"
+        },
+        {
+          "command": "livewalk.revealInGraph",
+          "when": "editorIsOpen"
+        },
         {
           "command": "livewalk.showFlowToHere",
           "when": "editorIsOpen"
@@ -71,6 +118,16 @@
           "type": "string",
           "default": "lcw",
           "markdownDescription": "Path to the `lcw` binary. The default `lcw` is looked up on `PATH`, then in `~/.cargo/bin`. Example: `/Users/me/projects/livewalk/target/release/lcw`."
+        },
+        "livewalk.confirmBeforeLoad": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Ask before **Open Graph Here** loads a project (shows the resolved project root, and whether a fresh cached graph makes it instant)."
+        },
+        "livewalk.followCursor": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Keep the open graph panel's selection on the function under the editor cursor (debounced)."
         },
         "livewalk.codeLens": {
           "type": "boolean",
@@ -104,7 +161,7 @@
     "build": "tsc -p .",
     "watch": "tsc -w -p .",
     "media": "node scripts/copy-media.js",
-    "test": "npm run build && node --test out/test/protocol.test.js out/test/webviewHtml.test.js",
+    "test": "npm run build && node --test out/test/protocol.test.js out/test/webviewHtml.test.js out/test/roots.test.js",
     "package": "npm run build && npx --yes @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {

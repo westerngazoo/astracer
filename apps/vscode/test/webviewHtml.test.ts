@@ -63,3 +63,24 @@ test("the initial repo is passed as an escaped meta attribute", () => {
   );
   assert.equal(escapeAttr(`&"`), "&amp;&quot;");
 });
+
+test("language, cache mode and the initial focus travel as meta tags", () => {
+  const html = buildWebviewHtml({
+    html: TRUNK,
+    assets: [],
+    assetUri: (n) => n,
+    bridgeUri: "b.js",
+    cspSource: "s",
+    nonce: "n",
+    initialRepo: "/r",
+    initialLanguage: "cpp",
+    initialCached: true,
+    initialFocus: { file: "/r/a.cpp", line: 7 },
+  });
+  assert.ok(html.includes(`<meta name="livewalk-initial-language" content="cpp">`));
+  assert.ok(html.includes(`<meta name="livewalk-initial-cached" content="1">`));
+  const focus = /name="livewalk-initial-focus" content="([^"]*)"/.exec(html)?.[1] ?? "";
+  assert.deepEqual(JSON.parse(focus.replace(/&quot;/g, '"')), { file: "/r/a.cpp", line: 7 });
+  assert.ok(build().includes(`<meta name="livewalk-initial-focus" content="">`));
+  assert.ok(build().includes(`<meta name="livewalk-initial-cached" content="0">`));
+});

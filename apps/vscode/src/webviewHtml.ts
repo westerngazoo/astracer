@@ -17,8 +17,14 @@ export interface HtmlOptions {
   /** `webview.cspSource`. */
   cspSource: string;
   nonce: string;
-  /** Repository the UI analyzes on load (the workspace folder), or "". */
+  /** Repository the UI analyzes on load (the project root), or "". */
   initialRepo: string;
+  /** Fast-mode language to analyze on load (`rust`, `cpp`, …). */
+  initialLanguage?: string;
+  /** Load the saved graph instead of parsing (it is fresh). */
+  initialCached?: boolean;
+  /** Function to select once the first load finishes. */
+  initialFocus?: { file: string; line?: number };
 }
 
 export function escapeAttr(s: string): string {
@@ -62,6 +68,11 @@ export function buildWebviewHtml(o: HtmlOptions): string {
       contentSecurityPolicy(o.cspSource, o.nonce),
     )}">`,
     `<meta name="livewalk-initial-repo" content="${escapeAttr(o.initialRepo)}">`,
+    `<meta name="livewalk-initial-language" content="${escapeAttr(o.initialLanguage ?? "")}">`,
+    `<meta name="livewalk-initial-cached" content="${o.initialCached ? "1" : "0"}">`,
+    `<meta name="livewalk-initial-focus" content="${escapeAttr(
+      o.initialFocus ? JSON.stringify(o.initialFocus) : "",
+    )}">`,
     `<script nonce="${o.nonce}" src="${escapeAttr(o.bridgeUri)}"></script>`,
   ].join("\n    ");
   if (/<head[^>]*>/i.test(html)) {

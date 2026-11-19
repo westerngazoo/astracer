@@ -12,7 +12,73 @@ import {
   snippetArgs,
   symbolAt,
   FileSymbol,
+  CANCELLED,
+  confirmLoadText,
+  focusMessage,
+  graphInfoArgs,
+  languageForFile,
+  pickLanguage,
+  stageFraction,
 } from "../src/protocol";
+
+test("focus messages carry an absolute file and an optional 1-based line", () => {
+  assert.deepEqual(focusMessage("/r/src/a.rs", 12), { type: "focus", file: "/r/src/a.rs", line: 12 });
+  assert.deepEqual(focusMessage("/r/src/a.rs"), { type: "focus", file: "/r/src/a.rs" });
+  assert.deepEqual(focusMessage("/r/a.rs", 0), { type: "focus", file: "/r/a.rs" });
+  assert.deepEqual(focusMessage("/r/a.rs", 2.5), { type: "focus", file: "/r/a.rs" });
+  assert.throws(() => focusMessage(""));
+  // The webview's FocusRequest (transport.rs) decodes exactly these keys.
+  assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(focusMessage("/f", 3)))).sort(), ["file", "line", "type"]);
+  assert.equal(CANCELLED, "cancelled");
+});
+
+test("languages map from file extensions like lcw's discovery", () => {
+  assert.equal(languageForFile("/r/src/main.rs"), "rust");
+  assert.equal(languageForFile("a/b.cpp"), "cpp");
+  assert.equal(languageForFile("a/b.h"), "cpp");
+  assert.equal(languageForFile("a/b.HPP"), "cpp");
+  assert.equal(languageForFile("x.ts"), "typescript");
+  assert.equal(languageForFile("x.tsx"), "typescript");
+  assert.equal(languageForFile("x.py"), "python");
+  assert.equal(languageForFile("x.go"), "go");
+  assert.equal(languageForFile("README.md"), undefined);
+  assert.equal(languageForFile("Makefile"), undefined);
+  assert.equal(languageForFile("/a.dir/Makefile"), undefined);
+});
+
+test("the clicked file's language is picked when several are present", () => {
+  const both = [
+    { id: "rust", label: "Rust" },
+    { id: "cpp", label: "C++" },
+  ];
+  assert.equal(pickLanguage([{ id: "go", label: "Go" }], "/x.rs"), "go");
+  assert.equal(pickLanguage(both, "/r/native.cpp"), "cpp");
+  assert.equal(pickLanguage(both, "/r/src/lib.rs"), "rust");
+  assert.equal(pickLanguage(both, "/r/x.py"), undefined);
+  assert.equal(pickLanguage(both), undefined);
+});
+
+test("stage fractions rise through the analyze phases", () => {
+  const order = ["config", "discover", "read", "parse", "analyze", "advise", "graph", "layout", "done"];
+  const fs = order.map((phase) => stageFraction({ phase, message: "" }) ?? -1);
+  for (let i = 1; i < fs.length; i++) {
+    assert.ok(fs[i] > fs[i - 1], `${order[i]} after ${order[i - 1]}`);
+  }
+  assert.equal(stageFraction({ phase: "done", message: "" }), 1);
+  assert.ok(
+    stageFraction({ phase: "parse", message: "parsed 3 nodes / 2 edges" })! >
+      stageFraction({ phase: "parse", message: "parsing 4 files" })!,
+  );
+  assert.equal(stageFraction({ phase: "mystery", message: "" }), undefined);
+});
+
+test("graph info args and the confirmation text", () => {
+  assert.deepEqual(graphInfoArgs("/r", "cpp"), ["graph", "--json", "--language", "cpp", "--", "/r"]);
+  assert.deepEqual(graphInfoArgs("/r"), ["graph", "--json", "--", "/r"]);
+  assert.match(confirmLoadText("/r", "rust"), /^Load project graph for \/r \(rust\)\? This may take/);
+  assert.match(confirmLoadText("/r", "rust", { exists: true, fresh: true, nodes: 10 }), /cached, instant, 10 nodes/);
+  assert.match(confirmLoadText("/r", undefined, { exists: true, fresh: false }), /re-parsed/);
+});
 
 test("isRequest accepts known methods only", () => {
   assert.ok(isRequest({ type: "request", id: 1, method: "analyze", params: {} }));

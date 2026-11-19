@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
-import { parseProgressLine, Progress } from "./protocol";
+import { CANCELLED, parseProgressLine, Progress } from "./protocol";
 
 /** Exit code `lcw` uses for an ambiguous or unknown symbol (candidates on stdout). */
 export const EXIT_AMBIGUOUS = 2;
@@ -25,6 +25,8 @@ export interface RunOptions {
   onProgress?: (p: Progress) => void;
   /** Milliseconds before the process is killed (default 10 minutes). */
   timeoutMs?: number;
+  /** Kills the process on cancellation; the run rejects with [`CANCELLED`]. */
+  cancel?: vscode.CancellationToken;
 }
 
 /**
@@ -58,7 +60,12 @@ export class Lcw {
       const out: Buffer[] = [];
       let err = "";
       let partial = "";
+      let cancelled = false;
       const timer = setTimeout(() => child.kill(), opts.timeoutMs ?? 10 * 60 * 1000);
+      const onCancel = opts.cancel?.onCancellationRequested(() => {
+        cancelled = true;
+        child.kill();
+      });
       child.stdout.on("data", (d: Buffer) => out.push(d));
       child.stderr.on("data", (d: Buffer) => {
         const text = partial + d.toString("utf8");
@@ -75,6 +82,7 @@ export class Lcw {
       });
       child.on("error", (e: NodeJS.ErrnoException) => {
         clearTimeout(timer);
+        onCancel?.dispose();
         if (e.code === "ENOENT") {
           reject(
             new LcwError(
@@ -94,15 +102,18 @@ export class Lcw {
       }
       child.on("close", (code) => {
         clearTimeout(timer);
+        onCancel?.dispose();
         err += partial;
         const stdout = Buffer.concat(out).toString("utf8");
         this.output.appendLine(
-          `lcw ${args.join(" ")} -> exit ${code} in ${Date.now() - started} ms (${stdout.length} bytes)`,
+          `lcw ${args.join(" ")} -> ${cancelled ? "cancelled" : `exit ${code}`} in ${Date.now() - started} ms (${stdout.length} bytes)`,
         );
         if (err.trim()) {
           this.output.appendLine(err.trimEnd());
         }
-        if (code === 0) {
+        if (cancelled) {
+          reject(new LcwError(CANCELLED, code, ""));
+        } else if (code === 0) {
           resolve(stdout);
         } else {
           const tail = err.trim().split("\n").slice(-6).join("\n");

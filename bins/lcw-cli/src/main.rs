@@ -571,6 +571,17 @@ struct GraphArgs {
     /// Explicit config file. Otherwise `livewalk.toml` is searched for.
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Fast-mode source language whose store to inspect (overrides
+    /// `livewalk.toml` `[adapter].language`).
+    #[arg(long, value_parser = clap::value_parser!(Language))]
+    language: Option<Language>,
+
+    /// Print `{store, exists, fresh, nodes, edges, files}` as JSON (exit 0
+    /// even when there is no store). `fresh`: no source file of the language
+    /// is newer than the store.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -622,7 +633,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Languages(args) => host_cmd::run_languages(args),
         Command::ExplainPrompt(args) => host_cmd::run_explain_prompt(args),
         Command::Init(args) => run_init(args),
-        Command::Graph(args) => run_graph_info(args),
+        Command::Graph(args) => run_graph_info(args, out),
         Command::Load(args) => run_load(args, log),
         Command::Cache { cmd } => cache_cmd::run(cmd),
         #[cfg(feature = "viewer")]
@@ -927,13 +938,34 @@ fn run_load(args: LoadArgs, log_override: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn run_graph_info(args: GraphArgs) -> Result<()> {
+fn run_graph_info(args: GraphArgs, out: Out) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
     let search_dir = config_search_dir(&path);
-    let cfg =
+    let mut cfg =
         Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
+    if let Some(lang) = args.language {
+        cfg.adapter.language = lang;
+    }
     let db_path = lcw_engine::cache::graph_db_file(&path, &cfg.cache.dir, cfg.cache_variant())
         .context("resolving graph store path")?;
+    if args.json {
+        let exists = db_path.is_file();
+        let sum = if exists {
+            lcw_graph_store::summary(&db_path).ok()
+        } else {
+            None
+        };
+        let fresh = exists && store_is_fresh(&path, &cfg, &db_path);
+        return out.print_json(&serde_json::json!({
+            "store": db_path.display().to_string(),
+            "language": cfg.adapter.language.cache_suffix(),
+            "exists": exists,
+            "fresh": fresh,
+            "nodes": sum.as_ref().map(|s| s.nodes),
+            "edges": sum.as_ref().map(|s| s.edges),
+            "files": sum.as_ref().map(|s| s.files),
+        }));
+    }
     if !db_path.is_file() {
         anyhow::bail!(
             "no graph store at {} — run `lcw analyze` on this repository first",
@@ -947,6 +979,28 @@ fn run_graph_info(args: GraphArgs) -> Result<()> {
     println!("  edges:   {}", sum.edges);
     println!("  files:   {}", sum.files);
     Ok(())
+}
+
+/// Whether no source file of the configured language (and no `livewalk.toml`)
+/// changed after the graph store was written. Fails closed: any I/O error is
+/// "stale".
+fn store_is_fresh(repo: &Path, cfg: &Config, db_path: &Path) -> bool {
+    let Ok(stored) = std::fs::metadata(db_path).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let exts = lcw_engine::language_extensions(cfg.adapter.language);
+    let Ok(files) = lcw_engine::discover_files(repo, cfg, exts) else {
+        return false;
+    };
+    let config = repo.join("livewalk.toml");
+    files
+        .iter()
+        .chain(config.is_file().then_some(&config))
+        .all(|f| {
+            std::fs::metadata(f)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t <= stored)
+        })
 }
 
 fn emit_store_paths(repo: &Path, cfg: &Config) {

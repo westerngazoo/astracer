@@ -65,6 +65,60 @@ pub fn file_symbols(graph: &CodeGraph, file: &str) -> Vec<FileSymbol> {
     out
 }
 
+/// The innermost definition in `file` whose span contains `line` (1-based):
+/// the closure inside a method inside an `impl`, not the method. Ties go to
+/// the later start (the nested one).
+pub fn node_at(graph: &CodeGraph, file: &str, line: u32) -> Option<NodeId> {
+    file_symbols(graph, file)
+        .into_iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .min_by(|a, b| {
+            (a.end_line - a.start_line)
+                .cmp(&(b.end_line - b.start_line))
+                .then_with(|| b.start_line.cmp(&a.start_line))
+        })
+        .map(|s| s.id)
+}
+
+/// Where an editor location lands in the graph: the definition under `line`
+/// ([`node_at`]), else the first definition in the file (cursor between
+/// functions, or no line at all — a file picked in an explorer). `file` may be
+/// absolute: it is tried relative to `repo_root` first, then as given, since
+/// graphs store repo-relative paths.
+pub fn focus_target(
+    graph: &CodeGraph,
+    repo_root: &str,
+    file: &str,
+    line: Option<u32>,
+) -> Option<NodeId> {
+    let rel = repo_relative(repo_root, file);
+    let candidates = [rel.as_str(), file];
+    for f in candidates {
+        if let Some(id) = line.and_then(|l| node_at(graph, f, l)) {
+            return Some(id);
+        }
+        if let Some(first) = file_symbols(graph, f).first() {
+            return Some(first.id);
+        }
+    }
+    None
+}
+
+/// `file` relative to `root` (forward slashes), or `file` itself when it is
+/// not under `root`.
+pub fn repo_relative(root: &str, file: &str) -> String {
+    let f = normalize(file);
+    let r = normalize(root);
+    let r = r.trim_end_matches('/');
+    if r.is_empty() {
+        return f;
+    }
+    match f.strip_prefix(r) {
+        Some(rest) if rest.starts_with('/') => rest.trim_start_matches('/').to_string(),
+        _ => f,
+    }
+}
+
 fn normalize(path: &str) -> String {
     let p = path.replace('\\', "/");
     p.strip_prefix("./").unwrap_or(&p).to_string()
@@ -92,6 +146,50 @@ mod tests {
         let g = app_graph();
         assert_eq!(file_symbols(&g, "./src/core.rs").len(), 3);
         assert_eq!(file_symbols(&g, "src\\core.rs").len(), 3);
+    }
+
+    #[test]
+    fn node_at_picks_the_innermost_definition() {
+        let mut g = app_graph();
+        // `run` spans 20..=23; nest a closure at 21..=22 inside it.
+        let f = g.intern_file("src/main.rs");
+        let closure = g.add_node(lcw_core::Node {
+            id: NodeId(0),
+            name: "{closure}".into(),
+            qualified_name: "app::run::{closure}".into(),
+            module_path: "app::run".into(),
+            kind: NodeKind::Closure,
+            span: lcw_core::SourceSpan::new(f, 21, 4, 22, 5),
+            flags: Default::default(),
+            stats: Default::default(),
+        });
+        let run = crate::fixtures::id(&g, "app::run");
+        assert_eq!(node_at(&g, "src/main.rs", 21), Some(closure));
+        assert_eq!(node_at(&g, "src/main.rs", 20), Some(run));
+        assert_eq!(node_at(&g, "src/main.rs", 23), Some(run));
+        assert_eq!(node_at(&g, "src/main.rs", 40), None);
+    }
+
+    #[test]
+    fn focus_target_falls_back_to_the_first_definition() {
+        let g = app_graph();
+        let main = crate::fixtures::id(&g, "app::main");
+        let save = crate::fixtures::id(&g, "app::io::save");
+        let load = crate::fixtures::id(&g, "app::io::load");
+        assert_eq!(focus_target(&g, "/repo", "/repo/src/io.rs", Some(31)), Some(save));
+        assert_eq!(focus_target(&g, "/repo", "/repo/src/io.rs", Some(20)), Some(load));
+        assert_eq!(focus_target(&g, "/repo/", "/repo/src/main.rs", None), Some(main));
+        assert_eq!(focus_target(&g, "", "src/io.rs", Some(32)), Some(save));
+        assert_eq!(focus_target(&g, "/repo", "/elsewhere/src/io.rs", Some(31)), None);
+    }
+
+    #[test]
+    fn repo_relative_strips_only_whole_components() {
+        assert_eq!(repo_relative("/r", "/r/src/a.rs"), "src/a.rs");
+        assert_eq!(repo_relative("/r/", "/r/src/a.rs"), "src/a.rs");
+        assert_eq!(repo_relative("C:\\r", "C:\\r\\src\\a.rs"), "src/a.rs");
+        assert_eq!(repo_relative("/r", "/rx/a.rs"), "/rx/a.rs");
+        assert_eq!(repo_relative("", "src/a.rs"), "src/a.rs");
     }
 
     #[test]

@@ -29,6 +29,10 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      # `--all` stops at the workspace boundary, and both desktop crates sit
+      # outside it.
+      - run: cargo fmt --check --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo fmt --check --manifest-path apps/desktop/frontend/Cargo.toml
 
   clippy:
     name: clippy
@@ -59,6 +63,21 @@ jobs:
       # no longer satisfies the manifests. The frontend's lock is already held
       # to `--locked` by the wasm job.
       - run: cargo metadata --locked --format-version 1 --manifest-path apps/desktop/src-tauri/Cargo.toml > /dev/null
+
+  desktop:
+    name: desktop backend (cargo check, macOS)
+    # macOS ships WebKit, so this needs none of the webkit2gtk/gtk packages a
+    # Linux runner would have to install. `build.rs` writes a placeholder
+    # `frontend/dist`, so no trunk build is needed for `generate_context!`.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo check --locked
+        working-directory: apps/desktop/src-tauri
 
   test:
     name: test (${{ matrix.os }})

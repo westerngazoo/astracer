@@ -410,11 +410,13 @@
         margin-bottom: 14px;
       }
 
+      /* Fills the side pane, but never collapses to its header when the
+         cards below (long suggestion lists) overflow: the pane scrolls. */
       .card.detail {
         display: flex;
         flex-direction: column;
         flex: 1;
-        min-height: 0;
+        min-height: min(62vh, 560px);
         margin-bottom: 14px;
       }
 
@@ -1248,6 +1250,254 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      /* ---- loading: inline spinner + overlay over the canvas ------------- */
+
+      .hidden {
+        display: none !important;
+      }
+
+      .spin-inline {
+        display: inline-block;
+        width: 11px;
+        height: 11px;
+        margin-right: 7px;
+        vertical-align: -1px;
+        border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+        border-top-color: currentColor;
+        border-radius: 50%;
+        animation: lw-spin 0.8s linear infinite;
+      }
+
+      .status .spin-inline {
+        color: var(--accent);
+      }
+
+      @keyframes lw-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .load-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: color-mix(in srgb, var(--bg) 72%, transparent);
+        backdrop-filter: blur(2px);
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition: opacity 0.35s ease, visibility 0s linear 0.35s;
+      }
+
+      .load-overlay.visible {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+        transition: opacity 0.2s ease;
+      }
+
+      .load-card {
+        width: min(440px, calc(100% - 32px));
+        padding: 22px 24px 20px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+        text-align: center;
+      }
+
+      .load-card.failed {
+        border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+      }
+
+      .load-graph {
+        position: relative;
+        width: 160px;
+        height: 84px;
+        margin: 2px auto 14px;
+      }
+
+      .load-node {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        margin: -6px 0 0 -6px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+        animation: lw-pulse 1.4s ease-in-out infinite;
+      }
+
+      .load-node:nth-child(3n) {
+        background: var(--accent-2);
+      }
+
+      .load-edge {
+        position: absolute;
+        height: 2px;
+        margin-top: -1px;
+        transform-origin: 0 50%;
+        border-radius: 1px;
+        background: linear-gradient(
+          90deg,
+          var(--border) 0%,
+          var(--border) 35%,
+          var(--accent) 50%,
+          var(--border) 65%,
+          var(--border) 100%
+        );
+        background-size: 300% 100%;
+        animation: lw-flow 1.6s linear infinite;
+      }
+
+      @keyframes lw-pulse {
+        0%,
+        100% {
+          transform: scale(0.8);
+          opacity: 0.6;
+          box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+        }
+        50% {
+          transform: scale(1.15);
+          opacity: 1;
+          box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 0%, transparent);
+        }
+      }
+
+      @keyframes lw-flow {
+        from {
+          background-position: 100% 0;
+        }
+        to {
+          background-position: 0 0;
+        }
+      }
+
+      .load-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .load-card.failed .load-title {
+        color: var(--danger);
+      }
+
+      .load-repo {
+        margin-top: 4px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .load-steps {
+        display: flex;
+        justify-content: center;
+        gap: 6px;
+        margin-top: 14px;
+      }
+
+      .load-step {
+        padding: 2px 9px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-size: 11px;
+        color: var(--muted);
+        transition: color 0.2s, border-color 0.2s, background 0.2s;
+      }
+
+      .load-step.done {
+        color: var(--accent-2);
+        border-color: color-mix(in srgb, var(--accent-2) 50%, var(--border));
+      }
+
+      .load-step.active {
+        color: #fff;
+        border-color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 28%, var(--panel-2));
+      }
+
+      .load-stage {
+        margin-top: 10px;
+        min-height: 18px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .load-bar {
+        position: relative;
+        height: 4px;
+        margin-top: 10px;
+        overflow: hidden;
+        border-radius: 2px;
+        background: var(--panel-3);
+      }
+
+      .load-bar .fill {
+        height: 100%;
+        border-radius: 2px;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        transition: width 0.3s ease;
+      }
+
+      .load-bar.indeterminate .fill {
+        position: absolute;
+        width: 35% !important;
+        animation: lw-indeterminate 1.2s ease-in-out infinite;
+      }
+
+      @keyframes lw-indeterminate {
+        from {
+          left: -35%;
+        }
+        to {
+          left: 100%;
+        }
+      }
+
+      .load-error {
+        margin: 12px 0 0;
+        max-height: 160px;
+        overflow: auto;
+        padding: 8px 10px;
+        text-align: left;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--text);
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+
+      .load-actions {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .load-node,
+        .load-edge,
+        .spin-inline,
+        .load-bar.indeterminate .fill {
+          animation-duration: 3s;
+        }
       }
     </style>
     <script>

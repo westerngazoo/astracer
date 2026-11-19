@@ -2,6 +2,7 @@
 
 mod app;
 mod flow_diagram;
+mod loading;
 mod transport;
 
 use app::App;

@@ -164,3 +164,7 @@ jobs:
       # surface when someone runs `cargo tauri dev`.
       - run: cargo check --target wasm32-unknown-unknown --locked
         working-directory: apps/desktop/frontend
+      # The crate only builds for wasm, so its dependency-free modules are
+      # unit-tested on their own.
+      - run: rustc --edition 2021 --test src/loading.rs -o target/loading-test && target/loading-test
+        working-directory: apps/desktop/frontend

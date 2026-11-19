@@ -18,9 +18,9 @@ use lcw_core::{
     CodeGraph, Diagnostic, EdgeKind, GroupBox, NodeId, NodeKind, SourceSnippet, Suggestion, Summary,
 };
 use lcw_query::{
-    branches, call_tree, connection, edge_kind_str, entry_points, kind_str, node_card, outline,
-    primary_entry, reach_count, run_roots, CallRef, CallTreeNode, CallTreeOptions, Connection,
-    Direction, EntryKind, NodeCard, Outline, OutlineNode, RootKind,
+    branches, call_tree, connection, edge_kind_str, entry_points, focus_target, kind_str,
+    node_card, outline, primary_entry, reach_count, run_roots, CallRef, CallTreeNode,
+    CallTreeOptions, Connection, Direction, EntryKind, NodeCard, Outline, OutlineNode, RootKind,
 };
 use lcw_render::interact;
 use lcw_render::web::WebViewer;
@@ -37,7 +37,8 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent, WheelEvent};
 
 use crate::flow_diagram::{self, CallTreeLayout, FlowTreeNode};
-use crate::transport::{self, EngineTransport, ExplainContext, ExplainMetrics, Host};
+use crate::loading::{phase_label, LoadState, Running, StepState};
+use crate::transport::{self, EngineTransport, ExplainContext, ExplainMetrics, FocusRequest, Host};
 
 /// Bounded call tree shown under the selected node.
 const TREE_DEPTH: u32 = 3;
@@ -669,10 +670,14 @@ fn load_node_source(nav: Nav, idx: usize, card: &NodeCard, whole_file: bool) {
         if nav.selected.get_untracked() != Some(idx) {
             return;
         }
+        let ready = result.is_ok();
         nav.source.set(match result {
             Ok(snip) => SourcePane::Ready(snip),
             Err(e) => SourcePane::Error(e),
         });
+        if ready && !whole_file {
+            scroll_code_to_highlight();
+        }
     });
 }
 
@@ -892,16 +897,19 @@ pub fn App() -> impl IntoView {
         ..RenderState::default()
     }));
 
-    // VS Code opens on the workspace folder and its saved graph: the panel
-    // should show something on open, and the editor's CodeLens keeps the
-    // cached graph fresh.
+    // VS Code opens on the project the user right-clicked, in the language
+    // the extension picked, from the saved graph only when it is fresh.
     let initial_repo = transport::initial_repo_path();
-    let use_cache = RwSignal::new(initial_repo.is_some());
+    let use_cache = RwSignal::new(transport::initial_use_cache());
     let path = RwSignal::new(initial_repo.unwrap_or_default());
     let semantic = RwSignal::new(false);
     let language_choices = RwSignal::new(Vec::<(String, String)>::new());
-    let selected_language = RwSignal::new(String::from("rust"));
+    let selected_language =
+        RwSignal::new(transport::initial_language().unwrap_or_else(|| "rust".into()));
     let busy = RwSignal::new(false);
+    let load = RwSignal::new(LoadState::Idle);
+    // An editor focus request that arrived before the graph it targets.
+    let pending_focus: PendingFocus = Rc::new(RefCell::new(transport::initial_focus()));
     let status = RwSignal::new(String::from("Idle — enter a repository path and analyze."));
     let error = RwSignal::new(Option::<String>::None);
     let summary = RwSignal::new(Option::<Summary>::None);
@@ -929,8 +937,29 @@ pub fn App() -> impl IntoView {
     let actions: ActionsHandle = StoredValue::new_local(make_actions(state.clone(), nav, labels));
     let state_handle: StateHandle = StoredValue::new_local(state.clone());
 
-    // Stream backend progress into the status line.
-    transport::on_progress(move |p| status.set(format!("[{}] {}", p.phase, p.message)));
+    // Stream backend progress into the status line and the loading overlay.
+    transport::on_progress(move |p| {
+        status.set(format!("[{}] {}", p.phase, p.message));
+        load.update(|l| {
+            if let LoadState::Running(r) = l {
+                r.advance(&p.phase, &p.message);
+            }
+        });
+    });
+
+    // The editor asks to show a function: select it now, or once the graph
+    // being loaded is ready.
+    {
+        let state = state.clone();
+        let pending = pending_focus.clone();
+        transport::on_focus(move |req| {
+            if busy.get_untracked() || state.borrow().graph.is_none() {
+                *pending.borrow_mut() = Some(req);
+            } else {
+                apply_focus(&state, nav, labels, status, &req);
+            }
+        });
+    }
 
     let refresh_languages: Rc<dyn Fn()> = Rc::new({
         move || {
@@ -996,7 +1025,9 @@ pub fn App() -> impl IntoView {
     // handler or a mount hook, never as part of a reactive computation.
     let run_analysis: Rc<dyn Fn()> = {
         let state = state.clone();
+        let pending_focus = pending_focus.clone();
         Rc::new(move || {
+            let pending_focus = pending_focus.clone();
             let repo = path.get_untracked();
             let hosted = transport::has_engine();
             if hosted && repo.trim().is_empty() {
@@ -1040,6 +1071,7 @@ pub fn App() -> impl IntoView {
             }
             busy.set(true);
             error.set(None);
+            load.set(LoadState::Running(Running::start(cache)));
             nav.reset();
             status.set(
                 if hosted {
@@ -1104,7 +1136,10 @@ pub fn App() -> impl IntoView {
                         };
                         state.borrow_mut().scene = scene;
                         match present_scene(&state).await {
-                            Err(e) => error.set(Some(e)),
+                            Err(e) => {
+                                load.set(LoadState::Failed(e.clone()));
+                                error.set(Some(e));
+                            }
                             Ok(swapped) => {
                                 // The renderer fell back to a replacement canvas
                                 // (see `present_scene`): its listeners went with
@@ -1113,23 +1148,32 @@ pub fn App() -> impl IntoView {
                                     wire_pointer_events(&fresh, state.clone(), nav, labels);
                                 }
                                 refresh_view(&state, labels);
+                                load.set(LoadState::Idle);
                                 status.set(
                                     "Analysis complete — walk the Run tree from main and its threads."
                                         .into(),
                                 );
+                                let focus = pending_focus.borrow_mut().take();
+                                if let Some(req) = focus {
+                                    apply_focus(&state, nav, labels, status, &req);
+                                }
                             }
                         }
                     }
+                    Err(e) if e == transport::CANCELLED => {
+                        status.set("Cancelled.".into());
+                        load.set(LoadState::Cancelled);
+                    }
                     Err(e) => {
                         status.set(e.clone());
-                        if cache {
-                            error.set(Some(format!(
+                        load.set(LoadState::Failed(if cache {
+                            format!(
                                 "{e}\n\nTip: uncheck \"cached\" for a fresh parse, or run \
                                  `lcw analyze` on this repo first so graph.sqlite exists."
-                            )));
+                            )
                         } else {
-                            error.set(Some(e));
-                        }
+                            e
+                        }));
                     }
                 }
                 busy.set(false);
@@ -1137,6 +1181,10 @@ pub fn App() -> impl IntoView {
         })
     };
     let on_analyze = {
+        let run = run_analysis.clone();
+        move |_| run()
+    };
+    let on_retry = {
         let run = run_analysis.clone();
         move |_| run()
     };
@@ -1356,6 +1404,7 @@ pub fn App() -> impl IntoView {
                     "cached"
                 </label>
                 <button class="primary" on:click=on_analyze disabled=move || busy.get()>
+                    <span class="spin-inline" class:hidden=move || !busy.get()></span>
                     {move || if busy.get() {
                         if use_cache.get() { "Loading…" } else { "Analyzing…" }
                     } else if use_cache.get() {
@@ -1450,6 +1499,7 @@ pub fn App() -> impl IntoView {
                         height="136"
                         title="Overview — click or drag to recenter"
                     ></canvas>
+                    <LoadOverlay load=load repo=path on_retry=on_retry />
                 </div>
                 <div class="splitter split-side" role="separator" aria-label="Resize detail panel"></div>
                 <aside class="side">
@@ -1466,7 +1516,190 @@ pub fn App() -> impl IntoView {
                 </aside>
             </div>
 
-            <footer class="status">{move || status.get()}</footer>
+            <footer class="status">
+                <span class="spin-inline" class:hidden=move || !busy.get()></span>
+                {move || status.get()}
+            </footer>
+        </div>
+    }
+}
+
+/// See `App`'s `pending_focus`.
+type PendingFocus = Rc<RefCell<Option<FocusRequest>>>;
+
+/// Select (and center on) the function an editor location names: the
+/// innermost definition under the line, else the file's first one. A no-op
+/// when it is already selected, so cursor following does not reload the Code
+/// tab on every move inside one function.
+fn apply_focus(
+    state: &Shared,
+    nav: Nav,
+    labels: RwSignal<Vec<LabelBox>>,
+    status: RwSignal<String>,
+    req: &FocusRequest,
+) {
+    let target = {
+        let s = state.borrow();
+        let Some(graph) = s.graph.as_ref() else {
+            return;
+        };
+        focus_target(graph, &nav.repo_root.get_untracked(), &req.file, req.line)
+    };
+    let short = req.file.rsplit(['/', '\\']).next().unwrap_or(&req.file);
+    let Some(id) = target else {
+        status.set(format!(
+            "No function from {short} in this graph (another language, or not analyzed yet)."
+        ));
+        return;
+    };
+    let idx = id.0 as usize;
+    if nav.selected.get_untracked() == Some(idx) {
+        return;
+    }
+    select_node(state, nav, labels, idx, true, true);
+    let name = nav
+        .card
+        .with_untracked(|c| c.as_ref().map(|c| c.name.clone()))
+        .unwrap_or_default();
+    status.set(match req.line {
+        Some(line) => format!("Showing {name} — {short}:{line}"),
+        None => format!("Showing {name} — first function in {short}"),
+    });
+}
+
+/// Node positions of the overlay's little animated graph (in a 160×84 box)
+/// and its edges.
+const LOAD_NODES: [(f32, f32); 6] = [
+    (14.0, 42.0),
+    (58.0, 14.0),
+    (58.0, 70.0),
+    (104.0, 42.0),
+    (146.0, 18.0),
+    (146.0, 66.0),
+];
+const LOAD_EDGES: [(usize, usize); 6] = [(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (3, 5)];
+
+/// Inline style placing a 2px edge from node `a` to node `b`.
+fn load_edge_style(a: usize, b: usize) -> String {
+    let (x0, y0) = LOAD_NODES[a];
+    let (x1, y1) = LOAD_NODES[b];
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    format!(
+        "left:{x0:.1}px;top:{y0:.1}px;width:{:.1}px;transform:rotate({:.3}rad);",
+        (dx * dx + dy * dy).sqrt(),
+        dy.atan2(dx)
+    )
+}
+
+/// The overlay over the graph canvas while a load runs: an animated call
+/// graph, the repository, the current stage and a progress bar; on failure
+/// the error with Retry. Fades out (CSS) once the graph is presented.
+#[component]
+fn LoadOverlay(
+    load: RwSignal<LoadState>,
+    repo: RwSignal<String>,
+    on_retry: impl FnMut(MouseEvent) + 'static,
+) -> impl IntoView {
+    // The card keeps the last state while the overlay fades out, so a
+    // finished load fades at "done", not as an empty card.
+    let shown = RwSignal::new(LoadState::Idle);
+    Effect::new(move |_| {
+        let l = load.get();
+        if l != LoadState::Idle {
+            shown.set(l);
+        }
+    });
+    let visible = move || load.get() != LoadState::Idle;
+    let running = move || matches!(shown.get(), LoadState::Running(_));
+    let title = move || match shown.get() {
+        LoadState::Running(r) if r.phase == "done" => "Graph ready",
+        LoadState::Running(r) if r.cached => "Opening saved graph",
+        LoadState::Running(_) => "Loading project graph — please wait",
+        LoadState::Failed(_) => "Could not load the graph",
+        LoadState::Cancelled => "Cancelled",
+        LoadState::Idle => "",
+    };
+    let stage = move || match shown.get() {
+        LoadState::Running(r) if r.phase.is_empty() => r.message,
+        LoadState::Running(r) => format!("{} · {}", phase_label(&r.phase), r.message),
+        _ => String::new(),
+    };
+    let fraction = move || match shown.get() {
+        LoadState::Running(r) => r.fraction,
+        _ => None,
+    };
+    let detail = move || match shown.get() {
+        LoadState::Failed(e) => e,
+        LoadState::Cancelled => "The analysis was stopped before the graph was ready.".into(),
+        _ => String::new(),
+    };
+    let edges = LOAD_EDGES
+        .iter()
+        .enumerate()
+        .map(|(i, &(a, b))| {
+            let style = format!("{}animation-delay:{}ms;", load_edge_style(a, b), i * 180);
+            view! { <span class="load-edge" style=style></span> }
+        })
+        .collect::<Vec<_>>();
+    let nodes = LOAD_NODES
+        .iter()
+        .enumerate()
+        .map(|(i, &(x, y))| {
+            let style = format!("left:{x:.1}px;top:{y:.1}px;animation-delay:{}ms;", i * 200);
+            view! { <span class="load-node" style=style></span> }
+        })
+        .collect::<Vec<_>>();
+    view! {
+        <div
+            class="load-overlay"
+            class:visible=visible
+            role="status"
+            aria-live="polite"
+        >
+            <div class="load-card" class:failed=move || matches!(shown.get(), LoadState::Failed(_))>
+                <div class="load-graph" class:hidden=move || !running()>{edges}{nodes}</div>
+                <div class="load-title">{title}</div>
+                <div class="load-repo" title=move || repo.get()>{move || repo.get()}</div>
+                <div class="load-steps" class:hidden=move || !running()>
+                    {move || {
+                        match shown.get() {
+                            LoadState::Running(r) => r.steps(),
+                            _ => Vec::new(),
+                        }
+                            .into_iter()
+                            .map(|(name, s)| {
+                                view! {
+                                    <span
+                                        class="load-step"
+                                        class:active=s == StepState::Active
+                                        class:done=s == StepState::Done
+                                    >
+                                        {name}
+                                    </span>
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    }}
+                </div>
+                <div class="load-stage" class:hidden=move || !running()>{stage}</div>
+                <div
+                    class="load-bar"
+                    class:hidden=move || !running()
+                    class:indeterminate=move || fraction().is_none()
+                >
+                    <div
+                        class="fill"
+                        style:width=move || {
+                            fraction().map(|f| format!("{:.0}%", f * 100.0)).unwrap_or_default()
+                        }
+                    ></div>
+                </div>
+                <pre class="load-error" class:hidden=move || detail().is_empty()>{detail}</pre>
+                <div class="load-actions" class:hidden=running>
+                    <button type="button" class="primary" on:click=on_retry>"Retry"</button>
+                    <button type="button" on:click=move |_| load.set(LoadState::Idle)>"Dismiss"</button>
+                </div>
+            </div>
         </div>
     }
 }
@@ -2871,6 +3104,35 @@ fn scroll_side_to_top() {
     {
         side.set_scroll_top(0);
     }
+}
+
+/// Once the Code tab has rendered a snippet, scroll it so the highlighted
+/// span starts a third of the way down (snippets can be the whole file).
+/// Deferred a tick: the rows are rendered by the effect the snippet signal
+/// triggers.
+fn scroll_code_to_highlight() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let scroll = Closure::once_into_js(|| {
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let pane = doc.query_selector(".detail-code").ok().flatten();
+        let first = doc
+            .query_selector(".detail-code .code-line.hl")
+            .ok()
+            .flatten();
+        if let (Some(pane), Some(first)) = (pane, first) {
+            let offset =
+                first.get_bounding_client_rect().top() - pane.get_bounding_client_rect().top();
+            let target =
+                f64::from(pane.scroll_top()) + offset - f64::from(pane.client_height()) / 3.0;
+            pane.set_scroll_top(target.max(0.0) as i32);
+        }
+    });
+    let _ =
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(scroll.unchecked_ref(), 30);
 }
 
 /// Match the canvas backing store to its CSS pixel size so mouse coordinates

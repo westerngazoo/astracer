@@ -86,7 +86,23 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["window", "livewalkVsCode"], js_name = onProgress)]
     fn vscode_on_progress(handler: &Closure<dyn FnMut(JsValue)>);
+
+    #[wasm_bindgen(js_namespace = ["window", "livewalkVsCode"], js_name = onFocus)]
+    fn vscode_on_focus(handler: &Closure<dyn FnMut(JsValue)>);
 }
+
+/// The editor asks the graph to select the function at `file:line` (VS Code
+/// `focus` message): `file` is absolute, `line` 1-based; without a line, the
+/// file's first function.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct FocusRequest {
+    pub file: String,
+    pub line: Option<u32>,
+}
+
+/// Error string of an analyze the user cancelled in the host (VS Code's
+/// progress notification).
+pub const CANCELLED: &str = "cancelled";
 
 /// Which process hosts the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,15 +144,55 @@ pub fn has_engine() -> bool {
 /// The repository the host wants analyzed on load (VS Code: the workspace
 /// folder), if it named one.
 pub fn initial_repo_path() -> Option<String> {
+    bridge_get("initialRepo")?
+        .as_string()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// The language the host chose for the initial load (VS Code), if any.
+pub fn initial_language() -> Option<String> {
+    bridge_get("initialLanguage")?
+        .as_string()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Whether the initial load should open the saved graph (the host found it
+/// fresh) rather than parse.
+pub fn initial_use_cache() -> bool {
+    bridge_get("initialCached").is_some_and(|v| v.is_truthy())
+}
+
+/// The function the host wants selected once the initial load finishes.
+pub fn initial_focus() -> Option<FocusRequest> {
+    let v = bridge_get("initialFocus")?;
+    if v.is_null() || v.is_undefined() {
+        return None;
+    }
+    serde_wasm_bindgen::from_value(v).ok()
+}
+
+fn bridge_get(key: &str) -> Option<JsValue> {
     if host() != Host::VsCode {
         return None;
     }
     let window = web_sys::window()?;
     let bridge = js_sys::Reflect::get(&window, &JsValue::from_str(VSCODE_BRIDGE)).ok()?;
-    js_sys::Reflect::get(&bridge, &JsValue::from_str("initialRepo"))
-        .ok()?
-        .as_string()
-        .filter(|s| !s.trim().is_empty())
+    js_sys::Reflect::get(&bridge, &JsValue::from_str(key)).ok()
+}
+
+/// Subscribe to the host's focus requests (VS Code only; a no-op elsewhere).
+/// The closure lives as long as the app, like [`on_progress`]'s.
+pub fn on_focus(mut handler: impl FnMut(FocusRequest) + 'static) {
+    if host() != Host::VsCode {
+        return;
+    }
+    let closure = Closure::wrap(Box::new(move |payload: JsValue| {
+        if let Ok(req) = serde_wasm_bindgen::from_value::<FocusRequest>(payload) {
+            handler(req);
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+    vscode_on_focus(&closure);
+    closure.forget();
 }
 
 /// The transport for the detected [`host`].

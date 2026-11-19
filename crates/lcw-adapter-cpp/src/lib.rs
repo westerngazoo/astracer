@@ -60,7 +60,7 @@ mod tests {
             .edges_out(run)
             .map(|(to, e)| (g.node(to).qualified_name.clone(), e.kind))
             .collect();
-        assert!(outs.len() >= 1);
+        assert!(!outs.is_empty());
         assert!(outs.iter().all(|(_, k)| *k == EdgeKind::DirectCall));
     }
 

@@ -96,7 +96,6 @@ fn run_clean(args: CleanArgs) -> Result<()> {
         legacy_only: args.legacy_only,
         older_than_days: args.older_than,
         keep_repo: args.keep_repo,
-        ..CacheCleanOptions::default()
     };
     let report = cache::clean_cache_dirs(&opts).context("cleaning cache directories")?;
 

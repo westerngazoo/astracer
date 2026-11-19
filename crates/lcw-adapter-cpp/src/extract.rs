@@ -110,16 +110,8 @@ fn collect_defs(
                 if name.is_empty() {
                     continue;
                 }
-                let owner = if is_method_def(child) {
-                    scope.to_string()
-                } else {
-                    scope.to_string()
-                };
-                let qualified = if is_method_def(child) {
-                    join(scope, &name)
-                } else {
-                    join(scope, &name)
-                };
+                let owner = scope.to_string();
+                let qualified = join(scope, &name);
                 let is_method = is_method_def(child);
                 let id = add_function_node(graph, child, text, file, &owner, &qualified, is_method);
                 by_short.entry(name).or_default().push(id);
@@ -400,7 +392,7 @@ fn callee_of_call(call: TsNode, text: &str) -> Option<Callee> {
             let name = node_text(func, text);
             Some(Callee {
                 kind: CallClass::Direct,
-                short: last_segment(name.replace("::", "::").as_str()),
+                short: last_segment(name.as_str()),
             })
         }
         _ => Some(Callee {
@@ -449,9 +441,7 @@ fn name_from_declarator(decl: TsNode, text: &str) -> String {
             .child_by_field_name("declarator")
             .map(|d| name_from_declarator(d, text))
             .unwrap_or_default(),
-        "qualified_identifier" | "scoped_identifier" => {
-            last_segment(node_text(decl, text).replace("::", "::").as_str())
-        }
+        "qualified_identifier" | "scoped_identifier" => last_segment(&node_text(decl, text)),
         _ => {
             let mut cursor = decl.walk();
             for child in decl.named_children(&mut cursor) {

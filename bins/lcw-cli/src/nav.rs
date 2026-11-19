@@ -25,22 +25,35 @@ fn base_name(path: &str) -> &str {
 }
 
 /// Call sites as `file:263, 269, 271` (a new `; file:` per file), or `None`
-/// when no site has a known file. `short` prints base names only.
+/// when no site has a known file. A line holding several calls lists each as
+/// `line:col` (1-based column), e.g. `file:12:5, 12:18`. `short` prints base
+/// names only. `sites` must be sorted, as [`lcw_query::call_sites`] returns.
 fn site_list(graph: &CodeGraph, sites: &[lcw_core::SourceSpan], short: bool) -> Option<String> {
+    let sites: Vec<_> = sites.iter().filter(|s| s.start_line > 0).collect();
+    let same_line = |a: &lcw_core::SourceSpan, b: &lcw_core::SourceSpan| {
+        a.file() == b.file() && a.start_line == b.start_line
+    };
     let mut out = String::new();
     let mut file = None;
-    for s in sites.iter().filter(|s| s.start_line > 0) {
+    for (i, s) in sites.iter().enumerate() {
         let Some(p) = graph.file_path(s.file()) else {
             continue;
         };
+        let shared = (i > 0 && same_line(sites[i - 1], s))
+            || sites.get(i + 1).is_some_and(|n| same_line(n, s));
+        let pos = if shared {
+            format!("{}:{}", s.start_line, s.start_col + 1)
+        } else {
+            s.start_line.to_string()
+        };
         if file == Some(s.file()) {
-            let _ = write!(out, ", {}", s.start_line);
+            let _ = write!(out, ", {pos}");
             continue;
         }
         let shown = p.display().to_string();
         let shown = if short { base_name(&shown) } else { &shown };
         let sep = if file.is_some() { "; " } else { "" };
-        let _ = write!(out, "{sep}{shown}:{}", s.start_line);
+        let _ = write!(out, "{sep}{shown}:{pos}");
         file = Some(s.file());
     }
     (!out.is_empty()).then_some(out)
@@ -509,6 +522,21 @@ mod tests {
         assert!(text.contains("where:   src/lib.rs:20"));
         assert!(text.contains("<- app::core::run   [direct x2 @ lib.rs:11, 12]"));
         assert!(text.contains("outputs — 0 callee(s)"));
+    }
+
+    #[test]
+    fn calls_sharing_a_line_show_their_columns() {
+        let mut g = graph();
+        let run = g.node_by_qualified("app::core::run").unwrap();
+        let step = g.node_by_qualified("app::core::step").unwrap();
+        let f = g.intern_file("src/lib.rs");
+        g.add_edge(
+            run,
+            step,
+            Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 12, 17, 12, 22)),
+        );
+        let text = format_card(&g, &node_card(&g, step).unwrap(), 20);
+        assert!(text.contains("<- app::core::run   [direct x3 @ lib.rs:11, 12:1, 12:18]"));
     }
 
     #[test]

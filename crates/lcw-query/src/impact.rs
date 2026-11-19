@@ -24,7 +24,7 @@ pub struct ImpactCaller {
     pub via: NodeId,
     /// First call site of `id -> via`, in the caller's file.
     pub call_site: SourceSpan,
-    /// Every call site of `id -> via`, one per line (see [`crate::call_sites`]).
+    /// Every call site of `id -> via`, in file/line/column order (see [`crate::call_sites`]).
     #[serde(default)]
     pub sites: Vec<SourceSpan>,
     /// Set when this caller is itself an entry point.

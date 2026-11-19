@@ -33,12 +33,14 @@ pub fn site(graph: &CodeGraph, span: SourceSpan) -> Option<String> {
         .map(|p| format!("{}:{}", p.display(), span.start_line))
 }
 
-/// `[{"file": …, "line": …}]` for call sites with a known file, or `None`
-/// when there are none.
+/// `[{"file": …, "line": …}]` for call sites with a known file, one per line
+/// (`spans` is sorted, see [`lcw_query::call_sites`]), or `None` when there
+/// are none.
 pub fn sites(graph: &CodeGraph, spans: &[SourceSpan]) -> Option<Value> {
+    let mut spans: Vec<SourceSpan> = spans.iter().filter(|s| s.start_line > 0).copied().collect();
+    spans.dedup_by_key(|s| (s.file, s.start_line));
     let list: Vec<Value> = spans
         .iter()
-        .filter(|s| s.start_line > 0)
         .filter_map(|s| {
             let p = graph.file_path(s.file())?;
             Some(json!({ "file": p.display().to_string(), "line": s.start_line }))
@@ -607,6 +609,28 @@ mod tests {
         let cut = explain(&g, main, 2, false).unwrap();
         assert_eq!(cut["callees"].as_array().unwrap().len(), 2);
         assert_eq!(cut["callees_more"], 4);
+    }
+
+    #[test]
+    fn sites_stay_one_per_line_when_a_line_holds_two_calls() {
+        let mut g = graph();
+        let run = g.node_by_qualified("app::core::run").unwrap();
+        let step = g.node_by_qualified("app::core::step").unwrap();
+        let f = g.intern_file("src/lib.rs");
+        g.add_edge(
+            run,
+            step,
+            lcw_core::Edge::new(
+                lcw_core::EdgeKind::DirectCall,
+                SourceSpan::new(f, 12, 17, 12, 22),
+            ),
+        );
+        let v = explain(&g, step, 20, false).unwrap();
+        assert_eq!(v["callers"][0]["count"], 3);
+        assert_eq!(
+            v["callers"][0]["sites"],
+            json!([{"file": "src/lib.rs", "line": 11}, {"file": "src/lib.rs", "line": 12}])
+        );
     }
 
     #[test]

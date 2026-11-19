@@ -22,7 +22,7 @@ pub struct CallRef {
     pub count: u32,
     /// First recorded call site (in the *caller's* file).
     pub call_site: SourceSpan,
-    /// Every call site of this edge, one per line, in file/line order
+    /// Every call site of this edge, in file/line/column order
     /// (see [`call_sites`]).
     #[serde(default)]
     pub sites: Vec<SourceSpan>,
@@ -154,13 +154,13 @@ fn call_ref(graph: &CodeGraph, other: NodeId, e: &Edge) -> CallRef {
     }
 }
 
-/// Call sites sorted by file, line and column, keeping one per line (several
-/// calls on one line read as one place to look). Unknown sites (line 0) are
-/// dropped.
+/// Call sites sorted by file, line and column, one per distinct position:
+/// several calls on one line are all kept, so views that care can tell them
+/// apart by column. Unknown sites (line 0) are dropped.
 pub fn call_sites(sites: impl IntoIterator<Item = SourceSpan>) -> Vec<SourceSpan> {
     let mut v: Vec<SourceSpan> = sites.into_iter().filter(|s| s.start_line > 0).collect();
     v.sort_by_key(|s| (s.file, s.start_line, s.start_col));
-    v.dedup_by_key(|s| (s.file, s.start_line));
+    v.dedup_by_key(|s| (s.file, s.start_line, s.start_col));
     v
 }
 

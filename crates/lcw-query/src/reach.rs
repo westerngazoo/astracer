@@ -119,7 +119,7 @@ pub struct CallTreeNode {
     /// `None` for the root.
     #[serde(default)]
     pub site: Option<SourceSpan>,
-    /// Every call site behind that link, one per line (see
+    /// Every call site behind that link, in file/line/column order (see
     /// [`crate::call_sites`]); empty for the root.
     #[serde(default)]
     pub sites: Vec<SourceSpan>,

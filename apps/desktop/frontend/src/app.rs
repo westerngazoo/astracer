@@ -19,7 +19,7 @@ use lcw_core::{
 };
 use lcw_query::{
     branches, call_tree, connection, edge_kind_str, entry_points, focus_target, kind_str,
-    node_card, outline, primary_entry, reach_count, run_roots, CallRef, CallTreeNode,
+    node_card, node_named, outline, primary_entry, reach_count, run_roots, CallRef, CallTreeNode,
     CallTreeOptions, Connection, Direction, EntryKind, NodeCard, Outline, OutlineNode, RootKind,
 };
 use lcw_render::interact;
@@ -562,6 +562,8 @@ struct Nav {
     /// The editor's cursor line in the selected node's file (VS Code sync),
     /// marked in the Code tab and kept in its snippet.
     cursor: RwSignal<Option<u32>>,
+    /// The Code tab's file changed since the analyze (VS Code live source).
+    source_changed: RwSignal<bool>,
 }
 
 impl Nav {
@@ -582,6 +584,7 @@ impl Nav {
             explain_provider: RwSignal::new(ExplainProvider::Ollama),
             detail_tab: RwSignal::new(DetailTab::Details),
             cursor: RwSignal::new(None),
+            source_changed: RwSignal::new(false),
         }
     }
 
@@ -600,6 +603,7 @@ impl Nav {
         self.explanation.set(ExplanationPane::Idle);
         self.detail_tab.set(DetailTab::Details);
         self.cursor.set(None);
+        self.source_changed.set(false);
     }
 }
 
@@ -657,9 +661,10 @@ fn node_snippet_end(card: &NodeCard) -> u32 {
     }
 }
 
-/// Fetch source for the Code tab (Tauri only). Ignores stale responses when
-/// the user has already moved to another node. The snippet also covers
-/// `nav.cursor` (an editor cursor just outside the node's span).
+/// Fetch source for the Code tab. Ignores stale responses when the user has
+/// already moved to another node. The snippet also covers `nav.cursor` (an
+/// editor cursor just outside the node's span); in VS Code it is the live
+/// document, with the span relocated to where the definition is now.
 fn load_node_source(nav: Nav, idx: usize, card: &NodeCard, whole_file: bool) {
     if card.file.is_empty() {
         nav.source.set(SourcePane::External);
@@ -667,21 +672,32 @@ fn load_node_source(nav: Nav, idx: usize, card: &NodeCard, whole_file: bool) {
     }
     nav.source.set(SourcePane::Loading);
     nav.explanation.set(ExplanationPane::Idle);
+    nav.source_changed.set(false);
     let file = card.file.clone();
-    let (mut start, mut end) = (card.line, node_snippet_end(card));
-    if let Some(c) = nav.cursor.get_untracked() {
-        start = start.min(c);
-        end = end.max(c);
-    }
+    let (start, end) = (card.line, node_snippet_end(card));
+    let qualified_name = card.qualified_name.clone();
+    let cursor = nav.cursor.get_untracked();
     let repo_root = nav.repo_root.get_untracked();
     spawn_local(async move {
-        let result = transport::read_source_snippet(file, start, end, repo_root, whole_file).await;
+        let result = transport::read_source_snippet(
+            file,
+            start,
+            end,
+            repo_root,
+            whole_file,
+            qualified_name,
+            cursor,
+        )
+        .await;
         if nav.selected.get_untracked() != Some(idx) {
             return;
         }
         let ready = result.is_ok();
         nav.source.set(match result {
-            Ok(snip) => SourcePane::Ready(snip),
+            Ok((snip, changed)) => {
+                nav.source_changed.set(changed);
+                SourcePane::Ready(snip)
+            }
             Err(e) => SourcePane::Error(e),
         });
         if ready && !whole_file {
@@ -1585,7 +1601,12 @@ fn apply_focus(
         let Some(graph) = s.graph.as_ref() else {
             return;
         };
-        focus_target(graph, &nav.repo_root.get_untracked(), &req.file, req.line)
+        let root = nav.repo_root.get_untracked();
+        // By name first: after edits the editor's lines no longer match the graph's.
+        req.symbol
+            .as_ref()
+            .and_then(|s| node_named(graph, &root, &req.file, &s.name, &s.containers, s.line))
+            .or_else(|| focus_target(graph, &root, &req.file, req.line))
     };
     let short = req.file.rsplit(['/', '\\']).next().unwrap_or(&req.file);
     let Some(id) = target else {
@@ -2690,9 +2711,16 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
         }
         .into_any(),
         SourcePane::Ready(snip) => {
-            // The node's own span: the snippet may have been widened to keep
-            // the editor's cursor line in view (see `load_node_source`).
-            let (span_start, span_end) = (card.line, node_snippet_end(card));
+            // The node's span as the host located it (in VS Code, relocated
+            // in the live document), not the graph's lines.
+            let (span_start, span_end) = (snip.highlight_start, snip.highlight_end);
+            let changed_hint = nav.source_changed.get_untracked().then(|| {
+                view! {
+                    <p class="hint warn code-status" title="The graph still has the analyzed version; lines here are the editor's">
+                        "File changed since analysis — Analyze to refresh the graph."
+                    </p>
+                }
+            });
             let header = format!("{}:{}-{}", compact_location(location), span_start, span_end);
             let linked = transport::can_reveal();
             // Clicking a line moves the editor there; clicking the header, to
@@ -2849,6 +2877,7 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                             </button>
                         </div>
                     </div>
+                    {changed_hint}
                     <div
                         class=if linked { "code-block linked" } else { "code-block" }
                         title=if linked { "Click a line to show it in the editor" } else { "" }

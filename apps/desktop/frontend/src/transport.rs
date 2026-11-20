@@ -98,6 +98,19 @@ extern "C" {
 pub struct FocusRequest {
     pub file: String,
     pub line: Option<u32>,
+    /// The live definition the cursor is in (from the editor's symbols), so
+    /// the graph is matched by name even after edits moved its lines.
+    #[serde(default)]
+    pub symbol: Option<FocusSymbol>,
+}
+
+/// See [`FocusRequest::symbol`]. `line` is its 1-based start in the buffer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct FocusSymbol {
+    pub name: String,
+    #[serde(default)]
+    pub containers: Vec<String>,
+    pub line: u32,
 }
 
 /// Error string of an analyze the user cancelled in the host (VS Code's
@@ -370,6 +383,9 @@ struct RevealArgs {
     qualified_name: String,
     preserve_focus: bool,
     sync: bool,
+    /// The lines are the live document's (from the Code tab), not the
+    /// graph's, so the extension reveals them without relocating.
+    live: bool,
 }
 
 /// Arguments for the VS Code `pickRepoFolder` request.
@@ -468,6 +484,7 @@ pub async fn reveal_in_editor(
         qualified_name,
         preserve_focus: false,
         sync: false,
+        live: false,
     };
     let _: serde::de::IgnoredAny = VsCodeTransport.call("reveal", &args).await?;
     Ok(())
@@ -475,9 +492,10 @@ pub async fn reveal_in_editor(
 
 /// Move the editor to `file:line` (in view: `line..=end_line`) without taking
 /// focus from the panel. `follow` marks it as tracking the graph's selection
-/// (dropped by the extension when `livewalk.syncEditor` is off) rather than a
-/// click on a source line. VS Code / Cursor only; a no-op in the desktop app
-/// and browser dev mode. Fire and forget.
+/// (graph lines, relocated by the extension; dropped when
+/// `livewalk.syncEditor` is off) rather than a click in the Code tab (whose
+/// lines are already the live document's). VS Code / Cursor only; a no-op in
+/// the desktop app and browser dev mode. Fire and forget.
 pub fn sync_editor(
     file: String,
     line: u32,
@@ -497,6 +515,7 @@ pub fn sync_editor(
         qualified_name,
         preserve_focus: true,
         sync: follow,
+        live: !follow,
     };
     wasm_bindgen_futures::spawn_local(async move {
         let result: Result<serde::de::IgnoredAny, String> =
@@ -707,17 +726,68 @@ pub async fn discover_repo_languages(path: String) -> Result<Vec<LanguageChoice>
     active().discover_languages(path).await
 }
 
-/// Host-aware entry point for source reads (delegates to [`EngineTransport`]).
+/// VS Code `readSourceSnippet` arguments: the desktop ones plus what the
+/// extension needs to read the live document instead of the analyzed file.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveSnippetArgs {
+    #[serde(flatten)]
+    base: ReadSourceSnippetArgs,
+    qualified_name: String,
+    cursor_line: Option<u32>,
+}
+
+/// The VS Code answer: a snippet of the live document, its highlight
+/// relocated to where the definition is now.
+#[derive(serde::Deserialize)]
+struct LiveSnippet {
+    #[serde(flatten)]
+    snippet: SourceSnippet,
+    /// The text moved on since the analyze (unsaved, saved later, or moved).
+    #[serde(default)]
+    changed: bool,
+}
+
+/// Source for the Code tab: the node's span `start_line..=end_line` (graph
+/// lines) highlighted, the window also covering `cursor`. In VS Code the
+/// extension reads the live document and relocates the span by
+/// `qualified_name`, and the flag says the text changed since the analyze;
+/// elsewhere it is the file on disk ([`EngineTransport`]) and `false`.
 pub async fn read_source_snippet(
     file: String,
     start_line: u32,
     end_line: u32,
     repo_root: String,
     whole_file: bool,
-) -> Result<SourceSnippet, String> {
-    active()
-        .read_source_snippet(file, start_line, end_line, repo_root, whole_file)
-        .await
+    qualified_name: String,
+    cursor: Option<u32>,
+) -> Result<(SourceSnippet, bool), String> {
+    if host() == Host::VsCode {
+        let args = LiveSnippetArgs {
+            base: ReadSourceSnippetArgs {
+                file,
+                start_line,
+                end_line,
+                repo_root,
+                whole_file,
+            },
+            qualified_name,
+            cursor_line: cursor,
+        };
+        let live: LiveSnippet = VsCodeTransport.call("readSourceSnippet", &args).await?;
+        return Ok((live.snippet, live.changed));
+    }
+    let (lo, hi) = match cursor {
+        Some(c) => (start_line.min(c), end_line.max(c)),
+        None => (start_line, end_line),
+    };
+    let mut snip = active()
+        .read_source_snippet(file, lo, hi, repo_root, whole_file)
+        .await?;
+    // The window may be widened (cursor, whole file); highlight the span only.
+    snip.highlight_start = start_line.clamp(1, snip.end_line.max(1));
+    snip.highlight_end = end_line.clamp(snip.highlight_start, snip.end_line.max(1));
+    Ok((snip, false))
 }
 
 /// Subscribe to backend progress events. The handler runs for the lifetime of

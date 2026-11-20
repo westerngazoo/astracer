@@ -424,11 +424,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db() -> std::path::PathBuf {
+        // Tests run in parallel and macOS clocks tick in microseconds, so the
+        // time alone can hand two tests the same file.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("lcw-graph-db-{}-{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!("lcw-graph-db-{}-{nanos}-{n}", std::process::id()))
     }
 
     #[test]

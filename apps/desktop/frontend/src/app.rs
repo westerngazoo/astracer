@@ -1595,27 +1595,23 @@ fn apply_focus(
         return;
     };
     let idx = id.0 as usize;
-    if nav.selected.get_untracked() == Some(idx) {
-        if nav.cursor.get_untracked() == req.line {
-            return;
-        }
+    if nav.selected.get_untracked() != Some(idx) {
         nav.cursor.set(req.line);
-        let Some(line) = req.line else {
-            return;
-        };
-        let covered = matches!(
-            nav.source.get_untracked(),
-            SourcePane::Ready(ref s) if s.start_line <= line && line <= s.end_line
-        );
-        if covered {
-            scroll_code_to_highlight();
-        } else if let Some(card) = nav.card.get_untracked() {
-            load_node_source(nav, idx, &card, false);
+        select_node(state, nav, labels, idx, true, true);
+    } else if nav.cursor.get_untracked() != req.line {
+        nav.cursor.set(req.line);
+        if let Some(line) = req.line {
+            let covered = matches!(
+                nav.source.get_untracked(),
+                SourcePane::Ready(ref s) if s.start_line <= line && line <= s.end_line
+            );
+            if covered {
+                scroll_code_to_highlight();
+            } else if let Some(card) = nav.card.get_untracked() {
+                load_node_source(nav, idx, &card, false);
+            }
         }
-        return;
     }
-    nav.cursor.set(req.line);
-    select_node(state, nav, labels, idx, true, true);
     let name = nav
         .card
         .with_untracked(|c| c.as_ref().map(|c| c.name.clone()))

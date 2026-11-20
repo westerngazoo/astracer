@@ -110,6 +110,29 @@ Add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
 }
 ```
 
+### VS Code (Copilot agent mode)
+
+Add to the user-level `mcp.json` (macOS:
+`~/Library/Application Support/Code/User/mcp.json`; or run
+**MCP: Open User Configuration**). VS Code uses `servers`, not `mcpServers`,
+and needs `type`:
+
+```json
+{
+  "servers": {
+    "livewalk": {
+      "type": "stdio",
+      "command": "/Users/goose/projects/livewalk/target/release/lcw-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Then open Copilot Chat in **Agent** mode and enable the `livewalk` tools from
+the tools picker. A project-level `.vscode/mcp.json` with the same shape also
+works.
+
 ### Claude Code
 
 ```bash

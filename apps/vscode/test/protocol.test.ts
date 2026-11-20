@@ -34,6 +34,12 @@ test("focus messages carry an absolute file and an optional 1-based line", () =>
   assert.equal(CANCELLED, "cancelled");
 });
 
+test("focus messages can name the live definition under the cursor", () => {
+  const m = focusMessage("/r/a.rs", 53, { name: "quality", containers: ["impl Rating"], line: 52 });
+  assert.deepEqual(m.symbol, { name: "quality", containers: ["impl Rating"], line: 52 });
+  assert.equal(focusMessage("/r/a.rs", 53, { name: "", containers: [], line: 1 }).symbol, undefined);
+});
+
 test("languages map from file extensions like lcw's discovery", () => {
   assert.equal(languageForFile("/r/src/main.rs"), "rust");
   assert.equal(languageForFile("a/b.cpp"), "cpp");
@@ -156,6 +162,7 @@ test("reveal targets are clamped to a valid 1-based range", () => {
     endLine: 10,
     preserveFocus: false,
     sync: false,
+    live: false,
   });
   assert.deepEqual(revealTarget({ file: "/abs/a.rs", line: 0, endLine: 3 }), {
     file: "/abs/a.rs",
@@ -164,6 +171,7 @@ test("reveal targets are clamped to a valid 1-based range", () => {
     endLine: 3,
     preserveFocus: false,
     sync: false,
+    live: false,
   });
   assert.throws(() => revealTarget({ file: "", line: 1, endLine: 1 }), /no source file/);
 });

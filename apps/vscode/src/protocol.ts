@@ -43,12 +43,22 @@ export interface Progress {
   message: string;
 }
 
+/** The live definition the editor cursor is in, so the graph can match it by name, not line. */
+export interface FocusSymbol {
+  name: string;
+  /** Enclosing symbol names, outermost first (`impl Rating`, `tests`). */
+  containers: string[];
+  /** 1-based start line in the live document. */
+  line: number;
+}
+
 export interface FocusMessage {
   type: "focus";
   /** Absolute path of the editor file. */
   file: string;
   /** 1-based cursor line; absent to select the file's first function. */
   line?: number;
+  symbol?: FocusSymbol;
 }
 
 export type ExtensionMessage =
@@ -61,13 +71,18 @@ export type ExtensionMessage =
 export const CANCELLED = "cancelled";
 
 /** A `focus` message; `line` is 1-based and dropped unless a positive integer. */
-export function focusMessage(file: string, line?: number): FocusMessage {
+export function focusMessage(file: string, line?: number, symbol?: FocusSymbol): FocusMessage {
   if (!file) {
     throw new Error("focus needs a file");
   }
-  return typeof line === "number" && Number.isInteger(line) && line > 0
-    ? { type: "focus", file, line }
-    : { type: "focus", file };
+  const msg: FocusMessage =
+    typeof line === "number" && Number.isInteger(line) && line > 0
+      ? { type: "focus", file, line }
+      : { type: "focus", file };
+  if (symbol?.name) {
+    msg.symbol = { name: symbol.name, containers: symbol.containers ?? [], line: symbol.line };
+  }
+  return msg;
 }
 
 /**
@@ -185,6 +200,21 @@ export interface SnippetParams {
   endLine: number;
   repoRoot?: string;
   wholeFile?: boolean;
+  /** VS Code: relocate the span by name in the live document. */
+  qualifiedName?: string;
+  /** VS Code: also keep this (live, 1-based) line in the window. */
+  cursorLine?: number;
+}
+
+/** A `readSourceSnippet` answer (`lcw_core::SourceSnippet`, plus whether the text moved on since the analyze). */
+export interface LiveSnippet {
+  file: string;
+  start_line: number;
+  end_line: number;
+  highlight_start: number;
+  highlight_end: number;
+  lines: { number: number; text: string }[];
+  changed: boolean;
 }
 
 export interface RevealParams {
@@ -197,6 +227,8 @@ export interface RevealParams {
   preserveFocus?: boolean;
   /** Follows the graph's selection (dropped when `livewalk.syncEditor` is off). */
   sync?: boolean;
+  /** Lines are already in the live document (a Code-tab click): reveal as is, no relocation. */
+  live?: boolean;
 }
 
 export function isRequest(msg: unknown): msg is RequestMessage {
@@ -310,6 +342,7 @@ export function revealTarget(p: RevealParams): {
   endLine: number;
   preserveFocus: boolean;
   sync: boolean;
+  live: boolean;
 } {
   const file = str(p.file, "file");
   if (!file) {
@@ -324,6 +357,7 @@ export function revealTarget(p: RevealParams): {
     endLine,
     preserveFocus: p.preserveFocus === true,
     sync: p.sync === true,
+    live: p.live === true,
   };
 }
 

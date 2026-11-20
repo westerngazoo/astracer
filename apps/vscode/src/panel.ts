@@ -5,7 +5,9 @@ import * as vscode from "vscode";
 
 import { explainFunction } from "./explain";
 import { Lcw } from "./lcw";
+import { relocateIn, symbolAtLine } from "./live";
 import { openRange, resolveFile } from "./nav";
+import { snippetWindow } from "./relocate";
 import {
   analyzeArgs,
   AnalyzeParams,
@@ -14,10 +16,10 @@ import {
   focusMessage,
   isRequest,
   languagesArgs,
+  LiveSnippet,
   RequestMessage,
   RevealParams,
   revealTarget,
-  snippetArgs,
   SnippetParams,
   stageFraction,
 } from "./protocol";
@@ -55,6 +57,9 @@ export class GraphPanel {
 
   /** Set once an analyze answered, so focus messages have a graph to land on. */
   private loaded = false;
+
+  /** When the loaded graph's analyze started (files modified later have moved on). */
+  private analyzedAt = 0;
 
   static get(root: string): GraphPanel | undefined {
     return GraphPanel.panels.get(path.resolve(root));
@@ -96,6 +101,10 @@ export class GraphPanel {
     );
     const gp = new GraphPanel(panel, media, webviewDir, lcw, { ...load, root });
     GraphPanel.panels.set(root, gp);
+    if (load.focus?.line) {
+      // The initial focus meta matches by line; this one also names the live definition.
+      gp.focus(load.focus.file, load.focus.line);
+    }
     return gp;
   }
 
@@ -133,7 +142,14 @@ export class GraphPanel {
     if (onlyIfLoaded && !this.loaded) {
       return;
     }
-    this.post(focusMessage(file, line));
+    void this.focusMessageFor(file, line).then((msg) => this.post(msg));
+  }
+
+  /** A focus message naming the live definition at `line`, when the file is open in an editor. */
+  private async focusMessageFor(file: string, line?: number): Promise<ExtensionMessage> {
+    const doc = line ? openDocument(file) : undefined;
+    const sym = doc && line ? await symbolAtLine(doc, line).catch(() => undefined) : undefined;
+    return focusMessage(file, line, sym && { name: sym.name, containers: sym.containers, line: sym.start });
   }
 
   private html(media: vscode.Uri, webviewDir: vscode.Uri, load: PanelLoad): string {
@@ -181,16 +197,16 @@ export class GraphPanel {
     const params = (req.params ?? {}) as Record<string, unknown>;
     switch (req.method) {
       case "analyze": {
+        const started = Date.now();
         const resultJson = await this.analyze(params as unknown as AnalyzeParams);
         this.loaded = true;
+        this.analyzedAt = started;
         return { resultJson };
       }
       case "discoverLanguages":
         return { resultJson: await this.lcw.run(languagesArgs(params, root)) };
       case "readSourceSnippet":
-        return {
-          resultJson: await this.lcw.run(snippetArgs(params as unknown as SnippetParams)),
-        };
+        return { result: await this.liveSnippet(params as unknown as SnippetParams, root) };
       case "explainFunction":
         return {
           result: await explainFunction(this.lcw, params.context, String(params.provider ?? "")),
@@ -240,11 +256,62 @@ export class GraphPanel {
       return;
     }
     const file = path.resolve(resolveFile(t.repoRoot || workspaceRoot, t.file));
-    editorEcho.revealing(file, t.startLine, t.endLine, Date.now());
-    await openRange(file, t.startLine, t.endLine, this.editorColumn(file), {
+    let { startLine, endLine } = t;
+    if (!t.live) {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+      ({ start: startLine, end: endLine } = await relocateIn(doc, p.qualifiedName ?? "", startLine, endLine));
+    }
+    editorEcho.revealing(file, startLine, endLine, Date.now());
+    await openRange(file, startLine, endLine, this.editorColumn(file), {
       preserveFocus: t.preserveFocus,
       caretOnly: t.preserveFocus,
     });
+  }
+
+  /**
+   * The Code tab's source, from the live document (an unsaved buffer
+   * included) rather than the file as analyzed: the span is relocated by
+   * name, so its highlight and the editor's cursor line agree after edits.
+   * `changed` says the text moved on since the analyze (dirty, saved later,
+   * or the definition moved).
+   */
+  private async liveSnippet(p: SnippetParams, workspaceRoot: string): Promise<LiveSnippet> {
+    const file = path.resolve(resolveFile(p.repoRoot || workspaceRoot, String(p.file ?? "")));
+    if (!p.file) {
+      throw new Error("no source file for this node");
+    }
+    let doc: vscode.TextDocument;
+    try {
+      doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    } catch {
+      throw new Error(`could not read ${file} (from ${p.file})`);
+    }
+    const start = Math.max(1, p.startLine || 1);
+    const end = Math.max(start, p.endLine || start);
+    const span = await relocateIn(doc, p.qualifiedName ?? "", start, end);
+    const hlStart = Math.min(span.start, doc.lineCount);
+    const hlEnd = Math.min(Math.max(span.end, hlStart), doc.lineCount);
+    const { lo, hi } = snippetWindow(doc.lineCount, hlStart, hlEnd, p.cursorLine, p.wholeFile === true);
+    const lines = [];
+    for (let n = lo; n <= hi; n++) {
+      lines.push({ number: n, text: doc.lineAt(n - 1).text });
+    }
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(file).mtimeMs;
+    } catch {
+      mtime = 0;
+    }
+    const changed = doc.isDirty || hlStart !== start || (this.analyzedAt > 0 && mtime > this.analyzedAt);
+    return {
+      file,
+      start_line: lo,
+      end_line: hi,
+      highlight_start: hlStart,
+      highlight_end: hlEnd,
+      lines,
+      changed,
+    };
   }
 
   /**
@@ -275,6 +342,11 @@ export class GraphPanel {
     }
     return own === vscode.ViewColumn.One ? vscode.ViewColumn.Two : vscode.ViewColumn.One;
   }
+}
+
+/** The document for `file` if an editor has it open (its live text, unsaved edits included). */
+function openDocument(file: string): vscode.TextDocument | undefined {
+  return vscode.workspace.textDocuments.find((d) => d.uri.scheme === "file" && d.uri.fsPath === file);
 }
 
 export async function pickFolder(current: string, openLabel = "Analyze"): Promise<string | null> {

@@ -12,7 +12,9 @@
 //   LANGUAGE       initial language meta (e.g. rust)
 //   CACHED=1       initial load from the saved graph
 //   FOCUS          initial focus, `file:line` or `file` (absolute or repo-relative)
-// GET /focus?file=<path>&line=<n> pushes a focus message (like Reveal in Graph).
+// GET /focus?file=<path>&line=<n> pushes a focus message (like Reveal in Graph);
+// add &name=<fn>&container=<impl Type> to name the live symbol, as the
+// extension does from the editor's document symbols.
 // GET /fail-next makes the next analyze fail; /cancel-next makes it "cancelled".
 // Reveal / folder-pick requests are logged instead of opening an editor.
 const fs = require("fs");
@@ -182,7 +184,11 @@ http
       } else if (url.pathname === "/focus") {
         const file = absolute(url.searchParams.get("file") || "");
         const line = Number(url.searchParams.get("line") || 0) || undefined;
-        push(focusMessage(file, line));
+        const name = url.searchParams.get("name");
+        const symbol = name
+          ? { name, containers: url.searchParams.getAll("container"), line: line || 1 }
+          : undefined;
+        push(focusMessage(file, line, symbol));
         console.log(`FOCUS ${file}${line ? ":" + line : ""}`);
         res.writeHead(200).end("ok");
       } else if (url.pathname === "/fail-next" || url.pathname === "/cancel-next") {

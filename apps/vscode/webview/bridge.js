@@ -18,15 +18,28 @@
     return el ? el.getAttribute("content") || "" : "";
   }
 
+  // `{ file, line, symbol }` as the webview's FocusRequest decodes it.
+  function toFocus(f) {
+    if (!f || typeof f.file !== "string") {
+      return null;
+    }
+    var s = f.symbol;
+    return {
+      file: f.file,
+      line: typeof f.line === "number" ? f.line : null,
+      symbol:
+        s && typeof s.name === "string" && typeof s.line === "number"
+          ? { name: s.name, containers: Array.isArray(s.containers) ? s.containers : [], line: s.line }
+          : null,
+    };
+  }
+
   function parseFocus(text) {
     if (!text) {
       return null;
     }
     try {
-      var f = JSON.parse(text);
-      return f && typeof f.file === "string"
-        ? { file: f.file, line: typeof f.line === "number" ? f.line : null }
-        : null;
+      return toFocus(JSON.parse(text));
     } catch (e) {
       return null;
     }
@@ -57,7 +70,7 @@
         h(msg.payload);
       });
     } else if (msg.type === "focus" && typeof msg.file === "string") {
-      var focus = { file: msg.file, line: typeof msg.line === "number" ? msg.line : null };
+      var focus = toFocus(msg);
       if (focusHandlers.length === 0) {
         heldFocus = focus;
       }

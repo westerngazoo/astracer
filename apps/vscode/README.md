@@ -92,6 +92,20 @@ follow each other:
   already showing the file (else one beside the panel, as a preview tab).
   `↗` still opens the definition with focus and selects its whole span.
 
+Sync works on the live buffer, unsaved edits included, not the analyzed line
+numbers. Before revealing a node, the extension re-locates its definition in
+the current text: first the language server's document symbols
+(rust-analyzer, clangd, …) matched by name and enclosing `impl` / class /
+module, then a grep for the definition (`fn name`, `def name`, `func name`,
+`function name`, C++ `name(`), the duplicate nearest the analyzed line
+winning; only if both fail does it use the analyzed line. The cursor is
+mapped the same way (its enclosing live symbol, matched to the graph by name
+and path, the nearest function as the last resort). The **Code** tab shows
+the editor's text with the span relocated, so the amber cursor mark lines up
+after edits, and says *File changed since analysis — Analyze to refresh the
+graph* when the file is unsaved, was saved after the analyze, or the
+definition moved.
+
 Moves the panel makes are not followed back (an editor event that lands
 inside a span the panel just revealed, within a second, is its echo), so the
 two sides do not bounce. Line clicks work even with the setting off; turn it
@@ -118,25 +132,25 @@ npm run media
 npm run package
 ```
 
-Install the result (`apps/vscode/livewalk-0.3.0.vsix`) into Cursor or VS Code:
+Install the result (`apps/vscode/livewalk-0.3.1.vsix`) into Cursor or VS Code:
 
 ```sh
-cursor --install-extension apps/vscode/livewalk-0.3.0.vsix
+cursor --install-extension apps/vscode/livewalk-0.3.1.vsix
 ```
 
 ```sh
-code --install-extension apps/vscode/livewalk-0.3.0.vsix
+code --install-extension apps/vscode/livewalk-0.3.1.vsix
 ```
 
 If the `cursor` or `code` command is not on your PATH, the binaries are inside
 the app bundles:
 
 ```sh
-/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension apps/vscode/livewalk-0.3.0.vsix
+/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension apps/vscode/livewalk-0.3.1.vsix
 ```
 
 ```sh
-"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --install-extension apps/vscode/livewalk-0.3.0.vsix
+"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --install-extension apps/vscode/livewalk-0.3.1.vsix
 ```
 
 Then reload the window (*Developer: Reload Window*).
@@ -225,11 +239,13 @@ curl http://127.0.0.1:8790/cancel-next
 
 ## Known gaps
 
-* Editor sync works on the saved file: the graph and the **Code** tab show
-  the file as last analyzed, so after edits (or in an unsaved buffer) lines
-  can be off until the next **Analyze**. A file with no function in the
-  graph (only `mod` lines, another language) shows a status message instead
-  of the file.
+* Live relocation finds definitions the graph already has; a function added
+  since the analyze is not in the graph until the next **Analyze** (the
+  cursor in it selects the nearest known one), and the graph's calls and
+  metrics are those of the analyzed version. A renamed function no longer
+  matches by name, so its analyzed line is used. A file
+  with no function in the graph (only `mod` lines, another language) shows a
+  status message instead of the file.
 * Clicking a line in the **Code** tab moves the editor but does not re-select
   the function that line belongs to in the graph.
 * Freshness compares file modification times with the saved graph; a change

@@ -212,11 +212,11 @@ friends, which share `lcw_desktop_api::host` with the Tauri commands. Build
 
 ```sh
 scripts/livewalk-dev.sh vscode
-cursor --install-extension apps/vscode/livewalk-0.3.0.vsix
+cursor --install-extension apps/vscode/livewalk-0.3.1.vsix
 ```
 
 ```sh
-code --install-extension apps/vscode/livewalk-0.3.0.vsix
+code --install-extension apps/vscode/livewalk-0.3.1.vsix
 ```
 
 Set `livewalk.lcwPath` if `lcw` is not on PATH. Details, settings and commands:

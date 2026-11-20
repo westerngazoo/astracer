@@ -80,11 +80,31 @@ pub fn node_at(graph: &CodeGraph, file: &str, line: u32) -> Option<NodeId> {
         .map(|s| s.id)
 }
 
-/// Where an editor location lands in the graph: the definition under `line`
-/// ([`node_at`]), else the first definition in the file (cursor between
-/// functions, or no line at all — a file picked in an explorer). `file` may be
-/// absolute: it is tried relative to `repo_root` first, then as given, since
-/// graphs store repo-relative paths.
+/// The definition in `file` closest to `line` (1-based): the innermost one
+/// containing it ([`node_at`]), else the one with the fewest lines between its
+/// span and `line`. Ties go to the definition below the line, since the gap
+/// above a function is usually its doc comment or attributes.
+pub fn nearest_at(graph: &CodeGraph, file: &str, line: u32) -> Option<NodeId> {
+    if let Some(id) = node_at(graph, file, line) {
+        return Some(id);
+    }
+    file_symbols(graph, file)
+        .into_iter()
+        .min_by_key(|s| {
+            if line < s.start_line {
+                (s.start_line - line, 0)
+            } else {
+                (line - s.end_line, 1)
+            }
+        })
+        .map(|s| s.id)
+}
+
+/// Where an editor location lands in the graph: the definition nearest `line`
+/// ([`nearest_at`]: the one under it, else the closest — cursor between
+/// functions), or the file's first definition without a line (a file picked
+/// in an explorer). `file` may be absolute: it is tried relative to
+/// `repo_root` first, then as given, since graphs store repo-relative paths.
 pub fn focus_target(
     graph: &CodeGraph,
     repo_root: &str,
@@ -94,11 +114,12 @@ pub fn focus_target(
     let rel = repo_relative(repo_root, file);
     let candidates = [rel.as_str(), file];
     for f in candidates {
-        if let Some(id) = line.and_then(|l| node_at(graph, f, l)) {
-            return Some(id);
-        }
-        if let Some(first) = file_symbols(graph, f).first() {
-            return Some(first.id);
+        let found = match line {
+            Some(l) => nearest_at(graph, f, l),
+            None => file_symbols(graph, f).first().map(|s| s.id),
+        };
+        if found.is_some() {
+            return found;
         }
     }
     None
@@ -171,7 +192,23 @@ mod tests {
     }
 
     #[test]
-    fn focus_target_falls_back_to_the_first_definition() {
+    fn nearest_at_prefers_the_closest_span_then_the_one_below() {
+        let g = app_graph();
+        let load = crate::fixtures::id(&g, "app::io::load");
+        let save = crate::fixtures::id(&g, "app::io::save");
+        // load spans 5..=8, save 30..=33.
+        assert_eq!(nearest_at(&g, "src/io.rs", 6), Some(load));
+        assert_eq!(nearest_at(&g, "src/io.rs", 1), Some(load));
+        assert_eq!(nearest_at(&g, "src/io.rs", 12), Some(load));
+        assert_eq!(nearest_at(&g, "src/io.rs", 28), Some(save));
+        // 19 is 11 below load and 11 above save: the one below wins.
+        assert_eq!(nearest_at(&g, "src/io.rs", 19), Some(save));
+        assert_eq!(nearest_at(&g, "src/io.rs", 900), Some(save));
+        assert_eq!(nearest_at(&g, "src/missing.rs", 3), None);
+    }
+
+    #[test]
+    fn focus_target_falls_back_to_the_nearest_definition() {
         let g = app_graph();
         let main = crate::fixtures::id(&g, "app::main");
         let save = crate::fixtures::id(&g, "app::io::save");
@@ -181,8 +218,12 @@ mod tests {
             Some(save)
         );
         assert_eq!(
-            focus_target(&g, "/repo", "/repo/src/io.rs", Some(20)),
+            focus_target(&g, "/repo", "/repo/src/io.rs", Some(14)),
             Some(load)
+        );
+        assert_eq!(
+            focus_target(&g, "/repo", "/repo/src/io.rs", Some(25)),
+            Some(save)
         );
         assert_eq!(
             focus_target(&g, "/repo/", "/repo/src/main.rs", None),

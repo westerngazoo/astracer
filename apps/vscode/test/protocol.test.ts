@@ -14,7 +14,9 @@ import {
   FileSymbol,
   CANCELLED,
   confirmLoadText,
+  EchoGuard,
   focusMessage,
+  RevealParams,
   graphInfoArgs,
   languageForFile,
   pickLanguage,
@@ -152,14 +154,45 @@ test("reveal targets are clamped to a valid 1-based range", () => {
     repoRoot: "/r",
     startLine: 10,
     endLine: 10,
+    preserveFocus: false,
+    sync: false,
   });
   assert.deepEqual(revealTarget({ file: "/abs/a.rs", line: 0, endLine: 3 }), {
     file: "/abs/a.rs",
     repoRoot: "",
     startLine: 1,
     endLine: 3,
+    preserveFocus: false,
+    sync: false,
   });
   assert.throws(() => revealTarget({ file: "", line: 1, endLine: 1 }), /no source file/);
+});
+
+test("sync reveals from the webview keep their flags", () => {
+  // The webview's RevealArgs (transport.rs) serializes camelCase booleans.
+  const t = revealTarget({ file: "a.rs", line: 3, endLine: 9, preserveFocus: true, sync: true });
+  assert.equal(t.preserveFocus, true);
+  assert.equal(t.sync, true);
+  const loose = { file: "a.rs", line: 3, endLine: 9, preserveFocus: "yes", sync: 1 } as unknown as RevealParams;
+  assert.equal(revealTarget(loose).preserveFocus, false);
+  assert.equal(revealTarget(loose).sync, false);
+});
+
+test("the echo guard recognizes cursor events caused by the panel's own reveals", () => {
+  const g = new EchoGuard(1000);
+  assert.equal(g.isEcho("/r/a.rs", 5, 0), false);
+  assert.equal(g.revealedSince(0), false);
+  g.revealing("/r/a.rs", 10, 20, 5000);
+  assert.equal(g.isEcho("/r/a.rs", 10, 5100), true);
+  assert.equal(g.isEcho("/r/a.rs", 20, 5900), true);
+  assert.equal(g.isEcho("/r/a.rs", 21, 5100), false, "outside the revealed span");
+  assert.equal(g.isEcho("/r/b.rs", 10, 5100), false, "another file");
+  assert.equal(g.isEcho("/r/a.rs", 10, 6001), false, "after the window");
+  assert.equal(g.revealedSince(4900), true, "a follow scheduled before the reveal is stale");
+  assert.equal(g.revealedSince(5001), false);
+  g.revealing("/r/a.rs", 8, 3, 7000);
+  assert.equal(g.isEcho("/r/a.rs", 8, 7000), true, "end before start collapses to one line");
+  assert.equal(g.isEcho("/r/a.rs", 3, 7000), false);
 });
 
 test("symbolAt picks the innermost enclosing definition", () => {

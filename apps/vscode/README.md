@@ -71,8 +71,32 @@ command palette.
 
 **Livewalk: Reveal in Graph** (editor context menu and palette) selects the
 function under the cursor in its project's panel, opening the panel first if
-needed. With `livewalk.followCursor` on, the open panel follows the cursor
-(after a short pause) without stealing focus.
+needed.
+
+## Editor sync
+
+With `livewalk.syncEditor` on (the default), the editor and the open panel
+follow each other:
+
+* **Editor → panel.** Moving the cursor or switching to another file of the
+  panel's project selects the function under the cursor (between functions,
+  the nearest one; ties go to the one below, where a doc comment usually
+  sits), after a 350 ms pause and without stealing focus. The **Code** tab
+  shows that file, scrolled to the cursor line, which is marked in amber.
+  Files outside every open panel's project are ignored.
+* **Panel → editor.** Selecting a node (canvas, outline, run tree, callers,
+  callees, flow hops, **Back**) or clicking a suggestion or diagnostic moves
+  the editor to its definition. Clicking a line in the **Code** tab moves the
+  editor to that line, and clicking the `file:start-end` header moves it to
+  the definition. The editor keeps focus in the panel and reuses an editor
+  already showing the file (else one beside the panel, as a preview tab).
+  `↗` still opens the definition with focus and selects its whole span.
+
+Moves the panel makes are not followed back (an editor event that lands
+inside a span the panel just revealed, within a second, is its echo), so the
+two sides do not bounce. Line clicks work even with the setting off; turn it
+off to stop both automatic directions. `livewalk.followCursor` is the older,
+one-way setting and still makes the panel follow the cursor on its own.
 
 ## Build and install
 
@@ -94,25 +118,25 @@ npm run media
 npm run package
 ```
 
-Install the result (`apps/vscode/livewalk-0.2.0.vsix`) into Cursor or VS Code:
+Install the result (`apps/vscode/livewalk-0.3.0.vsix`) into Cursor or VS Code:
 
 ```sh
-cursor --install-extension apps/vscode/livewalk-0.2.0.vsix
+cursor --install-extension apps/vscode/livewalk-0.3.0.vsix
 ```
 
 ```sh
-code --install-extension apps/vscode/livewalk-0.2.0.vsix
+code --install-extension apps/vscode/livewalk-0.3.0.vsix
 ```
 
 If the `cursor` or `code` command is not on your PATH, the binaries are inside
 the app bundles:
 
 ```sh
-/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension apps/vscode/livewalk-0.2.0.vsix
+/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension apps/vscode/livewalk-0.3.0.vsix
 ```
 
 ```sh
-"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --install-extension apps/vscode/livewalk-0.2.0.vsix
+"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --install-extension apps/vscode/livewalk-0.3.0.vsix
 ```
 
 Then reload the window (*Developer: Reload Window*).
@@ -142,7 +166,8 @@ and entry points within `livewalk.impactDepth` hops (`lcw impact`).
 | --- | --- | --- |
 | `livewalk.lcwPath` | `lcw` | The `lcw` binary. A bare `lcw` is looked up on PATH, then in `~/.cargo/bin`. |
 | `livewalk.confirmBeforeLoad` | `true` | Ask before *Open Graph Here* loads a project. **Load (don't ask again)** sets it to `false`. |
-| `livewalk.followCursor` | `false` | Keep the open panel's selection on the function under the cursor (debounced, 350 ms). |
+| `livewalk.syncEditor` | `true` | Two-way sync between the editor and the open panel (see *Editor sync*). |
+| `livewalk.followCursor` | `false` | Deprecated: one-way cursor following, kept for when `syncEditor` is off. |
 | `livewalk.codeLens` | `false` | Show `N callers · impact` above functions. |
 | `livewalk.codeLensLanguages` | `["rust"]` | Language ids that get the CodeLens. |
 | `livewalk.impactDepth` | `3` | Caller hops for the impact lens. |
@@ -200,8 +225,13 @@ curl http://127.0.0.1:8790/cancel-next
 
 ## Known gaps
 
-* Clicking a node on the canvas selects it in the panel; jumping to source is
-  the `↗` button (no automatic reveal on every click).
+* Editor sync works on the saved file: the graph and the **Code** tab show
+  the file as last analyzed, so after edits (or in an unsaved buffer) lines
+  can be off until the next **Analyze**. A file with no function in the
+  graph (only `mod` lines, another language) shows a status message instead
+  of the file.
+* Clicking a line in the **Code** tab moves the editor but does not re-select
+  the function that line belongs to in the graph.
 * Freshness compares file modification times with the saved graph; a change
   that keeps mtimes (some checkouts) is not detected. **Analyze** always
   re-parses.

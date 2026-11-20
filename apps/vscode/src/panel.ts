@@ -9,6 +9,7 @@ import { openRange, resolveFile } from "./nav";
 import {
   analyzeArgs,
   AnalyzeParams,
+  EchoGuard,
   ExtensionMessage,
   focusMessage,
   isRequest,
@@ -24,6 +25,14 @@ import { buildWebviewHtml } from "./webviewHtml";
 
 /** Answer to one request: a value, or a raw JSON string the bridge parses. */
 type Answer = { result: unknown } | { resultJson: string };
+
+/** Editor moves the panels made, so cursor following does not echo them back. */
+export const editorEcho = new EchoGuard();
+
+/** `livewalk.syncEditor`: the editor follows the graph and the graph follows the editor. */
+export function syncEditorEnabled(): boolean {
+  return vscode.workspace.getConfiguration("livewalk").get<boolean>("syncEditor", true);
+}
 
 /** What a new panel loads first. */
 export interface PanelLoad {
@@ -227,11 +236,44 @@ export class GraphPanel {
 
   private async revealSource(p: RevealParams, workspaceRoot: string): Promise<void> {
     const t = revealTarget(p);
-    const file = resolveFile(t.repoRoot || workspaceRoot, t.file);
-    // Keep the graph visible: open the source in the other column.
-    const column =
-      this.panel.viewColumn === vscode.ViewColumn.One ? vscode.ViewColumn.Two : vscode.ViewColumn.One;
-    await openRange(file, t.startLine, t.endLine, column);
+    if (t.sync && !syncEditorEnabled()) {
+      return;
+    }
+    const file = path.resolve(resolveFile(t.repoRoot || workspaceRoot, t.file));
+    editorEcho.revealing(file, t.startLine, t.endLine, Date.now());
+    await openRange(file, t.startLine, t.endLine, this.editorColumn(file), {
+      preserveFocus: t.preserveFocus,
+      caretOnly: t.preserveFocus,
+    });
+  }
+
+  /**
+   * Where to show `file` without covering the graph: the visible editor
+   * already showing it, else a group with a tab for it, else the visible
+   * editor group beside the panel, else the column next to the panel.
+   */
+  private editorColumn(file: string): vscode.ViewColumn {
+    const own = this.panel.viewColumn;
+    const elsewhere = (c: vscode.ViewColumn | undefined): c is vscode.ViewColumn =>
+      c !== undefined && c !== own;
+    const visible = vscode.window.visibleTextEditors;
+    const showing = visible.find((e) => e.document.uri.fsPath === file && elsewhere(e.viewColumn));
+    if (showing?.viewColumn) {
+      return showing.viewColumn;
+    }
+    const tabbed = vscode.window.tabGroups.all.find(
+      (g) =>
+        elsewhere(g.viewColumn) &&
+        g.tabs.some((tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === file),
+    );
+    if (tabbed) {
+      return tabbed.viewColumn;
+    }
+    const beside = visible.find((e) => elsewhere(e.viewColumn));
+    if (beside?.viewColumn) {
+      return beside.viewColumn;
+    }
+    return own === vscode.ViewColumn.One ? vscode.ViewColumn.Two : vscode.ViewColumn.One;
   }
 }
 

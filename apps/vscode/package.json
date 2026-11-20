@@ -2,7 +2,7 @@
   "name": "livewalk",
   "displayName": "Livewalk (Live Code Walk)",
   "description": "Call graph, Code and Flow views for your workspace, with jump-to-source, caller CodeLens and flow-to-here, powered by the lcw CLI.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "livewalk",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -124,10 +124,16 @@
           "default": true,
           "markdownDescription": "Ask before **Open Graph Here** loads a project (shows the resolved project root, and whether a fresh cached graph makes it instant)."
         },
+        "livewalk.syncEditor": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Keep the editor and the open graph panel in sync, both ways. Moving the cursor or switching files (inside the panel's project) selects the function under the cursor, or the nearest one, and marks the line in the **Code** tab; selecting a node or clicking a suggestion moves the editor beside the panel to its definition without taking focus. Clicking a line in the **Code** tab always opens it in the editor."
+        },
         "livewalk.followCursor": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Keep the open graph panel's selection on the function under the editor cursor (debounced)."
+          "markdownDescription": "Keep the open graph panel's selection on the function under the editor cursor (debounced), even with `#livewalk.syncEditor#` off.",
+          "markdownDeprecationMessage": "Superseded by `#livewalk.syncEditor#`, which also moves the editor when you pick a node."
         },
         "livewalk.codeLens": {
           "type": "boolean",

@@ -193,6 +193,10 @@ export interface RevealParams {
   endLine: number;
   repoRoot?: string;
   qualifiedName?: string;
+  /** Keep focus in the panel and only move the cursor to `line` (no span selection). */
+  preserveFocus?: boolean;
+  /** Follows the graph's selection (dropped when `livewalk.syncEditor` is off). */
+  sync?: boolean;
 }
 
 export function isRequest(msg: unknown): msg is RequestMessage {
@@ -304,6 +308,8 @@ export function revealTarget(p: RevealParams): {
   repoRoot: string;
   startLine: number;
   endLine: number;
+  preserveFocus: boolean;
+  sync: boolean;
 } {
   const file = str(p.file, "file");
   if (!file) {
@@ -311,7 +317,52 @@ export function revealTarget(p: RevealParams): {
   }
   const startLine = Math.max(1, line(p.line, "line"));
   const endLine = Math.max(startLine, typeof p.endLine === "number" ? p.endLine : startLine);
-  return { file, repoRoot: typeof p.repoRoot === "string" ? p.repoRoot : "", startLine, endLine };
+  return {
+    file,
+    repoRoot: typeof p.repoRoot === "string" ? p.repoRoot : "",
+    startLine,
+    endLine,
+    preserveFocus: p.preserveFocus === true,
+    sync: p.sync === true,
+  };
+}
+
+/** How long after the panel moves the editor its own cursor events count as echoes. */
+export const ECHO_WINDOW_MS = 1000;
+
+/**
+ * Breaks the editor <-> panel sync loop. The panel moving the editor fires
+ * the same selection events as the user moving it; following those back
+ * would re-select (and re-scroll) the graph. `revealing` records each move
+ * the panel asks for; `isEcho` recognizes the cursor events it causes, and
+ * `revealedSince` drops a debounced cursor follow the panel overtook.
+ */
+export class EchoGuard {
+  private last?: { file: string; start: number; end: number; at: number };
+
+  constructor(private readonly windowMs = ECHO_WINDOW_MS) {}
+
+  /** The panel is moving the editor to `file` (lines `start..=end`, 1-based) at `now`. */
+  revealing(file: string, start: number, end: number, now: number): void {
+    this.last = { file, start, end: Math.max(start, end), at: now };
+  }
+
+  /** Whether an editor cursor at `file:line` (1-based) at `now` is the echo of a recent reveal. */
+  isEcho(file: string, line: number, now: number): boolean {
+    const r = this.last;
+    return (
+      r !== undefined &&
+      now - r.at <= this.windowMs &&
+      r.file === file &&
+      r.start <= line &&
+      line <= r.end
+    );
+  }
+
+  /** Whether the panel moved the editor at or after `since` (a cursor event from before is stale). */
+  revealedSince(since: number): boolean {
+    return this.last !== undefined && this.last.at >= since;
+  }
 }
 
 export interface FileSymbol {

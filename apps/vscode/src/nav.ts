@@ -16,23 +16,38 @@ export function resolveFile(root: string, file: string): string {
   return path.isAbsolute(file) ? file : path.join(root, file);
 }
 
+export interface OpenRangeOptions {
+  /** Keep focus where it is (the graph panel) and open as a preview tab. */
+  preserveFocus?: boolean;
+  /** Put the cursor at the start of line `start` instead of selecting the range. */
+  caretOnly?: boolean;
+}
+
 /** Open `file` and select lines `start..=end` (1-based). */
 export async function openRange(
   file: string,
   start: number,
   end: number = start,
   column: vscode.ViewColumn = vscode.ViewColumn.Active,
+  opts: OpenRangeOptions = {},
 ): Promise<void> {
   const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
   const last = Math.min(Math.max(end, start), doc.lineCount) - 1;
   const first = Math.min(Math.max(start, 1), doc.lineCount) - 1;
   const range = new vscode.Range(first, 0, last, doc.lineAt(last).text.length);
+  const caret = new vscode.Position(first, doc.lineAt(first).firstNonWhitespaceCharacterIndex);
   const editor = await vscode.window.showTextDocument(doc, {
     viewColumn: column,
-    selection: new vscode.Selection(range.start, range.end),
-    preview: false,
+    selection: opts.caretOnly
+      ? new vscode.Selection(caret, caret)
+      : new vscode.Selection(range.start, range.end),
+    preserveFocus: opts.preserveFocus === true,
+    preview: opts.preserveFocus === true,
   });
-  editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  editor.revealRange(
+    opts.caretOnly ? new vscode.Range(caret, caret) : range,
+    vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+  );
 }
 
 /** Open a schema-1 `"file:line"` location under `root`. */

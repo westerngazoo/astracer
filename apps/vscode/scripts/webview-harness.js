@@ -119,7 +119,8 @@ async function answer(req) {
     }
     case "reveal": {
       const t = revealTarget(p);
-      console.log(`REVEAL ${t.file}:${t.startLine}-${t.endLine} (${p.qualifiedName || ""})`);
+      const how = [t.sync && "sync", t.preserveFocus && "preserveFocus"].filter(Boolean).join(",");
+      console.log(`REVEAL ${t.file}:${t.startLine}-${t.endLine} (${p.qualifiedName || ""})${how ? ` [${how}]` : ""}`);
       return { result: null };
     }
     case "pickRepoFolder":

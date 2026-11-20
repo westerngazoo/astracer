@@ -125,6 +125,54 @@ pub fn focus_target(
     None
 }
 
+/// The definition in `file` an editor's live symbol names, matched by name
+/// rather than line (the graph's lines are those of the last analyze, the
+/// editor's those of the buffer): among definitions called `name`, the one
+/// whose qualified path shares the most segments with `containers` (the
+/// enclosing symbol names, e.g. `impl Rating`, `tests`), then the one whose
+/// analyzed start is nearest `near_line`. `file` is resolved as in
+/// [`focus_target`].
+pub fn node_named(
+    graph: &CodeGraph,
+    repo_root: &str,
+    file: &str,
+    name: &str,
+    containers: &[String],
+    near_line: u32,
+) -> Option<NodeId> {
+    if name.is_empty() {
+        return None;
+    }
+    let words: Vec<&str> = containers
+        .iter()
+        .flat_map(|c| c.split(|ch: char| !(ch.is_alphanumeric() || ch == '_')))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let rel = repo_relative(repo_root, file);
+    for f in [rel.as_str(), file] {
+        let found = file_symbols(graph, f)
+            .into_iter()
+            .filter(|s| s.name == name)
+            .max_by(|a, b| {
+                let score = |s: &FileSymbol| {
+                    s.qualified_name
+                        .split("::")
+                        .filter(|seg| words.contains(seg))
+                        .count()
+                };
+                score(a).cmp(&score(b)).then_with(|| {
+                    b.start_line
+                        .abs_diff(near_line)
+                        .cmp(&a.start_line.abs_diff(near_line))
+                })
+            });
+        if let Some(s) = found {
+            return Some(s.id);
+        }
+    }
+    None
+}
+
 /// `file` relative to `root` (forward slashes), or `file` itself when it is
 /// not under `root`.
 pub fn repo_relative(root: &str, file: &str) -> String {
@@ -234,6 +282,52 @@ mod tests {
             focus_target(&g, "/repo", "/elsewhere/src/io.rs", Some(31)),
             None
         );
+    }
+
+    #[test]
+    fn node_named_maps_a_shifted_cursor_by_name_not_line() {
+        let mut g = app_graph();
+        let f = g.intern_file("src/core.rs");
+        // A second `next` in another impl, analyzed at 60..=63.
+        let other = g.add_node(lcw_core::Node {
+            id: NodeId(0),
+            name: "next".into(),
+            qualified_name: "app::core::Tokens::next".into(),
+            module_path: "app::core::Tokens".into(),
+            kind: NodeKind::Method,
+            span: lcw_core::SourceSpan::new(f, 60, 4, 63, 5),
+            flags: Default::default(),
+            stats: Default::default(),
+        });
+        let lexer_next = crate::fixtures::id(&g, "app::core::Lexer::next");
+        let parse = crate::fixtures::id(&g, "app::core::parse");
+        // Edits pushed `Lexer::next` (analyzed at 40) down to 70: by line the
+        // cursor would land on `Tokens::next`, by name and impl it does not.
+        let impl_lexer = vec!["impl Lexer".to_string()];
+        assert_eq!(
+            node_named(&g, "/repo", "/repo/src/core.rs", "next", &impl_lexer, 70),
+            Some(lexer_next)
+        );
+        assert_eq!(
+            focus_target(&g, "/repo", "/repo/src/core.rs", Some(71)),
+            Some(other)
+        );
+        // Without containers, the analyzed start nearest the live line wins.
+        assert_eq!(
+            node_named(&g, "/repo", "/repo/src/core.rs", "next", &[], 58),
+            Some(other)
+        );
+        assert_eq!(
+            node_named(&g, "/repo", "/repo/src/core.rs", "next", &[], 30),
+            Some(lexer_next)
+        );
+        // `parse` moved 20 lines; the name still finds it.
+        assert_eq!(
+            node_named(&g, "", "src/core.rs", "parse", &[], 28),
+            Some(parse)
+        );
+        assert_eq!(node_named(&g, "", "src/core.rs", "gone", &[], 8), None);
+        assert_eq!(node_named(&g, "", "src/core.rs", "", &[], 8), None);
     }
 
     #[test]

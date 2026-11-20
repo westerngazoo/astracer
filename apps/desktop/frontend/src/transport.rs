@@ -356,7 +356,10 @@ impl EngineTransport for TauriTransport {
 pub struct VsCodeTransport;
 
 /// Arguments for the VS Code `reveal` request: open `file` in an editor and
-/// select `line..=end_line` (1-based).
+/// select `line..=end_line` (1-based). `preserve_focus` keeps focus in the
+/// panel and only moves the editor's cursor to `line`; `sync` marks a reveal
+/// that follows the graph's selection rather than one the user asked for,
+/// which the extension drops when `livewalk.syncEditor` is off.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RevealArgs {
@@ -365,6 +368,8 @@ struct RevealArgs {
     end_line: u32,
     repo_root: String,
     qualified_name: String,
+    preserve_focus: bool,
+    sync: bool,
 }
 
 /// Arguments for the VS Code `pickRepoFolder` request.
@@ -461,9 +466,45 @@ pub async fn reveal_in_editor(
         end_line,
         repo_root,
         qualified_name,
+        preserve_focus: false,
+        sync: false,
     };
     let _: serde::de::IgnoredAny = VsCodeTransport.call("reveal", &args).await?;
     Ok(())
+}
+
+/// Move the editor to `file:line` (in view: `line..=end_line`) without taking
+/// focus from the panel. `follow` marks it as tracking the graph's selection
+/// (dropped by the extension when `livewalk.syncEditor` is off) rather than a
+/// click on a source line. VS Code / Cursor only; a no-op in the desktop app
+/// and browser dev mode. Fire and forget.
+pub fn sync_editor(
+    file: String,
+    line: u32,
+    end_line: u32,
+    repo_root: String,
+    qualified_name: String,
+    follow: bool,
+) {
+    if !can_reveal() || file.is_empty() || line == 0 {
+        return;
+    }
+    let args = RevealArgs {
+        file,
+        line,
+        end_line,
+        repo_root,
+        qualified_name,
+        preserve_focus: true,
+        sync: follow,
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        let result: Result<serde::de::IgnoredAny, String> =
+            VsCodeTransport.call("reveal", &args).await;
+        if let Err(e) = result {
+            web_sys::console::warn_1(&e.into());
+        }
+    });
 }
 
 /// Whether the page is hosted by the Tauri shell (`withGlobalTauri` injects

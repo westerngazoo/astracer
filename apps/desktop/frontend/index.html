@@ -965,6 +965,30 @@
         background: rgba(76, 140, 242, 0.14);
       }
 
+      .code-block.linked .code-line {
+        cursor: pointer;
+      }
+
+      .code-block.linked .code-line:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      /* The editor's cursor line (VS Code sync). */
+      .code-line.cursor,
+      .code-block.linked .code-line.cursor:hover {
+        background: rgba(242, 196, 76, 0.22);
+        box-shadow: inset 3px 0 0 rgba(242, 196, 76, 0.9);
+      }
+
+      .code-head.linked {
+        cursor: pointer;
+      }
+
+      .code-head.linked:hover {
+        color: var(--text);
+        text-decoration: underline;
+      }
+
       .code-line .ln {
         flex-shrink: 0;
         width: 3.5em;

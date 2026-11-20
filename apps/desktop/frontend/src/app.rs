@@ -559,6 +559,9 @@ struct Nav {
     explanation: RwSignal<ExplanationPane>,
     explain_provider: RwSignal<ExplainProvider>,
     detail_tab: RwSignal<DetailTab>,
+    /// The editor's cursor line in the selected node's file (VS Code sync),
+    /// marked in the Code tab and kept in its snippet.
+    cursor: RwSignal<Option<u32>>,
 }
 
 impl Nav {
@@ -578,6 +581,7 @@ impl Nav {
             explanation: RwSignal::new(ExplanationPane::Idle),
             explain_provider: RwSignal::new(ExplainProvider::Ollama),
             detail_tab: RwSignal::new(DetailTab::Details),
+            cursor: RwSignal::new(None),
         }
     }
 
@@ -595,6 +599,7 @@ impl Nav {
         self.analysis_from_cache.set(false);
         self.explanation.set(ExplanationPane::Idle);
         self.detail_tab.set(DetailTab::Details);
+        self.cursor.set(None);
     }
 }
 
@@ -653,7 +658,8 @@ fn node_snippet_end(card: &NodeCard) -> u32 {
 }
 
 /// Fetch source for the Code tab (Tauri only). Ignores stale responses when
-/// the user has already moved to another node.
+/// the user has already moved to another node. The snippet also covers
+/// `nav.cursor` (an editor cursor just outside the node's span).
 fn load_node_source(nav: Nav, idx: usize, card: &NodeCard, whole_file: bool) {
     if card.file.is_empty() {
         nav.source.set(SourcePane::External);
@@ -662,8 +668,11 @@ fn load_node_source(nav: Nav, idx: usize, card: &NodeCard, whole_file: bool) {
     nav.source.set(SourcePane::Loading);
     nav.explanation.set(ExplanationPane::Idle);
     let file = card.file.clone();
-    let start = card.line;
-    let end = node_snippet_end(card);
+    let (mut start, mut end) = (card.line, node_snippet_end(card));
+    if let Some(c) = nav.cursor.get_untracked() {
+        start = start.min(c);
+        end = end.max(c);
+    }
     let repo_root = nav.repo_root.get_untracked();
     spawn_local(async move {
         let result = transport::read_source_snippet(file, start, end, repo_root, whole_file).await;
@@ -774,7 +783,38 @@ fn select_node(
     rebuild_and_refresh(state, labels);
 }
 
+/// Select a node the user picked in the panel (canvas, lists, back) and move
+/// the editor onto its definition. Editor focus requests go through
+/// [`apply_focus`] instead, which never reveals, so the two directions of the
+/// sync cannot bounce off each other.
+fn pick_node(
+    state: &Shared,
+    nav: Nav,
+    labels: RwSignal<Vec<LabelBox>>,
+    idx: usize,
+    center: bool,
+    push_history: bool,
+) {
+    nav.cursor.set(None);
+    select_node(state, nav, labels, idx, center, push_history);
+    if nav.selected.get_untracked() != Some(idx) {
+        return;
+    }
+    if let Some(card) = nav.card.get_untracked() {
+        let end = node_snippet_end(&card);
+        transport::sync_editor(
+            card.file,
+            card.line,
+            end,
+            nav.repo_root.get_untracked(),
+            card.qualified_name,
+            true,
+        );
+    }
+}
+
 fn clear_selection(state: &Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) {
+    nav.cursor.set(None);
     nav.selected.set(None);
     nav.card.set(None);
     nav.tree.set(None);
@@ -795,7 +835,7 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
     let go = {
         let state = state.clone();
         Rc::new(move |idx: usize, center: bool| {
-            select_node(&state, nav, labels, idx, center, true);
+            pick_node(&state, nav, labels, idx, center, true);
         }) as Rc<dyn Fn(usize, bool)>
     };
     let trace = {
@@ -840,7 +880,7 @@ fn make_actions(state: Shared, nav: Nav, labels: RwSignal<Vec<LabelBox>>) -> Act
         Rc::new(move || {
             let prev = nav.history.try_update(|h| h.pop()).flatten();
             if let Some(idx) = prev {
-                select_node(&state, nav, labels, idx, true, false);
+                pick_node(&state, nav, labels, idx, true, false);
             }
         }) as Rc<dyn Fn()>
     };
@@ -1528,9 +1568,11 @@ pub fn App() -> impl IntoView {
 type PendingFocus = Rc<RefCell<Option<FocusRequest>>>;
 
 /// Select (and center on) the function an editor location names: the
-/// innermost definition under the line, else the file's first one. A no-op
-/// when it is already selected, so cursor following does not reload the Code
-/// tab on every move inside one function.
+/// innermost definition under the line, else the nearest one (the file's
+/// first without a line), and mark the cursor line in the Code tab. When it
+/// is already selected only the marker moves, so cursor following does not
+/// reload the Code tab on every move inside one function. Never reveals in
+/// the editor (see [`pick_node`]).
 fn apply_focus(
     state: &Shared,
     nav: Nav,
@@ -1554,8 +1596,25 @@ fn apply_focus(
     };
     let idx = id.0 as usize;
     if nav.selected.get_untracked() == Some(idx) {
+        if nav.cursor.get_untracked() == req.line {
+            return;
+        }
+        nav.cursor.set(req.line);
+        let Some(line) = req.line else {
+            return;
+        };
+        let covered = matches!(
+            nav.source.get_untracked(),
+            SourcePane::Ready(ref s) if s.start_line <= line && line <= s.end_line
+        );
+        if covered {
+            scroll_code_to_highlight();
+        } else if let Some(card) = nav.card.get_untracked() {
+            load_node_source(nav, idx, &card, false);
+        }
         return;
     }
+    nav.cursor.set(req.line);
     select_node(state, nav, labels, idx, true, true);
     let name = nav
         .card
@@ -2635,28 +2694,63 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
         }
         .into_any(),
         SourcePane::Ready(snip) => {
-            let header = format!(
-                "{}:{}-{}",
-                compact_location(location),
-                snip.highlight_start,
-                snip.highlight_end
-            );
+            // The node's own span: the snippet may have been widened to keep
+            // the editor's cursor line in view (see `load_node_source`).
+            let (span_start, span_end) = (card.line, node_snippet_end(card));
+            let header = format!("{}:{}-{}", compact_location(location), span_start, span_end);
+            let linked = transport::can_reveal();
+            // Clicking a line moves the editor there; clicking the header, to
+            // the definition.
+            let reveal_line = {
+                let file = card.file.clone();
+                let qn = card.qualified_name.clone();
+                move |line: u32, end_line: u32| {
+                    nav.cursor.set(Some(line));
+                    transport::sync_editor(
+                        file.clone(),
+                        line,
+                        end_line,
+                        nav.repo_root.get_untracked(),
+                        qn.clone(),
+                        false,
+                    );
+                }
+            };
             let rows: Vec<AnyView> = snip
                 .lines
                 .iter()
                 .map(|line| {
-                    let hl =
-                        line.number >= snip.highlight_start && line.number <= snip.highlight_end;
-                    let cls = if hl { "code-line hl" } else { "code-line" };
+                    let n = line.number;
+                    let hl = n >= span_start && n <= span_end;
+                    let cls = move || match (hl, nav.cursor.get() == Some(n)) {
+                        (true, true) => "code-line hl cursor",
+                        (false, true) => "code-line cursor",
+                        (true, false) => "code-line hl",
+                        (false, false) => "code-line",
+                    };
+                    let reveal_line = reveal_line.clone();
+                    let on_line = move |_| {
+                        if linked {
+                            reveal_line(n, n);
+                        }
+                    };
                     view! {
-                        <div class=cls>
-                            <span class="ln">{line.number}</span>
+                        <div class=cls on:click=on_line>
+                            <span class="ln">{n}</span>
                             <span class="src">{line.text.clone()}</span>
                         </div>
                     }
                     .into_any()
                 })
                 .collect();
+            let on_head = {
+                let reveal_line = reveal_line.clone();
+                move |_| {
+                    if linked {
+                        reveal_line(span_start, span_end);
+                    }
+                }
+            };
             let provider = nav.explain_provider;
             let on_provider = move |ev: web_sys::Event| {
                 let value = ev
@@ -2727,7 +2821,11 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
             view! {
                 <div class="code-pane">
                     <div class="code-head-row">
-                        <div class="code-head" title=snip.file.clone()>{header}</div>
+                        <div
+                            class=if linked { "code-head linked" } else { "code-head" }
+                            title=if linked { format!("{} — open the definition in the editor", snip.file) } else { snip.file.clone() }
+                            on:click=on_head
+                        >{header}</div>
                         <div class="explain-bar">
                             {partial.then(|| view! {
                                 <button class="small" on:click=on_full title="Load the full file (up to 500 lines)">"Full file"</button>
@@ -2755,7 +2853,10 @@ fn source_code_view(nav: Nav, card: &NodeCard, location: &str) -> AnyView {
                             </button>
                         </div>
                     </div>
-                    <div class="code-block">{rows}</div>
+                    <div
+                        class=if linked { "code-block linked" } else { "code-block" }
+                        title=if linked { "Click a line to show it in the editor" } else { "" }
+                    >{rows}</div>
                     {explanation_view(nav)}
                 </div>
             }
@@ -3106,10 +3207,10 @@ fn scroll_side_to_top() {
     }
 }
 
-/// Once the Code tab has rendered a snippet, scroll it so the highlighted
-/// span starts a third of the way down (snippets can be the whole file).
-/// Deferred a tick: the rows are rendered by the effect the snippet signal
-/// triggers.
+/// Once the Code tab has rendered a snippet, scroll it so the editor's cursor
+/// line — else the start of the highlighted span — sits a third of the way
+/// down (snippets can be the whole file). Deferred a tick: the rows are
+/// rendered by the effect the snippet signal triggers.
 fn scroll_code_to_highlight() {
     let Some(window) = web_sys::window() else {
         return;
@@ -3120,9 +3221,14 @@ fn scroll_code_to_highlight() {
         };
         let pane = doc.query_selector(".detail-code").ok().flatten();
         let first = doc
-            .query_selector(".detail-code .code-line.hl")
+            .query_selector(".detail-code .code-line.cursor")
             .ok()
-            .flatten();
+            .flatten()
+            .or_else(|| {
+                doc.query_selector(".detail-code .code-line.hl")
+                    .ok()
+                    .flatten()
+            });
         if let (Some(pane), Some(first)) = (pane, first) {
             let offset =
                 first.get_bounding_client_rect().top() - pane.get_bounding_client_rect().top();
@@ -3243,7 +3349,7 @@ fn wire_pointer_events(
                 }
             };
             match pick {
-                Some(PickResult::Node(idx)) => select_node(&state, nav, labels, idx, false, true),
+                Some(PickResult::Node(idx)) => pick_node(&state, nav, labels, idx, false, true),
                 Some(PickResult::Group(gi)) => focus_group(&state, labels, gi),
                 // With a flow source set, a background click is almost always a
                 // near miss on the target: keep the source and the selection.

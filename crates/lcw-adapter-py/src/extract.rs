@@ -169,6 +169,7 @@ fn compute_flags(func: TsNode, text: &str, name: &str, is_method: bool) -> NodeF
         // Python has no foreign-ABI export marker in its own syntax; a C
         // extension's entry points live in C sources this adapter never sees.
         is_exported: false,
+        ..Default::default()
     }
 }
 

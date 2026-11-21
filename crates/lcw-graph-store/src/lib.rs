@@ -15,7 +15,7 @@ pub const DB_FILENAME: &str = "graph.sqlite";
 
 /// Bump when table layout or serialization changes. Stores of another
 /// version are refused on read (the engine re-analyzes) and rebuilt on write.
-pub const STORE_VERSION: u32 = 2;
+pub const STORE_VERSION: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -121,12 +121,13 @@ pub fn write_with_meta(
         } else {
             Some(serde_json::to_string(&e.extra_sites)?)
         };
+        let loop_site = e.loop_site.map(|s| serde_json::to_string(&s)).transpose()?;
         tx.execute(
             "INSERT INTO edges (
                 from_id, to_id, kind,
                 file_id, start_line, start_col, end_line, end_col,
-                count, extra_sites_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                count, extra_sites_json, loop_site_json, blocking_ok
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 e.from.0 as i64,
                 e.to.0 as i64,
@@ -138,6 +139,8 @@ pub fn write_with_meta(
                 span.end_col as i64,
                 e.count as i64,
                 extra_sites,
+                loop_site,
+                e.blocking_ok as i64,
             ],
         )?;
     }
@@ -237,6 +240,8 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
             end_col INTEGER NOT NULL,
             count INTEGER NOT NULL,
             extra_sites_json TEXT,
+            loop_site_json TEXT,
+            blocking_ok INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (from_id, to_id, kind)
         );
         ",
@@ -325,12 +330,13 @@ fn load_nodes(conn: &Connection) -> Result<Vec<Node>, StoreError> {
 fn load_edges(conn: &Connection) -> Result<Vec<EdgeExport>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT from_id, to_id, kind, file_id, start_line, start_col, end_line, end_col, count,
-                extra_sites_json
+                extra_sites_json, loop_site_json, blocking_ok
          FROM edges",
     )?;
     let rows = stmt.query_map([], |r| {
         let kind: String = r.get(2)?;
         let extra_sites: Option<String> = r.get(9)?;
+        let loop_site: Option<String> = r.get(10)?;
         let edge = EdgeExport {
             from: lcw_core::NodeId(r.get::<_, i64>(0)? as u32),
             to: lcw_core::NodeId(r.get::<_, i64>(1)? as u32),
@@ -344,14 +350,19 @@ fn load_edges(conn: &Connection) -> Result<Vec<EdgeExport>, StoreError> {
             },
             count: r.get::<_, i64>(8)? as u32,
             extra_sites: Vec::new(),
+            loop_site: None,
+            blocking_ok: r.get::<_, i64>(11)? != 0,
         };
-        Ok((edge, extra_sites))
+        Ok((edge, extra_sites, loop_site))
     })?;
     let mut edges = Vec::new();
     for row in rows {
-        let (mut edge, extra_sites) = row?;
+        let (mut edge, extra_sites, loop_site) = row?;
         if let Some(json) = extra_sites {
             edge.extra_sites = serde_json::from_str(&json)?;
+        }
+        if let Some(json) = loop_site {
+            edge.loop_site = Some(serde_json::from_str(&json)?);
         }
         edges.push(edge);
     }
@@ -462,12 +473,14 @@ mod tests {
         g.add_edge(
             a,
             b,
-            lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 2, 4, 2, 5)),
+            lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 2, 4, 2, 5))
+                .with_context(false, true),
         );
         g.add_edge(
             a,
             b,
-            lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 3, 4, 3, 5)),
+            lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 3, 4, 3, 5))
+                .with_context(true, true),
         );
 
         let snap = g.snapshot();
@@ -482,6 +495,8 @@ mod tests {
         let (_, e) = g2.edges_out(a).next().unwrap();
         let lines: Vec<u32> = e.sites().map(|s| s.start_line).collect();
         assert_eq!(lines, vec![2, 3]);
+        assert_eq!(e.loop_site.map(|s| s.start_line), Some(3));
+        assert!(e.blocking_ok);
         let sum = summary(&path).unwrap();
         assert_eq!(sum.nodes, 2);
         assert_eq!(sum.edges, 1);

@@ -33,6 +33,7 @@ thiserror = "2.0.20"
 ignore = "0.4.30"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+toml = "1.0.7"
 
 [dev-dependencies]
 lcw-config = { path = "../lcw-config" }

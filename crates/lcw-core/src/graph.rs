@@ -114,6 +114,20 @@ pub struct NodeFlags {
     /// built from this source can never show that caller, so an exported
     /// symbol with no in-graph callers is an entry point, not dead code.
     pub is_exported: bool,
+    /// A method in an `impl Trait for Type` block. When the only definition
+    /// of a method name is such an impl, the trait is another crate's
+    /// (`IntoResponse`, `Display`), so a call by that name on an unknown
+    /// receiver is no evidence for this impl.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_trait_impl: bool,
+    /// Defined in example or benchmark code (`examples/`, `benches/`), which
+    /// `--exclude-examples` drops alongside tests.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_example: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Raw structural counts captured while parsing a function body. These are the
@@ -190,6 +204,16 @@ pub struct Edge {
     pub count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_sites: Vec<SourceSpan>,
+    /// The first of the merged call sites that sits inside a loop body or a
+    /// per-element iterator closure (`for`, `while`, `loop`, `.map(|x| ..)`
+    /// on an iterator): the call runs once per iteration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_site: Option<SourceSpan>,
+    /// Every merged call site sits inside a closure handed to a
+    /// blocking-allowed context (`block_in_place`), so blocking there does
+    /// not stall an async executor.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub blocking_ok: bool,
 }
 
 impl Edge {
@@ -199,7 +223,19 @@ impl Edge {
             call_site,
             count: 1,
             extra_sites: Vec::new(),
+            loop_site: None,
+            blocking_ok: false,
         }
+    }
+
+    /// This edge with its call-site context: whether the call runs per loop
+    /// iteration, and whether blocking is allowed there.
+    pub fn with_context(mut self, in_loop: bool, blocking_ok: bool) -> Self {
+        if in_loop {
+            self.loop_site = Some(self.call_site);
+        }
+        self.blocking_ok = blocking_ok;
+        self
     }
 
     /// Every recorded call site: `call_site`, then `extra_sites`.
@@ -399,6 +435,8 @@ impl CodeGraph {
                 w.count = w.count.saturating_add(edge.count);
                 w.extra_sites.push(edge.call_site);
                 w.extra_sites.extend(edge.extra_sites);
+                w.loop_site = w.loop_site.or(edge.loop_site);
+                w.blocking_ok &= edge.blocking_ok;
                 return;
             }
         }
@@ -528,6 +566,8 @@ impl CodeGraph {
                         call_site: e.call_site,
                         count: e.count,
                         extra_sites: e.extra_sites,
+                        loop_site: e.loop_site,
+                        blocking_ok: e.blocking_ok,
                     },
                 );
                 g.edge_index.insert(key, eidx);
@@ -565,6 +605,10 @@ pub struct EdgeExport {
     /// Absent in snapshots written before multi-site edges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_sites: Vec<SourceSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_site: Option<SourceSpan>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub blocking_ok: bool,
 }
 
 impl EdgeExport {
@@ -576,6 +620,8 @@ impl EdgeExport {
             call_site: e.call_site,
             count: e.count,
             extra_sites: e.extra_sites.clone(),
+            loop_site: e.loop_site,
+            blocking_ok: e.blocking_ok,
         }
     }
 }

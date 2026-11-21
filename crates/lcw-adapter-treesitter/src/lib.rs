@@ -8,7 +8,9 @@ mod extract;
 
 pub use extract::module_path_from;
 
-use lcw_core::{AdapterError, CodeGraph, FileFragment, LanguageAdapter, SourceFile};
+use lcw_core::{
+    AdapterError, CodeGraph, FileFragment, LanguageAdapter, ResolveContext, SourceFile,
+};
 
 /// Rust front end backed by tree-sitter.
 #[derive(Debug, Default, Clone, Copy)]
@@ -44,12 +46,28 @@ impl LanguageAdapter for RustTreeSitterAdapter {
     fn resolve_fragments(&self, fragments: &[FileFragment]) -> Result<CodeGraph, AdapterError> {
         Ok(extract::resolve_fragments(fragments))
     }
+
+    fn parse_with(
+        &self,
+        files: &[SourceFile],
+        ctx: &ResolveContext,
+    ) -> Result<CodeGraph, AdapterError> {
+        extract::parse_rust_with(files, ctx)
+    }
+
+    fn resolve_fragments_with(
+        &self,
+        fragments: &[FileFragment],
+        ctx: &ResolveContext,
+    ) -> Result<CodeGraph, AdapterError> {
+        Ok(extract::resolve_fragments_with(fragments, ctx))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lcw_core::{EdgeKind, NodeKind};
+    use lcw_core::{CrateGraph, CrateInfo, EdgeKind, NodeKind};
 
     fn parse(src: &str) -> CodeGraph {
         let files = vec![SourceFile::new("src/lib.rs", src)];
@@ -894,5 +912,261 @@ mod tests {
         let from_main = spawn_targets(&g, "crate::main");
         assert_eq!(from_main.len(), 3, "{from_main:?}");
         assert!(from_main.contains(&"crate::main::<spawned@L5>#2".to_string()));
+    }
+
+    // --- crate visibility ------------------------------------------------------
+
+    fn krate(name: &str, deps: Vec<lcw_core::CrateIdx>, dev: Vec<lcw_core::CrateIdx>) -> CrateInfo {
+        CrateInfo {
+            name: name.into(),
+            dir: format!("crates/{name}").into(),
+            member: true,
+            default_member: true,
+            deps,
+            dev_deps: dev,
+            has_bin: false,
+            is_dylib: false,
+            has_tests: false,
+            has_examples: false,
+            has_benches: false,
+        }
+    }
+
+    /// server -> store; cli stands alone; domain dev-depends on graph.
+    fn workspace() -> CrateGraph {
+        CrateGraph {
+            crates: vec![
+                krate("server", vec![1], vec![]),
+                krate("store", vec![], vec![]),
+                krate("cli", vec![], vec![]),
+                krate("domain", vec![], vec![4]),
+                krate("graph", vec![], vec![]),
+            ],
+            has_default_members: false,
+        }
+    }
+
+    fn parse_ws(files: &[(&str, &str)]) -> CodeGraph {
+        let files: Vec<SourceFile> = files.iter().map(|(p, s)| SourceFile::new(*p, *s)).collect();
+        let ws = workspace();
+        let ctx = ResolveContext { crates: Some(&ws) };
+        RustTreeSitterAdapter::new()
+            .parse_with(&files, &ctx)
+            .unwrap()
+    }
+
+    fn named(g: &CodeGraph, suffix: &str) -> lcw_core::NodeId {
+        g.node_ids()
+            .find(|&id| {
+                g.node(id).kind != NodeKind::External && g.node(id).qualified_name.ends_with(suffix)
+            })
+            .unwrap_or_else(|| panic!("no node ending in {suffix}"))
+    }
+
+    fn internal_targets(g: &CodeGraph, from: lcw_core::NodeId) -> Vec<String> {
+        let mut out: Vec<String> = g
+            .neighbors_out(from)
+            .filter(|&t| g.node(t).kind != NodeKind::External)
+            .map(|t| g.node(t).name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    const CLI: &str = r#"
+        pub struct Client;
+        impl Client {
+            pub fn publish_upload(&self) {}
+        }
+        pub fn cli_only_helper() {}
+    "#;
+
+    #[test]
+    fn calls_never_bind_into_a_crate_the_caller_does_not_depend_on() {
+        let g = parse_ws(&[
+            (
+                "crates/server/src/lib.rs",
+                r#"
+                pub fn router(ctx: Ctx) {
+                    ctx.client.publish_upload();
+                    cli_only_helper();
+                    open_store();
+                }
+                "#,
+            ),
+            ("crates/store/src/lib.rs", "pub fn open_store() {}"),
+            ("crates/cli/src/lib.rs", CLI),
+        ]);
+        let router = named(&g, "router");
+        assert_eq!(internal_targets(&g, router), vec!["open_store"]);
+    }
+
+    #[test]
+    fn without_a_crate_graph_a_unique_method_still_binds() {
+        let files = vec![
+            SourceFile::new(
+                "crates/server/src/lib.rs",
+                "pub fn router(ctx: Ctx) { ctx.client.publish_upload(); }",
+            ),
+            SourceFile::new("crates/cli/src/lib.rs", CLI),
+        ];
+        let g = RustTreeSitterAdapter::new().parse(&files).unwrap();
+        assert_eq!(
+            internal_targets(&g, named(&g, "router")),
+            vec!["publish_upload"]
+        );
+    }
+
+    #[test]
+    fn dev_dependencies_are_visible_to_examples_and_tests_only() {
+        let g = parse_ws(&[
+            ("crates/graph/src/lib.rs", "pub fn build_graph() {}"),
+            (
+                "crates/domain/src/lib.rs",
+                "pub fn lib_fn() { build_graph(); }",
+            ),
+            (
+                "crates/domain/examples/demo.rs",
+                "fn main() { build_graph(); }",
+            ),
+            ("crates/domain/tests/it.rs", "fn check() { build_graph(); }"),
+        ]);
+        assert!(internal_targets(&g, named(&g, "lib_fn")).is_empty());
+        assert_eq!(
+            internal_targets(&g, named(&g, "demo::main")),
+            vec!["build_graph"]
+        );
+        assert_eq!(
+            internal_targets(&g, named(&g, "check")),
+            vec!["build_graph"]
+        );
+    }
+
+    #[test]
+    fn an_external_trait_method_never_binds_to_the_one_repo_impl() {
+        let g = parse(
+            r#"
+            struct ApiError;
+            impl IntoResponse for ApiError {
+                fn into_response(self) -> Response {
+                    (StatusCode::BAD_REQUEST, "bad").into_response()
+                }
+            }
+            fn handler() -> Response {
+                Json(1).into_response()
+            }
+            "#,
+        );
+        let imp = g
+            .node_by_qualified("crate::ApiError::into_response")
+            .unwrap();
+        assert!(g.node(imp).flags.is_trait_impl);
+        assert!(
+            !g.edges().any(|(f, t, _)| f == imp && t == imp),
+            "no self-edge for a call on another type"
+        );
+        assert!(internal_callees(&g, "crate::handler").is_empty());
+    }
+
+    #[test]
+    fn an_inherent_method_recursing_on_an_unknown_receiver_keeps_its_self_edge() {
+        let g = parse(
+            r#"
+            struct Module { children: Vec<Child> }
+            impl Module {
+                fn lessons_into(&self, out: &mut Vec<u32>) {
+                    for c in &self.children {
+                        match c { Child::Module(m) => m.lessons_into(out), _ => {} }
+                    }
+                }
+            }
+            "#,
+        );
+        assert_eq!(
+            internal_callees(&g, "crate::Module::lessons_into"),
+            vec!["crate::Module::lessons_into"]
+        );
+    }
+
+    // --- call-site context ------------------------------------------------------
+
+    fn edge_to<'g>(g: &'g CodeGraph, from: &str, to: &str) -> &'g lcw_core::Edge {
+        let f = g.node_by_qualified(from).expect(from);
+        let t = g.node_by_qualified(to).expect(to);
+        g.edges()
+            .find(|(a, b, _)| *a == f && *b == t)
+            .map(|(_, _, e)| e)
+            .unwrap_or_else(|| panic!("no edge {from} -> {to}"))
+    }
+
+    #[test]
+    fn calls_in_loops_and_iterator_closures_record_a_loop_site() {
+        let g = parse(
+            r#"
+            fn load(i: u32) -> u32 { i }
+            fn once() {}
+            fn each(xs: Vec<u32>) {
+                once();
+                for x in xs.iter() { load(*x); }
+            }
+            fn mapped(xs: Vec<u32>) -> Vec<u32> {
+                xs.iter().map(|x| load(*x)).collect()
+            }
+            fn looped() {
+                loop { load(1); break; }
+            }
+            "#,
+        );
+        assert!(edge_to(&g, "crate::each", "crate::once")
+            .loop_site
+            .is_none());
+        let site = edge_to(&g, "crate::each", "crate::load").loop_site.unwrap();
+        assert_eq!(site.start_line, 6);
+        assert!(edge_to(&g, "crate::mapped", "crate::load")
+            .loop_site
+            .is_some());
+        assert!(edge_to(&g, "crate::looped", "crate::load")
+            .loop_site
+            .is_some());
+    }
+
+    #[test]
+    fn calls_inside_block_in_place_are_marked_blocking_ok() {
+        let g = parse(
+            r#"
+            fn read_disk() {}
+            async fn handler() {
+                tokio::task::block_in_place(|| read_disk());
+            }
+            async fn bare() { read_disk(); }
+            "#,
+        );
+        assert!(edge_to(&g, "crate::handler", "crate::read_disk").blocking_ok);
+        assert!(!edge_to(&g, "crate::bare", "crate::read_disk").blocking_ok);
+    }
+
+    #[test]
+    fn cfg_test_modules_and_test_attributes_mark_tests() {
+        let g = parse(
+            r#"
+            fn prod() {}
+            #[cfg(not(test))]
+            mod real { pub fn live() {} }
+            #[cfg(test)]
+            mod checks {
+                fn fixture() {}
+                #[tokio::test]
+                async fn it_works() {}
+            }
+            #[rstest]
+            fn param_case() {}
+            "#,
+        );
+        let is_test = |q: &str| g.node(g.node_by_qualified(q).expect(q)).flags.is_test;
+        assert!(!is_test("crate::prod"));
+        assert!(!is_test("crate::real::live"));
+        assert!(is_test("crate::checks::fixture"));
+        assert!(is_test("crate::checks::it_works"));
+        assert!(is_test("crate::param_case"));
     }
 }

@@ -7,6 +7,15 @@ use std::path::PathBuf;
 use crate::fragment::FileFragment;
 use crate::graph::CodeGraph;
 use crate::source::SourceFile;
+use crate::workspace::CrateGraph;
+
+/// Project facts resolution may use beyond the sources themselves.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResolveContext<'a> {
+    /// The workspace's crates and their dependencies (Rust). A call never
+    /// binds to a crate the caller's crate does not depend on.
+    pub crates: Option<&'a CrateGraph>,
+}
 
 /// Errors an adapter can raise. Parsing is best-effort: an adapter should
 /// prefer skipping a broken file (and reporting it) over aborting the run.
@@ -65,5 +74,26 @@ pub trait LanguageAdapter: Send + Sync {
         Err(AdapterError::Other(
             "this adapter does not support incremental resolution".into(),
         ))
+    }
+
+    /// [`parse`](Self::parse) with project context. Adapters that cannot use
+    /// the context ignore it (the default).
+    fn parse_with(
+        &self,
+        files: &[SourceFile],
+        ctx: &ResolveContext,
+    ) -> Result<CodeGraph, AdapterError> {
+        let _ = ctx;
+        self.parse(files)
+    }
+
+    /// [`resolve_fragments`](Self::resolve_fragments) with project context.
+    fn resolve_fragments_with(
+        &self,
+        fragments: &[FileFragment],
+        ctx: &ResolveContext,
+    ) -> Result<CodeGraph, AdapterError> {
+        let _ = ctx;
+        self.resolve_fragments(fragments)
     }
 }

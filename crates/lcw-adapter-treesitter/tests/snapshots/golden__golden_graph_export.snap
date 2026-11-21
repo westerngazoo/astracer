@@ -237,7 +237,14 @@ expression: graph.export()
         "end_line": 27,
         "end_col": 21
       },
-      "count": 1
+      "count": 1,
+      "loop_site": {
+        "file": 0,
+        "start_line": 27,
+        "start_col": 12,
+        "end_line": 27,
+        "end_col": 21
+      }
     },
     {
       "from": 4,

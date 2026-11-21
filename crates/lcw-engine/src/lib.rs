@@ -15,6 +15,7 @@
 pub mod cache;
 mod discover;
 pub mod languages;
+pub mod workspace;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -25,10 +26,14 @@ use lcw_adapter_py::PythonTreeSitterAdapter;
 use lcw_adapter_treesitter::RustTreeSitterAdapter;
 use lcw_adapter_ts::TypeScriptTreeSitterAdapter;
 use lcw_config::{AdapterMode, Config, Language};
-use lcw_core::{AdapterError, AnalysisReport, CodeGraph, LanguageAdapter, SourceFile};
+use lcw_core::{
+    path_role, AdapterError, AnalysisReport, CodeGraph, CrateGraph, LanguageAdapter, PathRole,
+    ResolveContext, SourceFile,
+};
 
 pub use discover::{discover_files, read_sources};
 pub use languages::{discover_languages, language_extensions};
+pub use workspace::discover_crates;
 
 /// Errors surfaced by the engine.
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +113,9 @@ pub const META_FILE_COUNT: &str = "file_count";
 /// `graph.sqlite` meta key: the adapter and extraction version that built the
 /// graph, so a graph built by an older extractor is not served as fresh.
 pub const META_EXTRACTOR: &str = "extractor";
+/// `graph.sqlite` meta key: fingerprint of the crate graph resolution used, so
+/// a changed `Cargo.toml` dependency invalidates the cached graph.
+pub const META_CRATES: &str = "crates";
 
 /// Why a cached graph cannot be used as-is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +132,8 @@ pub enum Staleness {
     ExtractorChanged,
     /// The store was written in another on-disk format version.
     StoreFormatChanged,
+    /// The workspace's crates or their dependencies changed (`Cargo.toml`).
+    CratesChanged,
     /// Source files were added or removed since the store was written.
     FileSetChanged { before: usize, now: usize },
     /// This many source files were modified after the store was written.
@@ -143,6 +153,7 @@ impl std::fmt::Display for Staleness {
             Staleness::StoreFormatChanged => {
                 f.write_str("cached graph uses another store format version")
             }
+            Staleness::CratesChanged => f.write_str("crate dependencies changed (Cargo.toml)"),
             Staleness::FileSetChanged { before, now } => {
                 write!(f, "source files changed ({before} -> {now})")
             }
@@ -277,6 +288,10 @@ impl Engine {
         if meta(META_EXTRACTOR).as_deref() != Some(self.extractor_id().as_str()) {
             return Ok(Some(Staleness::ExtractorChanged));
         }
+        let crates = workspace::fingerprint(self.crate_graph(root).as_ref());
+        if meta(META_CRATES).as_deref() != Some(crates.as_str()) {
+            return Ok(Some(Staleness::CratesChanged));
+        }
         let files = discover_files(root, &self.config, self.adapter.extensions())?;
         if files.len() != count {
             return Ok(Some(Staleness::FileSetChanged {
@@ -378,19 +393,44 @@ impl Engine {
         progress(Progress::Parsing {
             files: sources.len(),
         });
-        let (graph, stats) = if self.config.cache.enabled && self.adapter.supports_incremental() {
-            self.parse_incremental(root, &sources)?
+        let crates = self.crate_graph(root);
+        let ctx = ResolveContext {
+            crates: crates.as_ref(),
+        };
+        let (mut graph, stats) = if self.config.cache.enabled && self.adapter.supports_incremental()
+        {
+            self.parse_incremental(root, &sources, &ctx)?
         } else {
-            let graph = lcw_telemetry::timed("engine.parse", || self.adapter.parse(&sources))?;
+            let graph =
+                lcw_telemetry::timed("engine.parse", || self.adapter.parse_with(&sources, &ctx))?;
             (graph, IncrementalStats::all_parsed(sources.len()))
         };
+        mark_path_roles(&mut graph, root);
         lcw_telemetry::count("engine.nodes", graph.node_count() as u64);
         lcw_telemetry::count("engine.edges", graph.edge_count() as u64);
         lcw_telemetry::count("engine.graph_bytes", graph.estimated_bytes() as u64);
 
         let report = self.finish_report(graph, progress);
-        self.persist_graph_store(root, &report.graph, started_ms, files.len());
+        let fingerprint = workspace::fingerprint(crates.as_ref());
+        self.persist_graph_store(root, &report.graph, started_ms, files.len(), &fingerprint);
         Ok((report, stats))
+    }
+
+    /// The Cargo crate graph for `root` when analyzing Rust (`None` for other
+    /// languages or a directory without a `Cargo.toml`). Cheap: reads only
+    /// the manifests.
+    pub fn crate_graph(&self, root: &Path) -> Option<CrateGraph> {
+        if self.config.adapter.language != Language::Rust {
+            return None;
+        }
+        let dir = if root.is_file() { root.parent()? } else { root };
+        discover_crates(dir)
+    }
+
+    /// Run Layers 2 and 3 over an already-built graph (a cached one, or one
+    /// filtered for display), as a fresh analysis would.
+    pub fn report_for(&self, graph: CodeGraph) -> AnalysisReport {
+        self.finish_report(graph, &mut |_| {})
     }
 
     /// Analyze an already-loaded set of sources (used by the UI and tests).
@@ -409,7 +449,8 @@ impl Engine {
         progress(Progress::Parsing {
             files: sources.len(),
         });
-        let graph = lcw_telemetry::timed("engine.parse", || self.adapter.parse(sources))?;
+        let mut graph = lcw_telemetry::timed("engine.parse", || self.adapter.parse(sources))?;
+        mark_path_roles(&mut graph, Path::new(""));
         lcw_telemetry::count("engine.nodes", graph.node_count() as u64);
         lcw_telemetry::count("engine.edges", graph.edge_count() as u64);
         lcw_telemetry::count("engine.graph_bytes", graph.estimated_bytes() as u64);
@@ -422,6 +463,7 @@ impl Engine {
         &self,
         root: &Path,
         sources: &[SourceFile],
+        ctx: &ResolveContext,
     ) -> Result<(CodeGraph, IncrementalStats), EngineError> {
         let _perf = lcw_telemetry::PerfGuard::new("engine.parse_incremental");
         let adapter_name = self.adapter.name();
@@ -457,7 +499,7 @@ impl Engine {
         lcw_telemetry::count("engine.files_reused", stats.reused as u64);
         lcw_telemetry::count("engine.files_reparsed", stats.reparsed as u64);
 
-        let graph = self.adapter.resolve_fragments(&fragments)?;
+        let graph = self.adapter.resolve_fragments_with(&fragments, ctx)?;
 
         // Persist best-effort: a failed write must never fail the analysis.
         if let Some(path) = &cache_path {
@@ -534,6 +576,7 @@ impl Engine {
         graph: &CodeGraph,
         started_ms: u64,
         file_count: usize,
+        crates: &str,
     ) {
         if !self.config.graph_store.enabled {
             return;
@@ -549,6 +592,7 @@ impl Engine {
             (META_ROOT, root.to_string_lossy().into_owned()),
             (META_FILE_COUNT, file_count.to_string()),
             (META_EXTRACTOR, self.extractor_id()),
+            (META_CRATES, crates.to_string()),
         ];
         if let Err(e) = lcw_graph_store::write_with_meta(&path, &snapshot, &meta) {
             lcw_telemetry::warn!(
@@ -557,6 +601,28 @@ impl Engine {
                 path = %path.display(),
                 "failed to persist graph store (analysis still correct)"
             );
+        }
+    }
+}
+
+/// Flag definitions in test, bench and example files (judged by their path
+/// relative to `root`, in every language) so `--exclude-tests` can drop them
+/// without re-analysis.
+fn mark_path_roles(graph: &mut CodeGraph, root: &Path) {
+    let roles: Vec<PathRole> = graph
+        .files()
+        .map(|(_, p)| path_role(p.strip_prefix(root).unwrap_or(p)))
+        .collect();
+    let ids: Vec<_> = graph.node_ids().collect();
+    for id in ids {
+        let node = graph.node_mut(id);
+        if node.kind == lcw_core::NodeKind::External {
+            continue;
+        }
+        match roles.get(node.span.file as usize) {
+            Some(PathRole::Test) => node.flags.is_test = true,
+            Some(PathRole::Example) => node.flags.is_example = true,
+            _ => {}
         }
     }
 }

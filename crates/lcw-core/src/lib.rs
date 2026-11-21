@@ -16,8 +16,9 @@ pub mod report;
 pub mod source;
 pub mod suggestion;
 pub mod vertical;
+pub mod workspace;
 
-pub use adapter::{AdapterError, LanguageAdapter};
+pub use adapter::{AdapterError, LanguageAdapter, ResolveContext};
 pub use diagnostic::{Diagnostic, Severity};
 pub use fragment::{CallKind, FileFragment, RawCall};
 pub use graph::{
@@ -34,6 +35,7 @@ pub use source::{
 };
 pub use suggestion::{Suggestion, Target};
 pub use vertical::Vertical;
+pub use workspace::{path_role, CrateGraph, CrateIdx, CrateInfo, PathRole, Visibility};
 
 #[cfg(test)]
 mod tests {

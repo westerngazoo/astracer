@@ -162,6 +162,7 @@ fn compute_flags(name: &str, is_method: bool) -> NodeFlags {
         is_method,
         is_generic: false,
         is_exported: false,
+        ..Default::default()
     }
 }
 

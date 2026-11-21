@@ -185,6 +185,7 @@ fn compute_flags(func: TsNode, name: &str, is_method: bool) -> NodeFlags {
         // `is_pub` already records. True foreign-ABI export needs a cgo
         // `//export` directive; detecting that is a separate change.
         is_exported: false,
+        ..Default::default()
     }
 }
 

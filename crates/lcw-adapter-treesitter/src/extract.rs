@@ -19,8 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use lcw_core::{
-    AdapterError, CallKind, CodeGraph, Edge, EdgeKind, FileFragment, FileId, Node, NodeFlags,
-    NodeId, NodeKind, NodeStats, RawCall, SourceFile, SourceSpan,
+    path_role, AdapterError, CallKind, CodeGraph, CrateGraph, CrateIdx, Edge, EdgeKind,
+    FileFragment, FileId, Node, NodeFlags, NodeId, NodeKind, NodeStats, PathRole, RawCall,
+    ResolveContext, SourceFile, SourceSpan, Visibility,
 };
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -32,6 +33,14 @@ use infer::{FileTypes, LocalTypes};
 /// incremental path uses — so the whole-batch result is byte-identical to
 /// feeding the files through [`extract_file`] + [`resolve_fragments`].
 pub fn parse_rust(files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
+    parse_rust_with(files, &ResolveContext::default())
+}
+
+/// [`parse_rust`] with project context (the workspace's crate graph).
+pub fn parse_rust_with(
+    files: &[SourceFile],
+    ctx: &ResolveContext,
+) -> Result<CodeGraph, AdapterError> {
     // One parser reused across the batch: reloading the grammar per file is
     // measurably slower on big repos.
     let mut parser = make_parser()?;
@@ -39,7 +48,7 @@ pub fn parse_rust(files: &[SourceFile]) -> Result<CodeGraph, AdapterError> {
     for sf in files {
         fragments.push(extract_with_parser(&mut parser, sf)?);
     }
-    Ok(resolve_fragments(&fragments))
+    Ok(resolve_fragments_with(&fragments, ctx))
 }
 
 /// A tree-sitter parser configured for Rust.
@@ -71,7 +80,13 @@ fn extract_with_parser(parser: &mut Parser, sf: &SourceFile) -> Result<FileFragm
     // Spans are captured with a fragment-local file id (0); resolution remaps
     // them onto the real interned file id.
     let mut defs = Vec::new();
-    collect_defs_into(&mut defs, tree.root_node(), &sf.text, &module_base);
+    collect_defs_into(
+        &mut defs,
+        tree.root_node(),
+        &sf.text,
+        &module_base,
+        DefCtx::default(),
+    );
 
     let mut calls = Vec::new();
     let mut spawned = Vec::new();
@@ -82,6 +97,8 @@ fn extract_with_parser(parser: &mut Parser, sf: &SourceFile) -> Result<FileFragm
         spawned: &mut spawned,
         taken: &mut taken,
         file_types: &file_types,
+        loop_depth: 0,
+        blocking_depth: 0,
     };
     collect_calls_into(&mut scan, tree.root_node(), &sf.text, &module_base, None);
     // Spawned closures are definitions too: resolution interns them with the
@@ -101,7 +118,19 @@ fn extract_with_parser(parser: &mut Parser, sf: &SourceFile) -> Result<FileFragm
 /// placeholder. The result is independent of whether a fragment was freshly
 /// extracted or served from cache.
 pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
+    resolve_fragments_with(fragments, &ResolveContext::default())
+}
+
+/// [`resolve_fragments`] with project context: with a crate graph, a call
+/// only binds to a definition in the caller's own crate or one it depends on.
+pub fn resolve_fragments_with(fragments: &[FileFragment], ctx: &ResolveContext) -> CodeGraph {
     let mut graph = CodeGraph::new();
+    let crates = ctx.crates.filter(|c| !c.is_empty());
+    let mut map = CrateMap {
+        vis: crates.map(CrateGraph::visibility),
+        node_crate: Vec::new(),
+        file_crate: Vec::new(),
+    };
 
     // Pass 1: definitions (remapping each fragment-local span to its real file).
     let mut by_short: HashMap<String, Vec<NodeId>> = HashMap::new();
@@ -110,11 +139,14 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
     let mut owners: HashMap<String, HashSet<String>> = HashMap::new();
     for frag in fragments {
         let file = graph.intern_file(frag.path.clone());
+        let home = file_home(crates, &frag.path);
+        map.set_file(file, home);
         for def in &frag.defs {
             let mut node = def.clone();
             node.span = with_file(node.span, file);
             let name = node.name.clone();
             let id = graph.add_node(node);
+            map.set_node(id, home.0);
             by_short.entry(name).or_default().push(id);
             let module = &graph.node(id).module_path;
             if let Some(owner) = module.rsplit("::").next() {
@@ -144,9 +176,13 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
                 caller_node.qualified_name.clone(),
                 caller_node.module_path.clone(),
             );
+            let (krate, dev_file) = map.file(file);
             let scope = CallerScope {
                 name: &name,
                 module: &module,
+                krate,
+                dev: dev_file || caller_node.flags.is_test || caller_node.flags.is_example,
+                crates: &map,
             };
             if rc.kind == CallKind::Spawn {
                 if let Some(target) = resolve_spawn(&graph, &by_short, rc, &scope) {
@@ -168,11 +204,74 @@ pub fn resolve_fragments(fragments: &[FileFragment]) -> CodeGraph {
                 callee.kind.edge_kind()
             };
             let call_site = with_file(rc.call_site, file);
-            graph.add_edge(caller, target, Edge::new(edge_kind, call_site));
+            let edge = Edge::new(edge_kind, call_site).with_context(rc.in_loop, rc.blocking_ok);
+            graph.add_edge(caller, target, edge);
         }
     }
 
     graph
+}
+
+/// The crate a file belongs to, and whether it is test, bench or example
+/// code of that crate (which also sees the crate's dev-dependencies).
+fn file_home(crates: Option<&CrateGraph>, path: &Path) -> (Option<CrateIdx>, bool) {
+    let Some(cg) = crates else {
+        return (None, false);
+    };
+    let Some(idx) = cg.crate_of(path) else {
+        return (None, false);
+    };
+    let path: std::path::PathBuf = path
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    let rel = cg
+        .get(idx)
+        .and_then(|c| path.strip_prefix(&c.dir).ok())
+        .unwrap_or(&path);
+    (Some(idx), path_role(rel) != PathRole::Normal)
+}
+
+/// Which crate every file and definition belongs to, and which crates may
+/// call which. Empty (everything allowed) without a crate graph.
+struct CrateMap {
+    vis: Option<Visibility>,
+    node_crate: Vec<Option<CrateIdx>>,
+    file_crate: Vec<(Option<CrateIdx>, bool)>,
+}
+
+impl CrateMap {
+    fn set_node(&mut self, id: NodeId, krate: Option<CrateIdx>) {
+        let i = id.index();
+        if self.node_crate.len() <= i {
+            self.node_crate.resize(i + 1, None);
+        }
+        self.node_crate[i] = krate;
+    }
+
+    fn set_file(&mut self, file: FileId, home: (Option<CrateIdx>, bool)) {
+        let i = file.index();
+        if self.file_crate.len() <= i {
+            self.file_crate.resize(i + 1, (None, false));
+        }
+        self.file_crate[i] = home;
+    }
+
+    fn file(&self, file: FileId) -> (Option<CrateIdx>, bool) {
+        self.file_crate
+            .get(file.index())
+            .copied()
+            .unwrap_or((None, false))
+    }
+
+    /// May code in `from` (test code when `dev`) name definition `target`?
+    fn allows(&self, from: Option<CrateIdx>, dev: bool, target: NodeId) -> bool {
+        let Some(vis) = &self.vis else {
+            return true;
+        };
+        let to = self.node_crate.get(target.index()).copied().flatten();
+        vis.allows(from, to, dev)
+    }
 }
 
 /// Rewrite a fragment-local span's `file` field to a real interned [`FileId`].
@@ -185,15 +284,28 @@ fn with_file(mut span: SourceSpan, file: FileId) -> SourceSpan {
 // Pass 1: definitions
 // ---------------------------------------------------------------------------
 
-fn collect_defs_into(defs: &mut Vec<Node>, node: TsNode, text: &str, scope: &str) {
+/// What the enclosing items say about the definitions below them.
+#[derive(Debug, Clone, Copy, Default)]
+struct DefCtx {
+    /// Inside a `#[cfg(test)]` module.
+    in_test: bool,
+    /// Directly inside an `impl Trait for Type` block.
+    trait_impl: bool,
+}
+
+fn collect_defs_into(defs: &mut Vec<Node>, node: TsNode, text: &str, scope: &str, ctx: DefCtx) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "mod_item" => {
                 let name = field_text(child, "name", text);
                 let inner = join(scope, &name);
+                let inner_ctx = DefCtx {
+                    in_test: ctx.in_test || has_test_attr(child, text),
+                    trait_impl: false,
+                };
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs_into(defs, body, text, &inner);
+                    collect_defs_into(defs, body, text, &inner, inner_ctx);
                 }
             }
             "impl_item" => {
@@ -203,15 +315,23 @@ fn collect_defs_into(defs: &mut Vec<Node>, node: TsNode, text: &str, scope: &str
                 } else {
                     join(scope, &ty)
                 };
+                let inner_ctx = DefCtx {
+                    in_test: ctx.in_test || has_test_attr(child, text),
+                    trait_impl: child.child_by_field_name("trait").is_some(),
+                };
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs_into(defs, body, text, &inner);
+                    collect_defs_into(defs, body, text, &inner, inner_ctx);
                 }
             }
             "trait_item" => {
                 let name = field_text(child, "name", text);
                 let inner = join(scope, &name);
+                let inner_ctx = DefCtx {
+                    in_test: ctx.in_test,
+                    trait_impl: false,
+                };
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs_into(defs, body, text, &inner);
+                    collect_defs_into(defs, body, text, &inner, inner_ctx);
                 }
             }
             "function_item" | "function_signature_item" => {
@@ -220,12 +340,17 @@ fn collect_defs_into(defs: &mut Vec<Node>, node: TsNode, text: &str, scope: &str
                     continue;
                 }
                 let qualified = join(scope, &name);
-                defs.push(make_function_node(child, text, scope, &name, &qualified));
+                let node = make_function_node(child, text, scope, &name, &qualified, ctx);
+                let nested = DefCtx {
+                    in_test: node.flags.is_test,
+                    trait_impl: false,
+                };
+                defs.push(node);
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_defs_into(defs, body, text, &qualified);
+                    collect_defs_into(defs, body, text, &qualified, nested);
                 }
             }
-            _ => collect_defs_into(defs, child, text, scope),
+            _ => collect_defs_into(defs, child, text, scope, ctx),
         }
     }
 }
@@ -238,8 +363,11 @@ fn make_function_node(
     module_path: &str,
     name: &str,
     qualified: &str,
+    ctx: DefCtx,
 ) -> Node {
-    let flags = compute_flags(func, text, module_path, name);
+    let mut flags = compute_flags(func, text, module_path, name);
+    flags.is_test |= ctx.in_test;
+    flags.is_trait_impl = ctx.trait_impl;
     let stats = compute_stats(func, text);
     let kind = if flags.is_method {
         NodeKind::Method
@@ -272,6 +400,8 @@ fn compute_flags(func: TsNode, text: &str, module_path: &str, name: &str) -> Nod
         is_method: has_self_param(func),
         is_generic: func.child_by_field_name("type_parameters").is_some(),
         is_exported: is_exported_fn(func, text, header),
+        is_trait_impl: false,
+        is_example: false,
     }
 }
 
@@ -407,6 +537,20 @@ struct Scan<'a> {
     spawned: &'a mut Vec<Node>,
     taken: &'a mut HashSet<String>,
     file_types: &'a FileTypes,
+    /// How many loop bodies / per-element closures enclose the current node.
+    loop_depth: u32,
+    /// How many `block_in_place` closures enclose the current node.
+    blocking_depth: u32,
+}
+
+impl Scan<'_> {
+    fn in_loop(&self) -> bool {
+        self.loop_depth > 0
+    }
+
+    fn blocking_ok(&self) -> bool {
+        self.blocking_depth > 0
+    }
 }
 
 /// `self_ty` is the type of the `impl`/`trait` block the items sit directly
@@ -481,36 +625,176 @@ struct Env<'a> {
 fn scan_calls_into(scan: &mut Scan, node: TsNode, text: &str, caller: &str, env: &Env) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        let kind = child.kind();
+        scan_node(scan, child, text, caller, env);
+    }
+}
+
+/// Scan one node (not just its children) for calls.
+fn scan_node(scan: &mut Scan, node: TsNode, text: &str, caller: &str, env: &Env) {
+    match node.kind() {
         // Nested functions are their own callers; their bodies are handled by
         // `collect_calls_into`, not folded into this caller.
-        if matches!(kind, "function_item" | "function_signature_item") {
-            continue;
-        }
-        if matches!(kind, "call_expression" | "macro_invocation") {
-            if let Some(call) = callee_of_call(child, text).filter(|c| !calls_a_local(c, env.types))
-            {
-                let spawns = call.kind != CallClass::Macro && is_spawn_name(&call.short);
-                let is_macro = call.kind == CallClass::Macro;
-                let receiver = receiver_type(child, &call, text, env.types);
-                scan.calls.push(RawCall {
-                    caller: caller.to_string(),
-                    kind: class_to_callkind(call.kind),
-                    path: call.path,
-                    short: call.short,
-                    receiver,
-                    call_site: span_of(child, FileId(0)),
-                });
-                if is_macro {
-                    scan_macro_args(scan, child, text, caller, env.types);
-                }
-                if spawns && scan_spawn(scan, child, text, caller, env) {
-                    continue;
-                }
+        "function_item" | "function_signature_item" => return,
+        // `for x in expr { body }`: `expr` runs once, the body per iteration.
+        "for_expression" => {
+            if let Some(value) = node.child_by_field_name("value") {
+                scan_node(scan, value, text, caller, env);
             }
+            if let Some(body) = node.child_by_field_name("body") {
+                scan.loop_depth += 1;
+                scan_node(scan, body, text, caller, env);
+                scan.loop_depth -= 1;
+            }
+            return;
         }
-        scan_calls_into(scan, child, text, caller, env);
+        // A `while` condition is re-evaluated every iteration too.
+        "while_expression" | "loop_expression" => {
+            scan.loop_depth += 1;
+            scan_calls_into(scan, node, text, caller, env);
+            scan.loop_depth -= 1;
+            return;
+        }
+        "call_expression" | "macro_invocation" if scan_call(scan, node, text, caller, env) => {
+            return;
+        }
+        _ => {}
     }
+    scan_calls_into(scan, node, text, caller, env);
+}
+
+/// Record a call node. Returns `true` when its subtree was fully handled.
+fn scan_call(scan: &mut Scan, node: TsNode, text: &str, caller: &str, env: &Env) -> bool {
+    let Some(call) = callee_of_call(node, text).filter(|c| !calls_a_local(c, env.types)) else {
+        return false;
+    };
+    let is_macro = call.kind == CallClass::Macro;
+    let spawns = !is_macro && is_spawn_name(&call.short);
+    let per_element = !is_macro && is_per_element_call(node, &call, text);
+    let blocking_scope = !is_macro && call.short == "block_in_place";
+    let receiver = receiver_type(node, &call, text, env.types);
+    scan.calls.push(RawCall {
+        caller: caller.to_string(),
+        kind: class_to_callkind(call.kind),
+        path: call.path,
+        short: call.short,
+        receiver,
+        call_site: span_of(node, FileId(0)),
+        in_loop: scan.in_loop(),
+        blocking_ok: scan.blocking_ok(),
+    });
+    if is_macro {
+        scan_macro_args(scan, node, text, caller, env.types);
+    }
+    if spawns && scan_spawn(scan, node, text, caller, env) {
+        return true;
+    }
+    if !(per_element || blocking_scope) {
+        return false;
+    }
+    let Some(args) = node.child_by_field_name("arguments") else {
+        return false;
+    };
+    if let Some(func) = node.child_by_field_name("function") {
+        scan_node(scan, func, text, caller, env);
+    }
+    scan.loop_depth += per_element as u32;
+    scan.blocking_depth += blocking_scope as u32;
+    scan_calls_into(scan, args, text, caller, env);
+    scan.loop_depth -= per_element as u32;
+    scan.blocking_depth -= blocking_scope as u32;
+    true
+}
+
+/// `xs.iter().map(|x| ..)`: a closure argument of this call runs once per
+/// element. Adapters like `map` / `filter` also exist on `Option` and
+/// `Result`, where they run once, so those need an iterator-looking receiver
+/// chain (`.iter()`, `.into_iter()`, `.keys()`, a range ...); the collection
+/// methods (`retain`, `sort_by`) are per element on their own.
+fn is_per_element_call(call: TsNode, callee: &Callee, text: &str) -> bool {
+    if callee.kind != CallClass::Method {
+        return false;
+    }
+    let always = matches!(
+        callee.short.as_str(),
+        "retain"
+            | "retain_mut"
+            | "sort_by"
+            | "sort_by_key"
+            | "sort_unstable_by"
+            | "sort_unstable_by_key"
+            | "dedup_by"
+            | "dedup_by_key"
+            | "for_each"
+            | "try_for_each"
+            | "par_iter"
+            | "for_each_concurrent"
+    );
+    let adapter = matches!(
+        callee.short.as_str(),
+        "map"
+            | "filter"
+            | "filter_map"
+            | "flat_map"
+            | "fold"
+            | "try_fold"
+            | "any"
+            | "all"
+            | "find"
+            | "find_map"
+            | "position"
+            | "inspect"
+            | "take_while"
+            | "skip_while"
+            | "map_while"
+            | "scan"
+            | "partition"
+            | "max_by_key"
+            | "min_by_key"
+            | "max_by"
+            | "min_by"
+            | "sum_by"
+            | "group_by"
+    );
+    if !(always || adapter) {
+        return false;
+    }
+    let has_closure = call.child_by_field_name("arguments").is_some_and(|a| {
+        let mut c = a.walk();
+        let found = a
+            .named_children(&mut c)
+            .any(|n| n.kind() == "closure_expression");
+        found
+    });
+    if !has_closure {
+        return false;
+    }
+    if always {
+        return true;
+    }
+    let receiver = call
+        .child_by_field_name("function")
+        .and_then(|f| f.child_by_field_name("value"))
+        .map(|v| node_text(v, text))
+        .unwrap_or_default();
+    const ITERATORS: [&str; 16] = [
+        ".iter()",
+        ".iter_mut()",
+        ".into_iter()",
+        ".par_iter()",
+        ".into_par_iter()",
+        ".chars()",
+        ".bytes()",
+        ".lines()",
+        ".keys()",
+        ".values()",
+        ".values_mut()",
+        ".drain(",
+        ".windows(",
+        ".chunks(",
+        ".split(",
+        ".enumerate()",
+    ];
+    ITERATORS.iter().any(|m| receiver.contains(m)) || receiver.contains("..")
 }
 
 /// `f(..)` where `f` is a local closure or function value: a call, but not
@@ -632,6 +916,8 @@ fn scan_token_tree(scan: &mut Scan, tt: TsNode, text: &str, caller: &str, types:
                 short,
                 receiver,
                 call_site: span_between(tok, end, FileId(0)),
+                in_loop: scan.in_loop(),
+                blocking_ok: scan.blocking_ok(),
             });
         }
         i = j + 1;
@@ -774,6 +1060,8 @@ fn spawn_closure(scan: &mut Scan, closure: TsNode, text: &str, caller: &str, out
         short: name,
         receiver: None,
         call_site: span_of(closure, FileId(0)),
+        in_loop: false,
+        blocking_ok: false,
     });
 
     // Captured variables are still values inside the closure.
@@ -792,8 +1080,12 @@ fn spawn_closure(scan: &mut Scan, closure: TsNode, text: &str, caller: &str, out
     };
     // Scan the closure node, not its body: the scan looks at a node's
     // children, and in `move || worker(rx)` the body *is* the call, so
-    // scanning the body alone would lose the thread's only call.
+    // scanning the body alone would lose the thread's only call. The thread
+    // starts afresh: a spawn inside a loop does not make its body a loop.
+    let outer_ctx = (scan.loop_depth, scan.blocking_depth);
+    (scan.loop_depth, scan.blocking_depth) = (0, 0);
     scan_calls_into(scan, closure, text, &qualified, &env);
+    (scan.loop_depth, scan.blocking_depth) = outer_ctx;
 }
 
 /// `spawn(worker)` / `spawn(workers::run)`: the function is passed, not
@@ -808,6 +1100,8 @@ fn spawn_reference(scan: &mut Scan, arg: TsNode, text: &str, caller: &str) {
         path,
         receiver: None,
         call_site: span_of(arg, FileId(0)),
+        in_loop: false,
+        blocking_ok: false,
     });
 }
 
@@ -876,6 +1170,7 @@ fn resolve_spawn(
         .get(&rc.short)?
         .iter()
         .copied()
+        .filter(|&id| scope.sees(id))
         .filter(|&id| {
             let n = graph.node(id);
             if !rc.path.contains("::") {
@@ -934,19 +1229,35 @@ fn resolve_target(
             .copied()
             .filter(|&id| {
                 let n = graph.node(id);
-                can_name(call.kind, n) && has_qualifiers(&n.qualified_name, &qualifiers)
+                scope.sees(id)
+                    && can_name(call.kind, n)
+                    && has_qualifiers(&n.qualified_name, &qualifiers)
             })
             .collect();
         if let Some(id) = pick_nearest(graph, &eligible, scope) {
             return id;
         }
     }
-    let key = if call.path.is_empty() {
+    let key = external_key(call);
+    graph.intern_node(&key, || Node::external(key.clone()))
+}
+
+/// The name an unresolved call is interned under: the callee as written.
+/// A copy of a value whose type is known keeps the type (`Course::clone`),
+/// so a lens can tell an expensive per-iteration clone from a cheap one.
+fn external_key(call: &Callee) -> String {
+    if call.kind == CallClass::Method
+        && matches!(call.short.as_str(), "clone" | "to_owned" | "to_vec")
+    {
+        if let Some(ty) = &call.receiver {
+            return format!("{}::{}", last_segment(ty), call.short);
+        }
+    }
+    if call.path.is_empty() {
         call.short.clone()
     } else {
         call.path.clone()
-    };
-    graph.intern_node(&key, || Node::external(key.clone()))
+    }
 }
 
 /// Bind `x.m()` to a method definition, or to nothing.
@@ -970,7 +1281,7 @@ fn resolve_method(
         .get(&call.short)?
         .iter()
         .copied()
-        .filter(|&id| can_name(CallClass::Method, graph.node(id)))
+        .filter(|&id| scope.sees(id) && can_name(CallClass::Method, graph.node(id)))
         .collect();
     if let Some(ty) = &call.receiver {
         // A path-qualified type (`reqwest::Client`) must match its qualifiers
@@ -1002,6 +1313,12 @@ fn resolve_method(
         return None;
     }
     match methods.as_slice() {
+        // A lone impl of a trait the repo does not declare (a repo trait
+        // would add its own declaration as a second candidate) shares the
+        // name with every other implementor of that foreign trait:
+        // `(status, body).into_response()` is not the repo's one
+        // `ApiError::into_response`.
+        [only] if graph.node(*only).flags.is_trait_impl => None,
         [only] => Some(*only),
         _ => None,
     }
@@ -1135,6 +1452,20 @@ struct CallerScope<'a> {
     name: &'a str,
     /// The module the calling function sits in.
     module: &'a str,
+    /// The caller's crate in the workspace's crate graph, when known.
+    krate: Option<CrateIdx>,
+    /// Test, bench or example code, which also sees dev-dependencies.
+    dev: bool,
+    crates: &'a CrateMap,
+}
+
+impl CallerScope<'_> {
+    /// Whether the caller's crate can see `target`'s crate at all: the same
+    /// crate or one it depends on. A definition in a crate the caller does
+    /// not depend on is never what the call names, however well it matches.
+    fn sees(&self, target: NodeId) -> bool {
+        self.crates.allows(self.krate, self.dev, target)
+    }
 }
 
 /// Among several candidate definitions, prefer the one closest to the caller,
@@ -1408,14 +1739,21 @@ fn count_params(func: TsNode) -> u32 {
 }
 
 fn is_test_fn(func: TsNode, text: &str, module_path: &str, name: &str) -> bool {
-    if module_path.contains("tests") || name.starts_with("test_") {
-        return true;
-    }
-    let mut sib = func.prev_sibling();
+    let test_module = module_path
+        .split("::")
+        .any(|seg| seg == "tests" || seg == "test");
+    test_module || name.starts_with("test_") || has_test_attr(func, text)
+}
+
+/// Whether an item carries a test attribute among the attributes (and doc
+/// comments) right above it: `#[test]`, `#[tokio::test]`, `#[rstest]`,
+/// `#[bench]`, `#[cfg(test)]` ...
+fn has_test_attr(item: TsNode, text: &str) -> bool {
+    let mut sib = item.prev_sibling();
     while let Some(s) = sib {
         match s.kind() {
             "attribute_item" | "inner_attribute_item" => {
-                if node_text(s, text).contains("test") {
+                if is_test_attr(&node_text(s, text)) {
                     return true;
                 }
             }
@@ -1425,6 +1763,31 @@ fn is_test_fn(func: TsNode, text: &str, module_path: &str, name: &str) -> bool {
         sib = s.prev_sibling();
     }
     false
+}
+
+fn is_test_attr(attr: &str) -> bool {
+    let inner = attr
+        .trim_start_matches("#!")
+        .trim_start_matches('#')
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+    let path = inner.split('(').next().unwrap_or("").trim();
+    if path == "cfg" {
+        let args = inner[path.len()..].trim_start_matches('(');
+        if args.replace(' ', "").contains("not(test") {
+            return false;
+        }
+        return args
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|tok| tok == "test");
+    }
+    let last = path.rsplit("::").next().unwrap_or(path);
+    matches!(
+        last,
+        "test" | "bench" | "rstest" | "test_case" | "quickcheck"
+    )
 }
 
 fn impl_type_name(impl_item: TsNode, text: &str) -> String {

@@ -255,6 +255,7 @@ fn compute_flags(func: TsNode, text: &str, name: &str, is_method: bool) -> NodeF
         // the JS/TS call graph itself (`is_pub` covers it), not to a caller
         // the graph structurally cannot see.
         is_exported: false,
+        ..Default::default()
     }
 }
 

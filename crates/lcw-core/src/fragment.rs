@@ -73,6 +73,18 @@ pub struct RawCall {
     /// Call-site location. Its `file` field is fragment-local (there is only
     /// one file per fragment) and is remapped during resolution.
     pub call_site: SourceSpan,
+    /// The call runs once per iteration: it sits in a loop body or in a
+    /// closure passed to an iterator adapter (see [`crate::Edge::loop_site`]).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub in_loop: bool,
+    /// The call sits in a closure handed to `block_in_place`, where blocking
+    /// is allowed (see [`crate::Edge::blocking_ok`]).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub blocking_ok: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One file's pre-resolution contribution to the graph: the definitions it

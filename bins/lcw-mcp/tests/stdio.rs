@@ -16,7 +16,7 @@ fn fixture() -> (std::path::PathBuf, std::path::PathBuf) {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(
         repo.join("src/lib.rs"),
-        "/// Adds one.\npub fn inc(x: i32) -> i32 {\n    helper(x) + 1\n}\n\nfn helper(x: i32) -> i32 {\n    x\n}\n\npub fn twice(x: i32) -> i32 {\n    inc(inc(x))\n}\n",
+        "/// Adds one.\npub fn inc(x: i32) -> i32 {\n    helper(x) + 1\n}\n\nfn helper(x: i32) -> i32 {\n    x\n}\n\npub fn twice(x: i32) -> i32 {\n    inc(inc(x))\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn checks() {\n        super::helper(1);\n    }\n}\n",
     )
     .unwrap();
     (repo, base.join("cache"))
@@ -49,6 +49,11 @@ fn initialize_list_and_call_tools_over_stdio() {
         call(6, "explain", json!({ "repo": repo_s, "symbol": "helpr" })),
         json!({ "jsonrpc": "2.0", "id": 7, "method": "no/such" }),
         call(8, "flow", json!({ "repo": repo_s, "to": "helper" })),
+        call(
+            9,
+            "impact",
+            json!({ "repo": repo_s, "symbol": "helper", "exclude_tests": true }),
+        ),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -64,7 +69,7 @@ fn initialize_list_and_call_tools_over_stdio() {
         .collect();
     assert!(child.wait().unwrap().success());
     // The notification gets no reply.
-    assert_eq!(replies.len(), 8, "{replies:#?}");
+    assert_eq!(replies.len(), 9, "{replies:#?}");
     let by_id = |id: u64| replies.iter().find(|r| r["id"] == id).unwrap();
     let tool_json = |id: u64| -> (Value, bool) {
         let r = &by_id(id)["result"];
@@ -124,7 +129,13 @@ fn initialize_list_and_call_tools_over_stdio() {
     );
 
     let (impact, _) = tool_json(5);
-    assert_eq!(impact["total_callers"], 2);
+    assert_eq!(
+        impact["total_callers"], 3,
+        "the cfg(test) caller counts: {impact}"
+    );
+    assert_eq!(impact["by_depth"], json!([2, 1]));
+    let (impact, _) = tool_json(9);
+    assert_eq!(impact["total_callers"], 2, "{impact}");
     assert_eq!(impact["by_depth"], json!([1, 1]));
 
     let (missing, err) = tool_json(6);

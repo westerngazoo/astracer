@@ -29,6 +29,7 @@
 pub mod card;
 pub mod entries;
 pub mod file;
+pub mod filter;
 pub mod flow;
 pub mod groups;
 pub mod impact;
@@ -45,6 +46,7 @@ pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind,
 pub use file::{
     file_symbols, focus_target, nearest_at, node_at, node_named, repo_relative, FileSymbol,
 };
+pub use filter::{exclude, Exclusions};
 pub use flow::{
     connection, entry_tiers, flows_from_entries, shortest_path, shortest_paths, Connection,
     EntryFlow, EntryTier, FlowPaths,

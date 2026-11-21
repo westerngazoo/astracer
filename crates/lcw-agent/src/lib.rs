@@ -19,8 +19,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lcw_config::{Config, Language};
-use lcw_core::CodeGraph;
+use lcw_core::{CodeGraph, CrateGraph};
 use lcw_engine::{Engine, GraphSource};
+use lcw_query::exclude;
+pub use lcw_query::Exclusions;
 
 /// Version of the JSON contract; every object this crate emits carries it as
 /// a top-level `"schema"` field. Bump on breaking shape changes.
@@ -51,6 +53,8 @@ pub struct LoadOptions {
     /// Serve a fresh `graph.sqlite` instead of re-analyzing (default on).
     pub use_cache: bool,
     pub paths: PathStyle,
+    /// Drop test / example code from the loaded graph (`--exclude-tests`).
+    pub exclude: Exclusions,
 }
 
 impl Default for LoadOptions {
@@ -61,6 +65,7 @@ impl Default for LoadOptions {
             language: None,
             use_cache: true,
             paths: PathStyle::Absolute,
+            exclude: Exclusions::none(),
         }
     }
 }
@@ -73,6 +78,10 @@ pub struct Repo {
     pub graph: CodeGraph,
     /// Cache hit, or why the repo was re-analyzed.
     pub source: GraphSource,
+    /// The Cargo crate graph (Rust repos with a `Cargo.toml` only).
+    pub crates: Option<CrateGraph>,
+    /// What was dropped from `graph`.
+    pub exclude: Exclusions,
 }
 
 impl Repo {
@@ -123,12 +132,15 @@ pub fn load(path: &Path, opts: &LoadOptions) -> Result<Repo> {
         PathStyle::RepoRelative => PathStyle::RelativeTo(repo_dir(&root)),
         other => other.clone(),
     };
-    let graph = display_paths(report.graph, &style);
+    let graph = exclude(display_paths(report.graph, &style), opts.exclude);
+    let crates = engine.crate_graph(&root);
     Ok(Repo {
         root,
         config,
         graph,
         source,
+        crates,
+        exclude: opts.exclude,
     })
 }
 

@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use lcw_agent::json;
-use lcw_agent::{LoadOptions, PathStyle, Repo};
+use lcw_agent::{Exclusions, LoadOptions, PathStyle, Repo};
 use lcw_config::Language;
-use lcw_core::NodeId;
+use lcw_core::{CodeGraph, NodeId};
 use lcw_query::{CallTreeOptions, Direction, EntryKind, Lookup};
 use serde_json::{json, Value};
 
@@ -26,6 +26,8 @@ const RECHECK_AFTER: Duration = Duration::from_secs(2);
 /// One loaded repository and when its freshness was last verified.
 struct Loaded {
     repo: Repo,
+    /// `repo.graph` without tests / examples, built on first request.
+    filtered: HashMap<Exclusions, CodeGraph>,
     checked: Instant,
 }
 
@@ -125,8 +127,7 @@ impl Server {
             Some(b) => Some(b as usize),
             None => Some(DEFAULT_BUDGET),
         };
-        let repo = self.repo(args)?;
-        let g = &repo.graph;
+        let (repo, g) = self.repo(args)?;
         let root = repo.root.to_string_lossy().into_owned();
         match name {
             "explain" => {
@@ -254,8 +255,9 @@ impl Server {
         }
     }
 
-    /// The loaded repo for `args.repo`, loading (or refreshing) as needed.
-    fn repo(&mut self, args: &Value) -> Result<&Repo, ToolError> {
+    /// The loaded repo for `args.repo`, loading (or refreshing) as needed,
+    /// and its graph with `exclude_tests` / `keep_examples` applied.
+    fn repo(&mut self, args: &Value) -> Result<(&Repo, &CodeGraph), ToolError> {
         let path = req_str(args, "repo")?;
         let language =
             match args.get("language").and_then(Value::as_str) {
@@ -292,17 +294,31 @@ impl Server {
                 language,
                 use_cache: !refresh,
                 paths: PathStyle::Absolute,
+                exclude: Exclusions::none(),
             };
             let repo = lcw_agent::load(&root, &opts)?;
             self.repos.insert(
                 key.clone(),
                 Loaded {
                     repo,
+                    filtered: HashMap::new(),
                     checked: Instant::now(),
                 },
             );
         }
-        Ok(&self.repos[&key].repo)
+        let ex = if opt_bool(args, "exclude_tests").unwrap_or(false) {
+            Exclusions::tests(opt_bool(args, "keep_examples").unwrap_or(false))
+        } else {
+            Exclusions::none()
+        };
+        let loaded = self.repos.get_mut(&key).expect("inserted above");
+        if !ex.is_empty() && !loaded.filtered.contains_key(&ex) {
+            let g = lcw_query::exclude(loaded.repo.graph.clone(), ex);
+            loaded.filtered.insert(ex, g);
+        }
+        let loaded = &self.repos[&key];
+        let graph = loaded.filtered.get(&ex).unwrap_or(&loaded.repo.graph);
+        Ok((&loaded.repo, graph))
     }
 }
 
@@ -383,6 +399,8 @@ fn tool_list() -> Vec<Value> {
         "language": { "type": "string", "enum": ["rust", "typescript", "python", "go", "cpp"], "description": "Source language (default: livewalk.toml, else rust)." },
         "budget": { "type": "integer", "minimum": 0, "description": "Approximate max tokens for the result (default 4000, 0 = unlimited). Cut lists get `<list>_more`." },
         "refresh": { "type": "boolean", "description": "Force a re-analysis instead of using the cached graph." },
+        "exclude_tests": { "type": "boolean", "description": "Leave out test code (#[test], #[cfg(test)], tests/, test_*.py, *_test.go, *.test.ts) and, unless `keep_examples`, examples/ and benches/." },
+        "keep_examples": { "type": "boolean", "description": "With `exclude_tests`, keep examples/ and benches/." },
     });
     let symbol = json!({ "type": "string", "description": "Symbol: a qualified name or a unique part of one (e.g. `Engine::analyze`). Ambiguous or unknown names return candidates." });
     let tool = |name: &str, desc: &str, extra: Value, required: &[&str]| -> Value {

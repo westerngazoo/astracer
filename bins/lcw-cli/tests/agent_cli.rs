@@ -234,6 +234,24 @@ fn impact_callers_and_budget() {
 }
 
 #[test]
+fn exclude_tests_drops_test_callers() {
+    let f = Fixture::new("exclude");
+    std::fs::write(
+        f.repo.join("src/checks.rs"),
+        "#[cfg(test)]\nmod t {\n    #[test]\n    fn hub_works() {\n        crate::hub(1);\n    }\n}\n",
+    )
+    .unwrap();
+    let (v, _) = f.json(&["impact", "hub", "--json"]);
+    assert_eq!(v["total_callers"], 32);
+    let (v, _) = f.json(&["impact", "hub", "--json", "--exclude-tests"]);
+    assert_eq!(v["total_callers"], 31);
+
+    let o = f.lcw(&["analyze", ".", "--exclude-tests", "--top", "40"]);
+    assert!(o.status.success());
+    assert!(!stdout(&o).contains("hub_works"), "{}", stdout(&o));
+}
+
+#[test]
 fn ambiguous_and_unknown_symbols_list_candidates_and_exit_2() {
     let f = Fixture::new("lookup");
     let (v, code) = f.json(&["explain", "new", "--json"]);

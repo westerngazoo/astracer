@@ -181,6 +181,9 @@ struct AnalyzeArgs {
     #[arg(long, value_parser = clap::value_parser!(Language))]
     language: Option<Language>,
 
+    #[command(flatten)]
+    exclude: ExcludeArgs,
+
     /// Which graph the viewer renders: every function boxed by crate, the
     /// free call graph, or the aggregated module view. Only affects `view`.
     #[cfg(feature = "viewer")]
@@ -256,6 +259,30 @@ struct ShotArgs {
 }
 
 /// Where to analyze and how — shared by every navigation command.
+/// Drop non-shipping code before answering.
+#[derive(Debug, Clone, Copy, Default, Args)]
+struct ExcludeArgs {
+    /// Leave out tests: `#[test]` fns, `#[cfg(test)]` modules, `tests/`
+    /// dirs, `test_*.py`, `*_test.go`, `*.test.ts` / `*.spec.ts`. Examples
+    /// and benches are dropped too unless `--keep-examples`.
+    #[arg(long)]
+    exclude_tests: bool,
+
+    /// With `--exclude-tests`, keep `examples/` and `benches/` code.
+    #[arg(long, requires = "exclude_tests")]
+    keep_examples: bool,
+}
+
+impl ExcludeArgs {
+    fn exclusions(self) -> lcw_agent::Exclusions {
+        if self.exclude_tests {
+            lcw_agent::Exclusions::tests(self.keep_examples)
+        } else {
+            lcw_agent::Exclusions::none()
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct RepoArgs {
     /// Repository path.
@@ -285,6 +312,9 @@ struct RepoArgs {
     /// analyzed repository root, whatever the current directory.
     #[arg(long)]
     absolute_paths: bool,
+
+    #[command(flatten)]
+    exclude: ExcludeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -696,6 +726,7 @@ fn load_repo(repo: &RepoArgs, log_override: Option<&str>) -> Result<Repo> {
         } else {
             PathStyle::RepoRelative
         },
+        exclude: repo.exclude.exclusions(),
     };
     let loaded = lcw_agent::load(&repo.path, &opts)?;
     if let GraphSource::Analyzed(reason) = &loaded.source {
@@ -872,7 +903,7 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
     let search_dir = config_search_dir(&path);
     let cfg =
         Config::resolve(args.config.as_deref(), &search_dir).context("resolving configuration")?;
-    let report = analyze_path(
+    let mut report = analyze_path(
         &path,
         args.config.as_deref(),
         false,
@@ -880,6 +911,15 @@ fn run_analyze(args: AnalyzeArgs, log_override: Option<&str>) -> Result<()> {
         args.language,
         log_override,
     )?;
+    let exclusions = args.exclude.exclusions();
+    if !exclusions.is_empty() {
+        let mut lens_cfg = cfg.clone();
+        if let Some(lang) = args.language {
+            lens_cfg.adapter.language = lang;
+        }
+        let graph = lcw_query::exclude(report.graph, exclusions);
+        report = Engine::new(lens_cfg).report_for(graph);
+    }
 
     let rendered = match args.format {
         Format::Summary => export::format_summary(&report, args.top),

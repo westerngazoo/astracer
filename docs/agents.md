@@ -69,6 +69,15 @@ before changing a signature. Read the returned range, not the whole file.
   and the command exits with code 2:
   `{"schema":1,"error":"ambiguous","query":"new","candidates":[{"qualified_name":…,"at":…}]}`.
   Re-run with one of the qualified names.
+- `--exclude-tests` leaves test code out of every answer (callers, impact,
+  search, flow, `analyze` top lists): `#[test]`-style fns, `#[cfg(test)]`
+  modules, `tests/` dirs, `test_*.py`, `*_test.go`, `*.test.ts` /
+  `*.spec.ts`. It drops `examples/` and `benches/` too unless
+  `--keep-examples`. MCP: `"exclude_tests": true` (and `"keep_examples"`).
+- Rust call resolution reads `Cargo.toml`: a call only binds to a function
+  in the caller's own crate or one it depends on (transitively; dev-deps
+  only from tests, benches and examples), so two crates sharing a method name
+  never get a false edge between them.
 - stdout carries only the answer. Notes (for example "re-analyzed because 3
   files changed") go to stderr.
 
@@ -87,7 +96,8 @@ reused).
 `lcw-mcp` speaks MCP over stdio (newline-delimited JSON-RPC: `initialize`,
 `tools/list`, `tools/call`). Every tool takes `repo` (absolute path) plus
 optional `language` (`rust`, `typescript`, `python`, `go`, `cpp`), `budget`
-(default 4000 tokens, `0` = unlimited) and `refresh` (force re-analysis). It
+(default 4000 tokens, `0` = unlimited), `refresh` (force re-analysis) and
+`exclude_tests` / `keep_examples` (drop test / example code). It
 keeps each repo's graph in memory and re-checks source mtimes at most every
 2 seconds, so repeated questions are answered from memory. Paths in results
 are absolute. Set `LCW_MCP_LOG=info` to log tool timings to stderr.

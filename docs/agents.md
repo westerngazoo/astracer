@@ -28,6 +28,7 @@ Binaries: `target/release/lcw` and `target/release/lcw-mcp`.
 | Where does the program start? | `lcw entries` | `entries` |
 | How is the code organized? | `lcw outline --depth 1` | `outline` |
 | What is the symbol actually called? | `lcw search name` | `search_symbol` |
+| How are the crates wired? What rebuilds when one changes? | `lcw crates --json` | `crates` |
 
 A good loop before editing a function: `search` (if unsure of the name), then
 `span` to get `file:start-end`, `explain` for its neighbours, and `impact`
@@ -103,7 +104,15 @@ keeps each repo's graph in memory and re-checks source mtimes at most every
 are absolute. Set `LCW_MCP_LOG=info` to log tool timings to stderr.
 
 Tools: `explain`, `callers`, `callees`, `impact`, `span`, `flow`, `outline`,
-`entries`, `search_symbol`.
+`entries`, `search_symbol`, `crates`.
+
+`crates` (CLI `lcw crates [--json]`) is the Cargo workspace view: per crate
+`lines`, `functions`, `deps`, `dependents`, `rebuild` (crates recompiled when
+it changes), `depth` (longest dependency chain below it), `calls_in` /
+`calls_out` (distinct cross-crate caller→callee pairs), plus `calls` (pairs
+per crate edge), the `critical_path`, and `not_shipped`: crates no
+default-member binary or cdylib builds (`dev_only` = reached only from
+tests, benches, examples or dev-dependencies; `unused` = nothing builds it).
 
 ### Cursor
 

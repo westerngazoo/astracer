@@ -252,6 +252,54 @@ fn exclude_tests_drops_test_callers() {
 }
 
 #[test]
+fn crates_reports_the_workspace_graph() {
+    let f = Fixture::new("crates");
+    let w = &f.repo;
+    let write = |rel: &str, body: &str| {
+        let p = w.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    std::fs::remove_dir_all(w.join("src")).unwrap();
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"app\", \"core\", \"spike\"]\n",
+    );
+    write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\n\n[dependencies]\ncore = { path = \"../core\" }\n",
+    );
+    write("app/src/main.rs", "fn main() {\n    core::load();\n}\n");
+    write("core/Cargo.toml", "[package]\nname = \"core\"\n");
+    write("core/src/lib.rs", "pub fn load() {}\n");
+    write("spike/Cargo.toml", "[package]\nname = \"spike\"\n");
+    write("spike/src/lib.rs", "pub fn try_it() {}\n");
+    write(
+        "spike/examples/demo.rs",
+        "fn main() {\n    spike::try_it();\n}\n",
+    );
+
+    let (v, code) = f.json(&["crates", "--json"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["schema"], 1);
+    assert_eq!(v["critical_path"], serde_json::json!(["app", "core"]));
+    assert_eq!(v["calls"][0]["from"], "app");
+    assert_eq!(v["calls"][0]["to"], "core");
+    let core = v["crates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "core")
+        .unwrap();
+    assert_eq!(core["rebuild"], 1);
+    assert_eq!(core["usage"], "shipped");
+    assert_eq!(
+        v["not_shipped"],
+        serde_json::json!([{ "name": "spike", "usage": "dev_only" }])
+    );
+}
+
+#[test]
 fn ambiguous_and_unknown_symbols_list_candidates_and_exit_2() {
     let f = Fixture::new("lookup");
     let (v, code) = f.json(&["explain", "new", "--json"]);

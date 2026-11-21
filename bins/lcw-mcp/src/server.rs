@@ -251,6 +251,17 @@ impl Server {
                     json::search(g, q, limit.min(l))
                 }))
             }
+            "crates" => {
+                let view = lcw_agent::crates::crate_view_of(repo, g).ok_or_else(|| {
+                    ToolError(json::error(
+                        "no_workspace",
+                        "no Cargo workspace at this repo",
+                    ))
+                })?;
+                Ok(lcw_agent::fit_json(budget, |l| {
+                    lcw_agent::crates::crates_json(&view, l)
+                }))
+            }
             _ => unreachable!("checked against tool_list"),
         }
     }
@@ -331,7 +342,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "lcw-mcp", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Livewalk call-graph navigation. Prefer `span` (exact file:start-end of a definition) and `explain` (callers/callees with call sites) over reading whole files; use `impact` before changing a function, `search_symbol` when unsure of a name. Every tool takes `repo` (absolute path). Results are schema-1 JSON; lists cut by the token budget carry `<list>_more: N`.",
+        "instructions": "Livewalk call-graph navigation. Prefer `span` (exact file:start-end of a definition) and `explain` (callers/callees with call sites) over reading whole files; use `impact` before changing a function, `search_symbol` when unsure of a name, `crates` for the workspace's crate structure. Every tool takes `repo` (absolute path). Results are schema-1 JSON; lists cut by the token budget carry `<list>_more: N`.",
     })
 }
 
@@ -485,6 +496,12 @@ fn tool_list() -> Vec<Value> {
             "Find symbols by name (substring, best first; fuzzy suggestions when nothing matches).",
             json!({ "query": { "type": "string" }, "limit": { "type": "integer", "minimum": 1 } }),
             &["query"],
+        ),
+        tool(
+            "crates",
+            "Rust workspace crate view: per-crate lines/functions, deps, cross-crate call counts, rebuild blast radius (`rebuild` = crates recompiled when it changes), dependency `depth`, the `critical_path`, and crates no shipped binary builds (`not_shipped`, usage `dev_only` = only tests/examples).",
+            json!({}),
+            &[],
         ),
     ]
 }

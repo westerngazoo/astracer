@@ -27,6 +27,7 @@
 //! (Principle II).
 
 pub mod card;
+pub mod crates;
 pub mod entries;
 pub mod file;
 pub mod filter;
@@ -42,6 +43,7 @@ pub mod span;
 pub use card::{
     call_sites, edge_kind_str, flags_of, kind_str, node_card, CallRef, CardMetrics, NodeCard,
 };
+pub use crates::{crate_view, CrateRow, CrateUsage, CrateView};
 pub use entries::{classify_entry, entry_points, mains, primary_entry, EntryKind, EntryPoint};
 pub use file::{
     file_symbols, focus_target, nearest_at, node_at, node_named, repo_relative, FileSymbol,

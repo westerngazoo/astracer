@@ -13,6 +13,7 @@
 //!
 //! Like every front end this crate renders; all traversal is `lcw-query`'s.
 
+pub mod crates;
 pub mod json;
 
 use std::path::{Path, PathBuf};

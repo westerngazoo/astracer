@@ -52,7 +52,7 @@ pub fn sites(graph: &CodeGraph, spans: &[SourceSpan]) -> Option<Value> {
 }
 
 /// `{"schema": 1, ...fields}`.
-fn with_schema(fields: Value) -> Value {
+pub(crate) fn with_schema(fields: Value) -> Value {
     let mut obj = Map::new();
     obj.insert("schema".into(), json!(SCHEMA));
     if let Value::Object(m) = fields {
@@ -62,7 +62,7 @@ fn with_schema(fields: Value) -> Value {
 }
 
 /// Insert `items` (capped at `limit`) under `key`, plus `key_more` when cut.
-fn put_list(obj: &mut Map<String, Value>, key: &str, items: Vec<Value>, limit: usize) {
+pub(crate) fn put_list(obj: &mut Map<String, Value>, key: &str, items: Vec<Value>, limit: usize) {
     let total = items.len();
     let kept: Vec<Value> = items.into_iter().take(limit).collect();
     let more = total - kept.len();

@@ -101,6 +101,9 @@ enum Command {
     /// List entry points: `main`/`_start`, foreign-ABI exports, uncalled
     /// public API, private roots, tests.
     Entries(EntriesArgs),
+    /// The Cargo workspace's crates: size, dependency graph, cross-crate
+    /// calls, rebuild blast radius, critical path, crates nothing ships.
+    Crates(CratesArgs),
     /// Print the call tree below (or above) a symbol: what it triggers.
     Calls(CallsArgs),
     /// Direct callers of a symbol with the call-site `file:line` of each call
@@ -556,6 +559,23 @@ struct EntriesArgs {
 }
 
 #[derive(Debug, Args)]
+struct CratesArgs {
+    /// Repository path (same as `--path`).
+    dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Max crates / cross-crate call pairs to print.
+    #[arg(long, default_value_t = 40)]
+    limit: usize,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct CallsArgs {
     /// Root symbol (substring of a qualified name); `main` is a good start.
     symbol: String,
@@ -652,6 +672,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Flow(args) => run_flow(args, log, out),
         Command::Outline(args) => run_outline(args, log, out),
         Command::Entries(args) => run_entries(args, log, out),
+        Command::Crates(args) => run_crates(args, log, out),
         Command::Calls(args) => run_calls(args, log, out),
         Command::Callers(args) => run_callers(args, log, out),
         Command::Impact(args) => run_impact(args, log, out),
@@ -1422,6 +1443,30 @@ fn run_entries(args: EntriesArgs, log_override: Option<&str>, out: Out) -> Resul
                     s.push_str(&format!("\n... +{more} more\n"));
                 }
                 s
+            })
+        );
+    }
+    Ok(())
+}
+
+fn run_crates(mut args: CratesArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    if let Some(dir) = args.dir.take() {
+        args.repo.path = dir;
+    }
+    let repo = load_repo(&args.repo, log_override)?;
+    let Some(view) = lcw_agent::crates::crate_view(&repo) else {
+        anyhow::bail!("no Cargo workspace at {}", repo.root.display());
+    };
+    if args.json {
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            lcw_agent::crates::crates_json(&view, args.limit.min(l))
+        });
+        out.print_json(&v)?;
+    } else {
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.limit, |l| {
+                lcw_agent::crates::crates_text(&view, l)
             })
         );
     }

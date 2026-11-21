@@ -214,6 +214,11 @@ pub struct Edge {
     /// not stall an async executor.
     #[serde(default, skip_serializing_if = "is_false")]
     pub blocking_ok: bool,
+    /// Every merged call site is `.await`ed directly (`f(x).await`): the
+    /// callee is async, whatever its name suggests (`tokio::fs::File::create`
+    /// imported as `File`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaited: bool,
 }
 
 impl Edge {
@@ -225,6 +230,7 @@ impl Edge {
             extra_sites: Vec::new(),
             loop_site: None,
             blocking_ok: false,
+            awaited: false,
         }
     }
 
@@ -235,6 +241,12 @@ impl Edge {
             self.loop_site = Some(self.call_site);
         }
         self.blocking_ok = blocking_ok;
+        self
+    }
+
+    /// This edge with its call `.await`ed directly.
+    pub fn with_awaited(mut self, awaited: bool) -> Self {
+        self.awaited = awaited;
         self
     }
 
@@ -437,6 +449,7 @@ impl CodeGraph {
                 w.extra_sites.extend(edge.extra_sites);
                 w.loop_site = w.loop_site.or(edge.loop_site);
                 w.blocking_ok &= edge.blocking_ok;
+                w.awaited &= edge.awaited;
                 return;
             }
         }
@@ -568,6 +581,7 @@ impl CodeGraph {
                         extra_sites: e.extra_sites,
                         loop_site: e.loop_site,
                         blocking_ok: e.blocking_ok,
+                        awaited: e.awaited,
                     },
                 );
                 g.edge_index.insert(key, eidx);
@@ -609,6 +623,8 @@ pub struct EdgeExport {
     pub loop_site: Option<SourceSpan>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub blocking_ok: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaited: bool,
 }
 
 impl EdgeExport {
@@ -622,6 +638,7 @@ impl EdgeExport {
             extra_sites: e.extra_sites.clone(),
             loop_site: e.loop_site,
             blocking_ok: e.blocking_ok,
+            awaited: e.awaited,
         }
     }
 }

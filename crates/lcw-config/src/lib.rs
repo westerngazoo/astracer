@@ -221,6 +221,23 @@ pub struct LensesConfig {
     /// baseline diagnostic output is unchanged; the engine enables all of them
     /// when this is `true`.
     pub extended: bool,
+    /// `async fn`s that reach synchronous I/O (file system, blocking network,
+    /// embedded-database transactions, password hashing, `thread::sleep`)
+    /// without `spawn_blocking` / `block_in_place`.
+    pub async_blocking: bool,
+    /// Calls inside loops / per-element closures: N+1 I/O and per-iteration
+    /// clones of large values.
+    pub loops: bool,
+    /// Call cycles (strongly connected components), one diagnostic each.
+    pub cycles: bool,
+    /// Extra blocking-call patterns for `async_blocking` and `loops`, added
+    /// to the built-in list: `path::*` (prefix), or a name matched as a
+    /// whole path or its trailing segments (`Store::load`, `begin_write`).
+    pub blocking_calls: Vec<String>,
+    /// Built-in blocking patterns to ignore (exact pattern text).
+    pub blocking_allow: Vec<String>,
+    /// How many sync calls deep `async_blocking` follows from an `async fn`.
+    pub blocking_depth: u32,
 }
 
 impl Default for LensesConfig {
@@ -233,6 +250,12 @@ impl Default for LensesConfig {
             paradigm: true,
             architecture: vec!["clean".to_string()],
             extended: false,
+            async_blocking: true,
+            loops: true,
+            cycles: true,
+            blocking_calls: Vec::new(),
+            blocking_allow: Vec::new(),
+            blocking_depth: 4,
         }
     }
 }

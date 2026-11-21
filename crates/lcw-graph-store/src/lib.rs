@@ -15,7 +15,7 @@ pub const DB_FILENAME: &str = "graph.sqlite";
 
 /// Bump when table layout or serialization changes. Stores of another
 /// version are refused on read (the engine re-analyzes) and rebuilt on write.
-pub const STORE_VERSION: u32 = 3;
+pub const STORE_VERSION: u32 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -126,8 +126,8 @@ pub fn write_with_meta(
             "INSERT INTO edges (
                 from_id, to_id, kind,
                 file_id, start_line, start_col, end_line, end_col,
-                count, extra_sites_json, loop_site_json, blocking_ok
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                count, extra_sites_json, loop_site_json, blocking_ok, awaited
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 e.from.0 as i64,
                 e.to.0 as i64,
@@ -141,6 +141,7 @@ pub fn write_with_meta(
                 extra_sites,
                 loop_site,
                 e.blocking_ok as i64,
+                e.awaited as i64,
             ],
         )?;
     }
@@ -242,6 +243,7 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
             extra_sites_json TEXT,
             loop_site_json TEXT,
             blocking_ok INTEGER NOT NULL DEFAULT 0,
+            awaited INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (from_id, to_id, kind)
         );
         ",
@@ -330,7 +332,7 @@ fn load_nodes(conn: &Connection) -> Result<Vec<Node>, StoreError> {
 fn load_edges(conn: &Connection) -> Result<Vec<EdgeExport>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT from_id, to_id, kind, file_id, start_line, start_col, end_line, end_col, count,
-                extra_sites_json, loop_site_json, blocking_ok
+                extra_sites_json, loop_site_json, blocking_ok, awaited
          FROM edges",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -352,6 +354,7 @@ fn load_edges(conn: &Connection) -> Result<Vec<EdgeExport>, StoreError> {
             extra_sites: Vec::new(),
             loop_site: None,
             blocking_ok: r.get::<_, i64>(11)? != 0,
+            awaited: r.get::<_, i64>(12)? != 0,
         };
         Ok((edge, extra_sites, loop_site))
     })?;
@@ -474,13 +477,15 @@ mod tests {
             a,
             b,
             lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 2, 4, 2, 5))
-                .with_context(false, true),
+                .with_context(false, true)
+                .with_awaited(true),
         );
         g.add_edge(
             a,
             b,
             lcw_core::Edge::new(EdgeKind::DirectCall, SourceSpan::new(f, 3, 4, 3, 5))
-                .with_context(true, true),
+                .with_context(true, true)
+                .with_awaited(true),
         );
 
         let snap = g.snapshot();
@@ -497,6 +502,7 @@ mod tests {
         assert_eq!(lines, vec![2, 3]);
         assert_eq!(e.loop_site.map(|s| s.start_line), Some(3));
         assert!(e.blocking_ok);
+        assert!(e.awaited);
         let sum = summary(&path).unwrap();
         assert_eq!(sum.nodes, 2);
         assert_eq!(sum.edges, 1);

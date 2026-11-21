@@ -1131,6 +1131,22 @@ mod tests {
     }
 
     #[test]
+    fn directly_awaited_calls_are_marked() {
+        let g = parse(
+            r#"
+            async fn fetch() {}
+            fn sync_part() -> u32 { 1 }
+            async fn handler() {
+                fetch().await;
+                sync_part();
+            }
+            "#,
+        );
+        assert!(edge_to(&g, "crate::handler", "crate::fetch").awaited);
+        assert!(!edge_to(&g, "crate::handler", "crate::sync_part").awaited);
+    }
+
+    #[test]
     fn calls_inside_block_in_place_are_marked_blocking_ok() {
         let g = parse(
             r#"

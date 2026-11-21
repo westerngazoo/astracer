@@ -190,6 +190,50 @@ mod tests {
     }
 
     #[test]
+    fn cycle_and_vertical_advice_point_at_concrete_findings() {
+        let mut report = AnalysisReport::new(backend_graph());
+        report
+            .metrics
+            .push(Metric::project(MetricKind::Cyclicity, 0.1));
+        report.diagnostics.push(
+            Diagnostic::new("cycles", "cycle", Severity::Low, "recursive function: f")
+                .at(NodeId(0))
+                .with_evidence("size", 1),
+        );
+        report.diagnostics.push(
+            Diagnostic::new("cycles", "cycle", Severity::High, "call cycle of 6: a, b")
+                .at(NodeId(1))
+                .with_evidence("size", 6),
+        );
+        report.diagnostics.push(
+            Diagnostic::new(
+                "async_blocking",
+                "async_blocking",
+                Severity::Medium,
+                "async `h` blocks",
+            )
+            .at(NodeId(2)),
+        );
+
+        advise(&Config::default(), &mut report);
+
+        let cycle = report
+            .suggestions
+            .iter()
+            .find(|s| s.codes.contains(&"cycle".to_string()))
+            .unwrap();
+        assert_eq!(cycle.node, Some(NodeId(1)));
+        assert!(cycle.title.contains("call cycle of 6"), "{}", cycle.title);
+        let vertical = report
+            .suggestions
+            .iter()
+            .find(|s| s.title.contains("bulkheads"))
+            .unwrap();
+        assert_eq!(vertical.node, Some(NodeId(2)));
+        assert!(vertical.rationale.contains("Start here: async `h` blocks"));
+    }
+
+    #[test]
     fn config_weights_scale_priority() {
         let mut report = AnalysisReport::new(backend_graph());
         report.diagnostics.push(
@@ -213,7 +257,7 @@ mod tests {
     fn default_advisor_set_is_unchanged() {
         // Locks the invariant that the extended (opt-in) advisors never enter
         // the default pass, so baseline suggestion output stays stable.
-        assert_eq!(advisors::all_advisors().len(), 7);
+        assert_eq!(advisors::all_advisors().len(), 9);
     }
 
     #[test]

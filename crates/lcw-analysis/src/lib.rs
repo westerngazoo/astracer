@@ -18,6 +18,7 @@
 pub mod ext;
 pub mod lenses;
 pub mod metrics;
+pub mod perf;
 
 use lcw_config::Config;
 use lcw_core::{AnalysisReport, CodeGraph, Diagnostic};
@@ -53,6 +54,15 @@ pub fn enabled_lenses(config: &Config) -> Vec<Box<dyn Lens>> {
     }
     if config.lenses.paradigm {
         lenses.push(Box::new(lenses::ParadigmLens));
+    }
+    if config.lenses.async_blocking {
+        lenses.push(Box::new(perf::AsyncBlockingLens));
+    }
+    if config.lenses.loops {
+        lenses.push(Box::new(perf::LoopLens));
+    }
+    if config.lenses.cycles {
+        lenses.push(Box::new(perf::CyclesLens));
     }
     lenses
 }
@@ -192,7 +202,7 @@ mod tests {
     fn default_pipeline_lens_set_is_unchanged() {
         // Locks the invariant that the extended (opt-in) lenses never sneak
         // into the default pass, so baseline output / golden snapshots hold.
-        assert_eq!(enabled_lenses(&Config::default()).len(), 5);
+        assert_eq!(enabled_lenses(&Config::default()).len(), 8);
     }
 
     #[test]

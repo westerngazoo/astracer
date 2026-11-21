@@ -183,7 +183,22 @@ pub fn format_summary(report: &AnalysisReport, top: usize) -> String {
         let mut diags: Vec<_> = report.diagnostics.iter().collect();
         diags.sort_by_key(|d| Reverse(d.severity));
         for d in diags.iter().take(top) {
-            out.push_str(&format!("  [{}] {} ({})\n", d.severity, d.message, d.code));
+            let site = d
+                .site
+                .or_else(|| {
+                    d.node
+                        .and_then(|n| report.graph.try_node(n))
+                        .map(|n| n.span)
+                })
+                .and_then(|s| {
+                    let file = report.graph.file_path(lcw_core::FileId(s.file))?;
+                    Some(format!(" @ {}:{}", file.display(), s.start_line))
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  [{}] {} ({}){site}\n",
+                d.severity, d.message, d.code
+            ));
         }
     }
 

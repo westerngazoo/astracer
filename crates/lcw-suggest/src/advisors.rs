@@ -106,7 +106,7 @@ impl Advisor for ComplexityAdvisor {
     }
 }
 
-/// Break dependency cycles.
+/// Break dependency cycles, starting with the worst one the cycles lens found.
 pub struct CyclesAdvisor;
 impl Advisor for CyclesAdvisor {
     fn name(&self) -> &'static str {
@@ -118,15 +118,117 @@ impl Advisor for CyclesAdvisor {
             return Vec::new();
         }
         let pct = (cyclicity * 100.0).round();
-        vec![Suggestion::new(
-            format!("Break dependency cycles ({pct:.0}% of functions are entangled)"),
-            "Cyclic call structures block modular reasoning and incremental compilation; \
-             introduce trait boundaries / dependency inversion to cut the cycles. Use Diagnostics \
-             (cycles lens) to find participating nodes.",
-        )
-        .with_targets([Target::Maintainability, Target::Scalability])
-        .with_codes(["cycle"])
-        .with_priority(cap(60 + pct as usize, 90))]
+        let worst = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "cycle" && d.node.is_some())
+            .max_by_key(|d| (d.severity, d.evidence("scopes"), d.evidence("size")));
+        const WHY: &str = "Cyclic call structures block modular reasoning and incremental \
+                           compilation; introduce trait boundaries / dependency inversion to cut \
+                           the cycles.";
+        let Some(worst) = worst else {
+            return vec![Suggestion::new(
+                format!("Break dependency cycles ({pct:.0}% of functions are entangled)"),
+                format!("{WHY} Enable the cycles lens to list the participating functions."),
+            )
+            .with_targets([Target::Maintainability, Target::Scalability])
+            .with_codes(["cycle"])
+            .with_priority(cap(60 + pct as usize, 90))];
+        };
+        let cycles = count(report, "cycle");
+        let plain_recursion = worst.severity <= lcw_core::Severity::Low;
+        let (title, priority) = if plain_recursion {
+            (
+                format!(
+                    "Only plain recursion found ({cycles} recursive group(s)); worst: {}",
+                    worst.message
+                ),
+                cap(30 + cycles, 45),
+            )
+        } else {
+            (
+                format!(
+                    "Break dependency cycles ({pct:.0}% entangled); worst: {}",
+                    worst.message
+                ),
+                cap(60 + pct as usize, 90),
+            )
+        };
+        vec![Suggestion::new(title, WHY)
+            .at(worst.node.unwrap_or(NodeId(0)))
+            .with_targets([Target::Maintainability, Target::Scalability])
+            .with_codes(["cycle"])
+            .with_priority(priority)]
+    }
+}
+
+/// Move blocking work off the async executor.
+pub struct AsyncBlockingAdvisor;
+impl Advisor for AsyncBlockingAdvisor {
+    fn name(&self) -> &'static str {
+        "async_blocking"
+    }
+    fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
+        let code = "async_blocking";
+        let n = count(report, code);
+        if n == 0 {
+            return Vec::new();
+        }
+        const FIX: &str = "Synchronous I/O on an async executor thread stalls every task \
+                           scheduled on it: wrap the blocking section in \
+                           `tokio::task::spawn_blocking` (or `block_in_place`), or switch to an \
+                           async API.";
+        let targets = [Target::Latency, Target::Scalability];
+        let priority = cap(70 + n, 95);
+        let mut out = per_node_suggestions(report, code, FIX, &targets, priority);
+        if let Some(more) = overflow_summary(
+            n,
+            code,
+            "async fn(s) blocking the executor",
+            FIX,
+            &targets,
+            priority,
+        ) {
+            out.push(more);
+        }
+        out
+    }
+}
+
+/// Hoist I/O and heavy clones out of loops.
+pub struct LoopAdvisor;
+impl Advisor for LoopAdvisor {
+    fn name(&self) -> &'static str {
+        "loops"
+    }
+    fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
+        let mut out = Vec::new();
+        for (code, label, fix, base) in [
+            (
+                "n_plus_one",
+                "per-iteration I/O call(s)",
+                "One I/O round trip per element (N+1): fetch the batch in one call \
+                 (a range scan or multi-get) before the loop.",
+                65,
+            ),
+            (
+                "clone_in_loop",
+                "per-iteration clone(s)",
+                "Cloning a collection or large value every iteration multiplies \
+                 allocations: borrow it, clone once before the loop, or share an `Arc`.",
+                50,
+            ),
+        ] {
+            let n = count(report, code);
+            if n == 0 {
+                continue;
+            }
+            let targets = [Target::Performance, Target::Latency];
+            let priority = cap(base + n * 2, 88);
+            out.extend(per_node_suggestions(report, code, fix, &targets, priority));
+            out.extend(overflow_summary(n, code, label, fix, &targets, priority));
+        }
+        out
     }
 }
 
@@ -258,6 +360,13 @@ impl Advisor for VerticalAdvisor {
         "vertical"
     }
     fn advise(&self, report: &AnalysisReport, _config: &lcw_config::Config) -> Vec<Suggestion> {
+        let anchors: &[&str] = match report.vertical {
+            Vertical::Embedded => &["heap_pressure", "unsafe_usage"],
+            Vertical::GameEngine => &["clone_in_loop", "heap_pressure", "n_plus_one"],
+            Vertical::Backend => &["async_blocking", "n_plus_one", "impure_hotspot"],
+            Vertical::FullStack => &["high_complexity", "heap_pressure"],
+            Vertical::Unknown => &[],
+        };
         let suggestion = match report.vertical {
             Vertical::Embedded => Suggestion::new(
                 "Hold to no_std / stack discipline for embedded targets",
@@ -289,6 +398,21 @@ impl Advisor for VerticalAdvisor {
             .with_priority(60),
             Vertical::Unknown => return Vec::new(),
         };
+        let anchor = anchors.iter().find_map(|code| {
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == *code && d.node.is_some())
+                .max_by_key(|d| d.severity)
+        });
+        let suggestion = match anchor {
+            Some(d) => Suggestion {
+                rationale: format!("{} Start here: {}", suggestion.rationale, d.message),
+                ..suggestion
+            }
+            .at(d.node.unwrap_or(NodeId(0))),
+            None => suggestion,
+        };
         vec![suggestion]
     }
 }
@@ -302,6 +426,8 @@ pub fn all_advisors() -> Vec<Box<dyn Advisor>> {
         Box::new(AllocationAdvisor),
         Box::new(LayeringAdvisor),
         Box::new(PurityAdvisor),
+        Box::new(AsyncBlockingAdvisor),
+        Box::new(LoopAdvisor),
         Box::new(VerticalAdvisor),
     ]
 }

@@ -204,7 +204,9 @@ pub fn resolve_fragments_with(fragments: &[FileFragment], ctx: &ResolveContext) 
                 callee.kind.edge_kind()
             };
             let call_site = with_file(rc.call_site, file);
-            let edge = Edge::new(edge_kind, call_site).with_context(rc.in_loop, rc.blocking_ok);
+            let edge = Edge::new(edge_kind, call_site)
+                .with_context(rc.in_loop, rc.blocking_ok)
+                .with_awaited(rc.awaited);
             graph.add_edge(caller, target, edge);
         }
     }
@@ -681,6 +683,9 @@ fn scan_call(scan: &mut Scan, node: TsNode, text: &str, caller: &str, env: &Env)
         call_site: span_of(node, FileId(0)),
         in_loop: scan.in_loop(),
         blocking_ok: scan.blocking_ok(),
+        awaited: node
+            .parent()
+            .is_some_and(|p| p.kind() == "await_expression"),
     });
     if is_macro {
         scan_macro_args(scan, node, text, caller, env.types);
@@ -918,6 +923,7 @@ fn scan_token_tree(scan: &mut Scan, tt: TsNode, text: &str, caller: &str, types:
                 call_site: span_between(tok, end, FileId(0)),
                 in_loop: scan.in_loop(),
                 blocking_ok: scan.blocking_ok(),
+                awaited: false,
             });
         }
         i = j + 1;
@@ -1062,6 +1068,7 @@ fn spawn_closure(scan: &mut Scan, closure: TsNode, text: &str, caller: &str, out
         call_site: span_of(closure, FileId(0)),
         in_loop: false,
         blocking_ok: false,
+        awaited: false,
     });
 
     // Captured variables are still values inside the closure.
@@ -1102,6 +1109,7 @@ fn spawn_reference(scan: &mut Scan, arg: TsNode, text: &str, caller: &str) {
         call_site: span_of(arg, FileId(0)),
         in_loop: false,
         blocking_ok: false,
+        awaited: false,
     });
 }
 

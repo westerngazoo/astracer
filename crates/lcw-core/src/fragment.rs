@@ -81,6 +81,9 @@ pub struct RawCall {
     /// is allowed (see [`crate::Edge::blocking_ok`]).
     #[serde(default, skip_serializing_if = "is_false")]
     pub blocking_ok: bool,
+    /// The call's result is `.await`ed right away (see [`crate::Edge::awaited`]).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaited: bool,
 }
 
 fn is_false(b: &bool) -> bool {

@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 /// 4: calls record loop / `block_in_place` context, definitions record
 /// `#[cfg(test)]` modules and trait impls; a version-3 fragment would hide
 /// loops and test code until the file changed.
-pub(crate) const CACHE_VERSION: u32 = 4;
+///
+/// 5: calls record whether they are `.await`ed directly.
+pub(crate) const CACHE_VERSION: u32 = 5;
 
 /// File name of the cache document inside the cache directory.
 const CACHE_FILE: &str = "fragments.json";

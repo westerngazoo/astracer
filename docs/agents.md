@@ -29,6 +29,7 @@ Binaries: `target/release/lcw` and `target/release/lcw-mcp`.
 | How is the code organized? | `lcw outline --depth 1` | `outline` |
 | What is the symbol actually called? | `lcw search name` | `search_symbol` |
 | How are the crates wired? What rebuilds when one changes? | `lcw crates --json` | `crates` |
+| What should I improve first? | `lcw advise --exclude-tests --json` | `advise` |
 
 A good loop before editing a function: `search` (if unsure of the name), then
 `span` to get `file:start-end`, `explain` for its neighbours, and `impact`
@@ -104,7 +105,7 @@ keeps each repo's graph in memory and re-checks source mtimes at most every
 are absolute. Set `LCW_MCP_LOG=info` to log tool timings to stderr.
 
 Tools: `explain`, `callers`, `callees`, `impact`, `span`, `flow`, `outline`,
-`entries`, `search_symbol`, `crates`.
+`entries`, `search_symbol`, `crates`, `advise`.
 
 `crates` (CLI `lcw crates [--json]`) is the Cargo workspace view: per crate
 `lines`, `functions`, `deps`, `dependents`, `rebuild` (crates recompiled when
@@ -113,6 +114,17 @@ it changes), `depth` (longest dependency chain below it), `calls_in` /
 per crate edge), the `critical_path`, and `not_shipped`: crates no
 default-member binary or cdylib builds (`dev_only` = reached only from
 tests, benches, examples or dev-dependencies; `unused` = nothing builds it).
+
+`advise` (CLI `lcw advise [path] [--dimension perf|composability|incrementality|scalability|all] [--exclude-tests] [--limit N] [--json]`)
+returns ranked findings: `{"schema":1,"counts":{"P0":2,"P1":13,"P2":5},"findings":[…]}`,
+each finding `{priority, dimension, kind, title, at, symbol?, evidence:{…}, sites?:[…], why, fix}`.
+`kind` is one of `async_blocking` (P0, one per crate, the other handlers in
+`sites`), `n_plus_one`, `hot_io_path`, `god_type`, `crate_blast_radius`,
+`cycle` (only cross-scope cycles; plain recursion is left out),
+`clone_in_loop`, `big_file`, `crate_not_shipped`, `no_http_timeout`,
+`server_limits`, `unbounded_channel`. Pass `exclude_tests: true` so test
+helpers do not dominate the hot paths. The budget cuts `findings` (with
+`findings_more`).
 
 ### Cursor
 

@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+lcw-analysis = { path = "../lcw-analysis" }
 lcw-core = { path = "../lcw-core" }
 lcw-config = { path = "../lcw-config" }
 lcw-engine = { path = "../lcw-engine" }

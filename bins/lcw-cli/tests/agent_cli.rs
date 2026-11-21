@@ -300,6 +300,37 @@ fn crates_reports_the_workspace_graph() {
 }
 
 #[test]
+fn advise_ranks_located_findings() {
+    let f = Fixture::new("advise");
+    std::fs::write(
+        f.repo.join("src/io.rs"),
+        "pub async fn handler() -> String {\n    std::fs::read_to_string(\"x\").unwrap()\n}\n\npub fn load_all(ids: Vec<u32>) {\n    for id in ids {\n        std::fs::read(id.to_string()).unwrap();\n    }\n}\n",
+    )
+    .unwrap();
+    let (v, code) = f.json(&["advise", "--json"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["schema"], 1);
+    let findings = v["findings"].as_array().unwrap();
+    let first = &findings[0];
+    assert_eq!(first["priority"], "P0", "{v}");
+    assert_eq!(first["kind"], "async_blocking");
+    assert_eq!(first["at"], "src/io.rs:2");
+    let n1 = findings.iter().find(|x| x["kind"] == "n_plus_one").unwrap();
+    assert_eq!(n1["priority"], "P1");
+    assert_eq!(n1["at"], "src/io.rs:7");
+
+    let (v, _) = f.json(&["advise", "--json", "--dimension", "scalability"]);
+    assert!(v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|x| x["dimension"] == "scalability"));
+
+    let o = f.lcw(&["advise"]);
+    assert!(stdout(&o).contains("P0 perf"), "{}", stdout(&o));
+}
+
+#[test]
 fn ambiguous_and_unknown_symbols_list_candidates_and_exit_2() {
     let f = Fixture::new("lookup");
     let (v, code) = f.json(&["explain", "new", "--json"]);

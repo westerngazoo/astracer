@@ -102,6 +102,7 @@ fn initialize_list_and_call_tools_over_stdio() {
         "entries",
         "search_symbol",
         "crates",
+        "advise",
     ] {
         assert!(tools.contains(&want), "missing tool {want}");
     }

@@ -262,6 +262,23 @@ impl Server {
                     lcw_agent::crates::crates_json(&view, l)
                 }))
             }
+            "advise" => {
+                let dim = match args.get("dimension").and_then(Value::as_str) {
+                    None => None,
+                    Some(d) => lcw_agent::advise::Dimension::parse(d).ok_or_else(|| {
+                        ToolError(json::error(
+                            "bad_argument",
+                            "dimension must be one of perf, composability, incrementality, scalability, all",
+                        ))
+                    })?,
+                };
+                let limit = opt_u64(args, "limit").map_or(25, |n| n as usize);
+                let findings = lcw_agent::advise::advise_repo(repo, g, dim);
+                let excluded = opt_bool(args, "exclude_tests").unwrap_or(false);
+                Ok(lcw_agent::fit_json(budget, |l| {
+                    lcw_agent::advise::advise_json(&findings, excluded, limit.min(l))
+                }))
+            }
             _ => unreachable!("checked against tool_list"),
         }
     }
@@ -342,7 +359,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "lcw-mcp", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Livewalk call-graph navigation. Prefer `span` (exact file:start-end of a definition) and `explain` (callers/callees with call sites) over reading whole files; use `impact` before changing a function, `search_symbol` when unsure of a name, `crates` for the workspace's crate structure. Every tool takes `repo` (absolute path). Results are schema-1 JSON; lists cut by the token budget carry `<list>_more: N`.",
+        "instructions": "Livewalk call-graph navigation. Prefer `span` (exact file:start-end of a definition) and `explain` (callers/callees with call sites) over reading whole files; use `impact` before changing a function, `search_symbol` when unsure of a name, `crates` for the workspace's crate structure, `advise` (with `exclude_tests: true`) for ranked improvement findings. Every tool takes `repo` (absolute path). Results are schema-1 JSON; lists cut by the token budget carry `<list>_more: N`.",
     })
 }
 
@@ -501,6 +518,15 @@ fn tool_list() -> Vec<Value> {
             "crates",
             "Rust workspace crate view: per-crate lines/functions, deps, cross-crate call counts, rebuild blast radius (`rebuild` = crates recompiled when it changes), dependency `depth`, the `critical_path`, and crates no shipped binary builds (`not_shipped`, usage `dev_only` = only tests/examples).",
             json!({}),
+            &[],
+        ),
+        tool(
+            "advise",
+            "Ranked improvement findings (P0 first), each with dimension, `at` file:line, evidence numbers, why and fix: async fns blocking on sync I/O (aggregated per crate), N+1 I/O in loops, I/O hot paths, god types, oversized files, crate rebuild blast radius, crates no binary ships, cross-module cycles, missing timeouts / limits. Use with `exclude_tests: true`.",
+            json!({
+                "dimension": { "type": "string", "enum": ["perf", "composability", "incrementality", "scalability", "all"] },
+                "limit": { "type": "integer", "minimum": 1, "description": "Max findings (default 25)." },
+            }),
             &[],
         ),
     ]

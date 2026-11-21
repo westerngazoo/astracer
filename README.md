@@ -145,6 +145,36 @@ lcw flow "parse_incremental" --from main
 lcw flow "parse_incremental" --from main --snippets   # JSON with each hop's source
 ```
 
+### Improving a codebase
+
+```bash
+lcw advise --path ../myrepo --exclude-tests
+lcw advise --path ../myrepo --exclude-tests --dimension perf --json
+lcw crates --path ../myrepo
+```
+
+`lcw advise` ranks findings P0 / P1 / P2, each with a dimension (`perf`,
+`composability`, `incrementality`, `scalability`), a `file:line`, evidence
+numbers, why it matters and a suggested fix. It covers `async fn`s that block
+the executor on sync I/O (redb / rusqlite / sled transactions, `std::fs`,
+blocking HTTP, password hashing; `spawn_blocking` / `block_in_place` and
+`.await`ed calls are exempt), N+1 I/O in loops and iterator closures,
+per-iteration clones of collections, I/O hot paths with many callers, god
+types, oversized files, crate rebuild blast radius, crates no shipped binary
+builds, cross-module call cycles, and missing timeouts / limits.
+`--exclude-tests` (on every query command) leaves test, bench and example
+code out. `lcw crates` shows the Cargo workspace: per-crate size,
+dependencies, cross-crate calls, rebuild blast radius and critical path.
+The underlying diagnostics (`async_blocking`, `n_plus_one`, `clone_in_loop`,
+`cycle`) also show up in `lcw analyze`; extra blocking calls can be declared
+in `livewalk.toml`:
+
+```toml
+[lenses]
+blocking_calls = ["Store::load_blob", "my_db::*"]
+blocking_depth = 4
+```
+
 Navigation commands load the cached `graph.sqlite` when it is newer than every
 source file (otherwise they re-analyze and refresh it); `--no-cache` skips the
 cached graph and re-runs the analysis.
@@ -180,7 +210,8 @@ type's method; common std method names (`map`, `get`, `expect`, `iter`...) on
 an unknown receiver are not linked to repo methods, and calls inside macro
 arguments (`assert_eq!`, `format!`, `vec!`...) are recognized. Other method
 calls with an unknown receiver may still resolve to a same-named method in
-another crate or stay external. `--semantic` resolves them precisely (needs a
+another crate or stay external (only crates the caller depends on, per
+`Cargo.toml`, are candidates). `--semantic` resolves them precisely (needs a
 `--features semantic` build). See
 [`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) for the
 precision rules and the roadmap.

@@ -104,6 +104,11 @@ enum Command {
     /// The Cargo workspace's crates: size, dependency graph, cross-crate
     /// calls, rebuild blast radius, critical path, crates nothing ships.
     Crates(CratesArgs),
+    /// Ranked improvement findings (P0/P1/P2) with file:line and evidence:
+    /// async code blocking on I/O, N+1 loops, I/O hot paths, god types,
+    /// oversized files, crate rebuild blast radius, unshipped crates,
+    /// cycles, missing timeouts / limits.
+    Advise(AdviseArgs),
     /// Print the call tree below (or above) a symbol: what it triggers.
     Calls(CallsArgs),
     /// Direct callers of a symbol with the call-site `file:line` of each call
@@ -576,6 +581,49 @@ struct CratesArgs {
 }
 
 #[derive(Debug, Args)]
+struct AdviseArgs {
+    /// Repository path (same as `--path`).
+    dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    repo: RepoArgs,
+
+    /// Only findings for one dimension.
+    #[arg(long, value_enum, default_value_t = DimensionArg::All)]
+    dimension: DimensionArg,
+
+    /// Max findings to print.
+    #[arg(long, default_value_t = 25)]
+    limit: usize,
+
+    /// Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DimensionArg {
+    Perf,
+    Composability,
+    Incrementality,
+    Scalability,
+    All,
+}
+
+impl DimensionArg {
+    fn dimension(self) -> Option<lcw_agent::advise::Dimension> {
+        use lcw_agent::advise::Dimension;
+        match self {
+            DimensionArg::Perf => Some(Dimension::Perf),
+            DimensionArg::Composability => Some(Dimension::Composability),
+            DimensionArg::Incrementality => Some(Dimension::Incrementality),
+            DimensionArg::Scalability => Some(Dimension::Scalability),
+            DimensionArg::All => None,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 struct CallsArgs {
     /// Root symbol (substring of a qualified name); `main` is a good start.
     symbol: String,
@@ -673,6 +721,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Outline(args) => run_outline(args, log, out),
         Command::Entries(args) => run_entries(args, log, out),
         Command::Crates(args) => run_crates(args, log, out),
+        Command::Advise(args) => run_advise(args, log, out),
         Command::Calls(args) => run_calls(args, log, out),
         Command::Callers(args) => run_callers(args, log, out),
         Command::Impact(args) => run_impact(args, log, out),
@@ -1467,6 +1516,29 @@ fn run_crates(mut args: CratesArgs, log_override: Option<&str>, out: Out) -> Res
             "{}",
             lcw_agent::fit_text(out.budget, args.limit, |l| {
                 lcw_agent::crates::crates_text(&view, l)
+            })
+        );
+    }
+    Ok(())
+}
+
+fn run_advise(mut args: AdviseArgs, log_override: Option<&str>, out: Out) -> Result<()> {
+    if let Some(dir) = args.dir.take() {
+        args.repo.path = dir;
+    }
+    let repo = load_repo(&args.repo, log_override)?;
+    let findings = lcw_agent::advise::advise_repo(&repo, &repo.graph, args.dimension.dimension());
+    let excluded = !repo.exclude.is_empty();
+    if args.json {
+        let v = lcw_agent::fit_json(out.budget, |l| {
+            lcw_agent::advise::advise_json(&findings, excluded, args.limit.min(l))
+        });
+        out.print_json(&v)?;
+    } else {
+        print!(
+            "{}",
+            lcw_agent::fit_text(out.budget, args.limit, |l| {
+                lcw_agent::advise::advise_text(&findings, l)
             })
         );
     }
